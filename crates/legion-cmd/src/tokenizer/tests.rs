@@ -489,6 +489,61 @@ fn dynamic_command_from_an_embedded_unquoted_parameter_expansion_is_opaque() {
 }
 
 #[test]
+fn dynamic_command_from_a_mixed_quoted_and_live_substitution_is_opaque() {
+    // `'lit'$(cmd)`: the `'lit'` part is quoted (word-level `quoted` is
+    // `true`), but the `$(cmd)` part is a live, unquoted command
+    // substitution -- `live_expansion` tracks that precisely, where a
+    // word-level `!quoted` check would have missed it. The `$(cmd)`
+    // substitution's own body ("cmd") is still separately recursed into
+    // (a command substitution's inner source is always resolved, whether
+    // or not the outer word ends up naming a command), so it is the one
+    // invocation expected here -- the literal head "lit$(...)" must not
+    // also resolve as a second invocation.
+    let scan = scan("'lit'$(cmd) -rn foo").expect("valid");
+    assert!(
+        invocation(&scan, "cmd").is_some(),
+        "the substitution body itself still resolves"
+    );
+    assert!(
+        invocation(&scan, "lit$(...)").is_none(),
+        "the literal head must not resolve as a command"
+    );
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+}
+
+#[test]
+fn dynamic_command_from_a_double_quoted_prefix_with_an_expansion_is_opaque() {
+    // `"gh"${IFS}x`: the `"gh"` part is double-quoted, `${IFS}` follows
+    // it unquoted -- still a live expansion, so the whole word is opaque.
+    let scan = scan("\"gh\"${IFS}x").expect("valid");
+    assert!(
+        scan.invocations.is_empty(),
+        "must not resolve an invocation"
+    );
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+}
+
+#[test]
+fn a_fully_single_quoted_dollar_command_name_is_an_ordinary_literal() {
+    // `'$literal'` as a command name: entirely single-quoted, so the `$`
+    // is inert text, never an expansion -- unlike the mixed-quoting case
+    // above, this must resolve as a plain (if unusual) invocation, not
+    // `Opaque::DynamicCommand`.
+    let scan = scan("'$literal' -x").expect("valid");
+    let inv = invocation(&scan, "$literal").expect("resolved as a literal binary name");
+    assert_eq!(inv.args, vec!["-x"]);
+    assert!(scan.opaque.is_empty());
+}
+
+#[test]
 fn a_quoted_dollar_inside_an_argument_stays_an_ordinary_argument() {
     // Only the command-name word is checked for an unquoted expansion;
     // a quoted `$` in an ARGUMENT is inert text and must resolve as a

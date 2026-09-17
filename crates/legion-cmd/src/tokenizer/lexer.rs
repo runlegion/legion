@@ -11,12 +11,21 @@ pub(super) struct Word {
     pub(super) text: String,
     /// Any part of the word was quoted or backslash-escaped.
     pub(super) quoted: bool,
-    /// The word is exactly one command substitution or backtick
-    /// substitution, and nothing else -- `$(which rg)` as a whole word.
-    pub(super) whole_subst: bool,
     /// Inner source text of each `$()`, backtick, or `<()`/`>()` inside the
     /// word, in order.
     pub(super) substs: Vec<String>,
+    /// The word carries at least one `$` expansion or backtick
+    /// substitution that the shell would actually evaluate: a bare
+    /// `$VAR`/`$@`/`$1`/..., `${...}`, `$(...)`, `$((...))`, or a
+    /// backtick, read outside single quotes (single quotes suppress
+    /// expansion entirely; double quotes do not -- `"$(x)"` and
+    /// `"${IFS}"` are just as live as their unquoted spellings, only
+    /// their word-splitting differs). Unlike [`Word::quoted`], this is
+    /// precise about *which* part of the word is live: a word like
+    /// `'lit'$(cmd)` is `quoted` (the `'lit'` part) but also carries a
+    /// live expansion (the `$(cmd)` part), and this flag says so where
+    /// `quoted` alone cannot.
+    pub(super) live_expansion: bool,
 }
 
 /// Which kind of command boundary a [`Tok::Sep`] is (FR-CMD-008): a plain
@@ -79,10 +88,19 @@ pub(super) fn is_meta(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>' | '\n')
 }
 
+/// True when `c` is a character that starts a `$` parameter reference
+/// (a named or positional variable, or one of the special `$@`/`$*`/`$#`/
+/// `$?`/`$!`/`$-` parameters) -- the same first-character test
+/// [`Scanner::read_dollar`]'s bare-variable arm uses, shared here so
+/// [`Scanner::read_double`] can recognize a bare `$VAR` it does not
+/// itself parse.
+fn is_dollar_reference_start(c: Option<char>) -> bool {
+    matches!(c, Some(c) if c.is_ascii_alphanumeric() || c == '_' || matches!(c, '@' | '*' | '#' | '?' | '!' | '-'))
+}
+
 /// What a `$...` construct parsed to: its literal replacement text, the
-/// inner source of a command substitution when it is one (so the caller can
-/// recurse into it and, for a bare `$(...)` word, count it toward
-/// [`Word::whole_subst`]), and whether it was quoted (`$'...'`).
+/// inner source of a command substitution when it is one (so the caller
+/// can recurse into it), and whether it was quoted (`$'...'`).
 struct DollarPart {
     text: String,
     subst: Option<String>,
@@ -382,7 +400,6 @@ impl Scanner {
     fn read_word(&mut self) -> Result<Option<Word>, ScanError> {
         let mut w = Word::default();
         let start = self.i;
-        let mut substs_at_start = 0usize;
         while let Some(ch) = self.peek(0) {
             if ch == ' ' || ch == '\t' || ch == '\r' || is_meta(ch) {
                 if matches!(ch, '<' | '>')
@@ -446,21 +463,23 @@ impl Scanner {
                 }
                 '`' => {
                     let inner = self.read_backtick()?;
-                    if w.text.is_empty() {
-                        substs_at_start += 1;
-                    }
                     w.text.push_str("`...`");
                     w.substs.push(inner);
+                    w.live_expansion = true;
                 }
                 '$' => {
                     let part = self.read_dollar()?;
                     if part.quoted {
                         w.quoted = true;
+                    } else if part.text != "$" {
+                        // Anything but a lone, unformed `$` (`$'...'` is
+                        // `quoted`; a `$` followed by nothing that forms a
+                        // reference is a literal dollar sign) is a live
+                        // expansion: `$((...))`, `$(...)`, `${...}`, or a
+                        // bare `$VAR`/`$@`/`$1`/... that actually matched.
+                        w.live_expansion = true;
                     }
                     if let Some(inner) = part.subst {
-                        if w.text.is_empty() {
-                            substs_at_start += 1;
-                        }
                         w.substs.push(inner);
                     }
                     w.text.push_str(&part.text);
@@ -471,9 +490,6 @@ impl Scanner {
                 }
             }
         }
-        w.whole_subst = w.substs.len() == 1
-            && substs_at_start == 1
-            && (w.text == "$(...)" || w.text == "`...`");
         Ok(Some(w))
     }
 
@@ -631,11 +647,26 @@ impl Scanner {
                         w.substs.push(inner);
                     }
                     w.text.push_str(&part.text);
+                    w.live_expansion = true;
+                }
+                '$' if is_dollar_reference_start(self.peek(1)) => {
+                    // A bare `$VAR`/`$@`/`$1`/... inside double quotes
+                    // still expands -- double quotes only change
+                    // word-splitting, not expansion -- even though this
+                    // scanner does not parse the variable name here (it
+                    // falls through to the default arm below, one char at
+                    // a time). Marking it live is enough: resolve_at does
+                    // not need the resolved value, only whether the head
+                    // is statically known.
+                    w.live_expansion = true;
+                    w.text.push('$');
+                    self.i += 1;
                 }
                 '`' => {
                     let inner = self.read_backtick()?;
                     w.text.push_str("`...`");
                     w.substs.push(inner);
+                    w.live_expansion = true;
                 }
                 _ => {
                     w.text.push(c);

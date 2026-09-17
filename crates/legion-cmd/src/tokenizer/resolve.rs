@@ -272,21 +272,21 @@ fn resolve_at(
     out: &mut Scan,
 ) -> Result<(), ScanError> {
     let Some(w) = words.get(i) else { return Ok(()) };
-    if w.whole_subst
-        || (w.text.starts_with('$') && w.text.len() > 1)
-        || (!w.quoted && (w.text.contains('$') || w.text.contains('`')))
-    {
-        // A bare `$VAR`, `$@`, `$*`, `${...}`, a whole-word substitution,
-        // or ANY unquoted parameter expansion or substitution anywhere in
-        // the command name word (e.g. `gh${IFS}issue${IFS}list`, where the
+    if w.live_expansion {
+        // The command-name word carries a live `$` expansion or backtick
+        // substitution somewhere in it -- a bare `$VAR`/`$@`/`$*`,
+        // `${...}`, `$(...)`, `$((...))`, or a backtick -- built or
+        // reshaped at runtime, not resolvable without executing it. This
+        // is precise about *where*: `gh${IFS}issue${IFS}list` (the
         // shell's own word-splitting after expansion turns one token into
-        // the governed `gh issue list`): built or reshaped at runtime, not
-        // resolvable without executing it. The first two arms hold even
-        // when the word was written `"$@"` (quoted for correct
-        // word-splitting) -- quoting changes how the shell splits the
-        // result, not whether the head is known ahead of execution; the
-        // third arm is `!w.quoted`-gated because a fully single-quoted
-        // `$` (`'$literal'`) is inert text, never an expansion.
+        // the governed `gh issue list`) and `'lit'$(cmd)` (only part of
+        // the word is quoted) both set it, while a fully single-quoted
+        // `'$literal'` never does -- single quotes suppress expansion
+        // entirely, so that `$` is inert text, not a reference. Double
+        // quotes do not suppress expansion (only word-splitting), so
+        // `"$@"` and `"${IFS}"` set it just as their unquoted spellings
+        // do; see `Word::live_expansion`'s doc for how each case is
+        // tracked at the point it is read.
         out.opaque.push(Opaque::DynamicCommand);
         return Ok(());
     }
