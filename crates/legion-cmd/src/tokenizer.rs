@@ -567,7 +567,6 @@ impl ScanCtx<'_> {
 struct Word {
     text: String,
     is_assignment: bool,
-    assignment_name: Option<String>,
     has_dynamic_fragment: bool,
     leading_backslash_literal: bool,
 }
@@ -918,15 +917,23 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         }
     }
 
+    /// True when the next character ends a simple command outright (end of
+    /// input, a newline, or a `;`/`|`/`&` operator) rather than starting
+    /// another word. Shared by every site that needs to tell "nothing more
+    /// to read here" from "there is another word."
+    fn at_command_boundary(&self) -> bool {
+        matches!(
+            self.peek(),
+            None | Some('\n') | Some(';') | Some('|') | Some('&')
+        )
+    }
+
     /// Reads and discards one word (a loop variable, a `for ... in` list
     /// item) without classifying it as an invocation, but still resolving
     /// any substitutions it contains so nested invocations are not missed.
     fn skip_word_no_classify(&mut self) -> Result<(), ScanError> {
         self.skip_horizontal_space();
-        if matches!(
-            self.peek(),
-            None | Some('\n') | Some(';') | Some('|') | Some('&')
-        ) {
+        if self.at_command_boundary() {
             return Ok(());
         }
         self.read_word(&[])?;
@@ -992,10 +999,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
                     }
                     self.pos += 3;
                     self.skip_horizontal_space();
-                    if !matches!(
-                        self.peek(),
-                        None | Some('\n') | Some('|') | Some('&') | Some(';')
-                    ) {
+                    if !self.at_command_boundary() {
                         let _ = self.read_word(&[])?;
                     }
                     return Ok(None);
@@ -1233,10 +1237,7 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
             self.pos += 1;
         }
         self.skip_horizontal_space();
-        if !matches!(
-            self.peek(),
-            None | Some('\n') | Some('|') | Some('&') | Some(';')
-        ) {
+        if !self.at_command_boundary() {
             let _ = self.read_word(&[])?;
         }
         Ok(())
@@ -1456,7 +1457,6 @@ impl<'ctx, 'a> ListParser<'ctx, 'a> {
         }
         if i < bytes.len() && bytes[i] == '=' {
             word.is_assignment = true;
-            word.assignment_name = Some(bytes[..i].iter().collect());
         }
     }
 

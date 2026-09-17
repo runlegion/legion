@@ -33,6 +33,7 @@ enum Verdict {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Row {
     id: String,
     cmd: String,
@@ -45,9 +46,21 @@ struct Row {
     forbidden: Vec<String>,
     #[serde(default)]
     source: Option<String>,
+    /// A free-text explanation some rows carry; not asserted on, but a
+    /// recognized field so `deny_unknown_fields` does not reject it.
+    #[serde(default)]
+    note: Option<String>,
 }
 
 const BATTERY_JSON: &str = include_str!("fixtures/battery.json");
+
+/// Parses the battery fixture once per call site; a malformed row (a typo'd
+/// expectation key, thanks to `deny_unknown_fields`) fails here, at parse
+/// time, rather than silently deserializing to an empty default that
+/// asserts nothing.
+fn rows() -> Vec<Row> {
+    serde_json::from_str(BATTERY_JSON).expect("battery.json parses")
+}
 
 fn opaque_matches(entry: &Opaque, expected: &str) -> bool {
     match entry {
@@ -65,7 +78,7 @@ fn opaque_matches(entry: &Opaque, expected: &str) -> bool {
 
 #[test]
 fn battery_has_88_rows_72_research_plus_16_derived() {
-    let rows: Vec<Row> = serde_json::from_str(BATTERY_JSON).expect("battery.json parses");
+    let rows: Vec<Row> = rows();
     assert_eq!(
         rows.len(),
         88,
@@ -84,7 +97,7 @@ fn battery_has_88_rows_72_research_plus_16_derived() {
 
 #[test]
 fn battery_row_ids_are_unique() {
-    let rows: Vec<Row> = serde_json::from_str(BATTERY_JSON).expect("battery.json parses");
+    let rows: Vec<Row> = rows();
     let mut ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     ids.sort_unstable();
     let mut deduped = ids.clone();
@@ -94,7 +107,7 @@ fn battery_row_ids_are_unique() {
 
 #[test]
 fn battery_matches_expected_verdict_per_row() {
-    let rows: Vec<Row> = serde_json::from_str(BATTERY_JSON).expect("battery.json parses");
+    let rows: Vec<Row> = rows();
     let total = rows.len();
     let mut unexpected_errors: Vec<String> = Vec::new();
 
