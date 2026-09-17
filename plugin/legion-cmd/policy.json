@@ -57,8 +57,9 @@
               "predicate": { "arg_equals": "list" },
               "outcome": {
                 "kind": "rewrite",
-                "target": "legion issue list",
-                "reason": "gh issue list duplicates legion's own issue tracking surface"
+                "target": "legion issue list --repo {repo}",
+                "reason": "gh issue list duplicates legion's own issue tracking surface",
+                "exact_args": ["issue", "list"]
               }
             }
           ]

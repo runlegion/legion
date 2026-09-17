@@ -86,13 +86,11 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     // FR-CMD-007: a compound command whose job `legion sym` serves is
     // never allowed or proxied, regardless of what the rest of the
     // command's parts would otherwise decide. This is checked and
-    // returned before the strictest-order fold below, deliberately: today
-    // every sym job yields Deny, which the fold would also produce on its
-    // own, but #1228 turns the lossless cases into Rewrite -- weaker than
-    // Proxy in fold order -- so once that lands, a sym-job Rewrite folded
-    // alongside an unrelated Proxy part would wrongly lose to the Proxy.
-    // Deciding the sym job first, outside the fold, keeps "never allowed
-    // or proxied" true regardless of what #1228 changes.
+    // returned before the strictest-order fold below: a sym job always
+    // denies naming the sym command (see `find_sym_job`'s doc for why it
+    // never rewrites), which the fold would also produce on its own for
+    // this part alone, but only deciding it first keeps "never allowed or
+    // proxied" true regardless of what a sibling part's own decision is.
     if let Some((job_id, sym_command, matched_description)) =
         find_sym_job(&policy.sym_jobs, &scan.invocations, &scan.opaque)
     {
@@ -121,7 +119,36 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         .collect();
     parts.extend(scan.opaque.iter().map(|_| opaque_part()));
 
-    fold(parts, facts)
+    gate_rewrite_on_whole_command(fold(parts, facts), scan.is_single_simple_command)
+}
+
+/// FR-CMD-008: the harness that acts on a [`Decision::Rewrite`] replaces
+/// the WHOLE command string with the rewrite's target, so a rewrite is
+/// lossless only when the invocation it targets IS the whole command --
+/// `scan.is_single_simple_command` is that fact. Wraps only the
+/// strictest-order fold's result, since that is the one place a
+/// [`Decision::Rewrite`] can come from: a sym job never rewrites (it
+/// always denies naming the sym command, see `find_sym_job`'s doc) and
+/// returns before this ever runs, so this gate governs family rewrites
+/// alone, in route rather than needing a matching check in the adapter.
+fn gate_rewrite_on_whole_command(routed: Routed, is_single_simple_command: bool) -> Routed {
+    if is_single_simple_command {
+        return routed;
+    }
+    match routed.decision {
+        Decision::Rewrite { target, .. } => Routed {
+            decision: Decision::deny_infallible(
+                format!(
+                    "the command is not just {}; a rewrite would replace the whole command and drop the rest of it",
+                    target.as_str()
+                ),
+                target.as_str().to_string(),
+            ),
+            facts: routed.facts,
+            entry: routed.entry,
+        },
+        _ => routed,
+    }
 }
 
 fn bash_tool_rules(
@@ -250,6 +277,14 @@ fn evaluate_invocation(
 /// predicate matches but whose required lookup is missing counts as
 /// resolved-but-blocked (FR-CMD-016's missing-lookup default), not as a
 /// non-match that falls through to the next rule.
+///
+/// A matched rule whose decision is [`Decision::Rewrite`] and whose
+/// `exact_args` is declared (FR-CMD-008) is checked against `input`'s
+/// arguments before its decision is trusted: the invocation's arguments
+/// must equal `exact_args` exactly, or it denies naming the rewrite's
+/// target instead of rewriting. `exact_args` is `None` for a Fields
+/// rule's Rewrite (`parse_policy` forbids it there), so this never runs
+/// against `MatchInput::Json`.
 fn evaluate_rules(
     rules: &[Rule],
     input: MatchInput<'_>,
@@ -263,6 +298,25 @@ fn evaluate_rules(
             return (
                 deny_default(default_messages::MISSING_LOOKUP),
                 DecidingEntry::Default,
+            );
+        }
+        if let (Decision::Rewrite { target, .. }, MatchInput::Args(args), Some(exact_args)) =
+            (&rule.decision, input, &rule.exact_args)
+            && let Some(bad_arg) = first_differing_arg(exact_args, args)
+        {
+            let decision = Decision::deny_infallible(
+                format!(
+                    "argument {bad_arg:?} has no lossless translation to {}",
+                    target.as_str()
+                ),
+                target.as_str().to_string(),
+            );
+            return (
+                decision,
+                DecidingEntry::Rule {
+                    id: rule.id.clone(),
+                    needs_operator: false,
+                },
             );
         }
         return (
@@ -279,6 +333,24 @@ fn evaluate_rules(
         deny_default(default_messages::UNRESOLVED_MANAGED_RULE),
         DecidingEntry::Default,
     )
+}
+
+/// The first argument where `args` differs from `exact_args`, or `None`
+/// when they are exactly equal (FR-CMD-008): an extra or mismatched
+/// argument is named directly; an argument `exact_args` expects but
+/// `args` is too short to carry is named as `(missing "<word>")`, so the
+/// deny built from it always names something concrete.
+fn first_differing_arg(exact_args: &[String], args: &[String]) -> Option<String> {
+    if args == exact_args {
+        return None;
+    }
+    let len = args.len().max(exact_args.len());
+    (0..len).find_map(|i| match (args.get(i), exact_args.get(i)) {
+        (Some(a), Some(e)) if a == e => None,
+        (Some(a), _) => Some(a.clone()),
+        (None, Some(e)) => Some(format!("(missing {e:?})")),
+        (None, None) => None,
+    })
 }
 
 fn missing_required_lookup(requires: &[RequiredLookup], ctx: &Context) -> bool {
@@ -304,14 +376,23 @@ fn opaque_part() -> (Decision, DecidingEntry) {
 }
 
 /// Checks every sym job against the whole command, in declared order,
-/// returning the first one that matches. An [`crate::policy::SymJobMatcher::Invocation`]
-/// job is checked against every resolved [`Invocation`] (any position or
-/// depth, so `sh -c` and pipelines count); an
-/// [`crate::policy::SymJobMatcher::InterpreterPatterns`] job is checked
-/// against every [`Opaque::Interpreter`] body, requiring all of its
-/// patterns to appear. Declared order matters for both: a policy author
-/// lists a job's more specific match before a broader one so the more
-/// specific job wins when both would otherwise match the same command.
+/// returning the first one that matches: its id, its `sym_command`, and a
+/// description of what matched, for the deny reason built from it. An
+/// [`crate::policy::SymJobMatcher::Invocation`] job is checked against
+/// every resolved [`Invocation`] (any position or depth, so `sh -c` and
+/// pipelines count); an [`crate::policy::SymJobMatcher::InterpreterPatterns`]
+/// job is checked against every [`Opaque::Interpreter`] body, requiring
+/// all of its patterns to appear. Declared order matters for both: a
+/// policy author lists a job's more specific match before a broader one
+/// so the more specific job wins when both would otherwise match the
+/// same command.
+///
+/// A sym job never rewrites (FR-CMD-008): identifying a search invocation
+/// requires at least one argument (a recursive flag, a search pattern),
+/// and nothing carries an argument into a rewrite target today -- so no
+/// declaration could ever cover a real match. Rewriting a sym-served
+/// search needs an argument-carrying template, which does not exist yet;
+/// until it does, every match here denies naming `sym_command`.
 fn find_sym_job(
     sym_jobs: &[SymJob],
     invocations: &[Invocation],
@@ -599,8 +680,9 @@ mod tests {
                                 "predicate": {"arg_equals": "list"},
                                 "outcome": {
                                     "kind": "rewrite",
-                                    "target": "legion issue list",
-                                    "reason": "gh issue list duplicates legion's issue tracking surface"
+                                    "target": "legion issue list --repo {repo}",
+                                    "reason": "gh issue list duplicates legion's issue tracking surface",
+                                    "exact_args": ["issue", "list"]
                                 }
                             }
                         ]
@@ -671,7 +753,9 @@ mod tests {
     fn rewrite_arm_from_a_family_rule() {
         let routed = evaluate(&policy(), &bash_call("gh issue list"), &Context::default());
         match routed.decision {
-            Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion issue list"),
+            Decision::Rewrite { target, .. } => {
+                assert_eq!(target.as_str(), "legion issue list --repo {repo}")
+            }
             other => panic!("expected Rewrite, got {other:?}"),
         }
         assert_eq!(
@@ -681,6 +765,80 @@ mod tests {
                 needs_operator: false
             }
         );
+    }
+
+    #[test]
+    fn family_rewrite_with_an_untranslatable_flag_denies_naming_the_target() {
+        // FR-CMD-008 applies to every rewrite, not only sym jobs: "--repo"
+        // (the gh flag, distinct from the target's own `{repo}`
+        // placeholder) is not one of the "gh-issue-list" rule's
+        // `exact_args`, so it denies naming the target instead of
+        // silently dropping the flag.
+        let routed = evaluate(
+            &policy(),
+            &bash_call("gh issue list --repo other/org"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion issue list --repo {repo}");
+                assert!(
+                    details.reason().contains("\"--repo\""),
+                    "reason should name the untranslatable flag: {}",
+                    details.reason()
+                );
+            }
+            other => panic!("expected Deny naming the target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn family_rewrite_composed_with_another_command_denies_instead_of_rewriting_the_whole_command()
+    {
+        // FR-CMD-008: the harness replaces the WHOLE command string, so a
+        // family rewrite that would otherwise be lossless still does not
+        // rewrite when it is not the whole command.
+        let routed = evaluate(
+            &policy(),
+            &bash_call("gh issue list | head"),
+            &Context::default(),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion issue list --repo {repo}")
+            }
+            other => panic!("expected Deny naming the target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn family_rewrite_shorter_than_exact_args_names_the_missing_word() {
+        // first_differing_arg's (None, Some(_)) arm: the invocation is
+        // shorter than the rule's exact_args, so the deny names the
+        // expected word the invocation never supplied.
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "gh-two-words", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion gh", "reason": "why",
+                         "exact_args": ["a", "b"]}}
+        ]}}}}}"#;
+        let short_policy = parse_policy(text).expect("valid test policy");
+        let routed = evaluate(&short_policy, &bash_call("gh a"), &Context::default());
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), "legion gh");
+                assert!(
+                    details.reason().contains("missing"),
+                    "reason should name the missing expected word: {}",
+                    details.reason()
+                );
+                assert!(
+                    details.reason().contains('b'),
+                    "reason should name the specific missing word: {}",
+                    details.reason()
+                );
+            }
+            other => panic!("expected Deny naming the target, got {other:?}"),
+        }
     }
 
     #[test]

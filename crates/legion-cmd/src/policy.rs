@@ -88,6 +88,39 @@ pub enum PolicyError {
     /// invocation matcher.
     #[error("{pointer}: {message}")]
     MismatchedPredicateKind { pointer: String, message: String },
+
+    /// A rewrite outcome's `target` names a `{...}` placeholder other than
+    /// `{repo}` (FR-CMD-008). `route` passes `target` through unchanged;
+    /// `{repo}`, substituted from `Context.repo` by the adapter, is the
+    /// only placeholder any downstream code fills in. Any other
+    /// placeholder -- or an unterminated `{` -- would reach the agent
+    /// unresolved.
+    #[error(
+        "{pointer}: rewrite target names an unsupported placeholder \"{{{placeholder}}}\"; only \"{{repo}}\" is supported"
+    )]
+    UnsupportedRewriteTargetPlaceholder {
+        pointer: String,
+        placeholder: String,
+    },
+
+    /// A Bash family rule's outcome is `"rewrite"` with no `"exact_args"`
+    /// declaration (FR-CMD-008): the rewrite fires only when the matched
+    /// invocation's arguments equal `exact_args` exactly, so a rewrite
+    /// with nothing declared has no defined eligibility at all.
+    #[error(
+        "{pointer}: a \"rewrite\" outcome on a Bash family rule must declare \"exact_args\" (FR-CMD-008)"
+    )]
+    MissingRewriteExactArgs { pointer: String },
+
+    /// A Fields rule's outcome is `"rewrite"`. No Fields rewrite semantics
+    /// exist: FR-CMD-008's lossless check reads an invocation's argument
+    /// list, which a Fields call's JSON input does not have, so nothing
+    /// could ever judge such a rewrite lossless -- rejected outright
+    /// rather than accepted with no eligibility check at all.
+    #[error(
+        "{pointer}: a Fields rule cannot use a \"rewrite\" outcome; no Fields rewrite semantics exist"
+    )]
+    RewriteUnsupportedOnFieldsRule { pointer: String },
 }
 
 /// The tool kinds the policy can route on (FR-CMD-011). A `Bash` call
@@ -360,6 +393,17 @@ fn looks_like_a_file_name(operand: &str) -> bool {
 /// (see [`convert_decision`]). `needs_operator` (FR-CMD-006) is only
 /// meaningful when `decision` is [`Decision::Ask`]; it is always `false`
 /// otherwise.
+///
+/// `exact_args` is FR-CMD-008's lossless-rewrite declaration for this
+/// rule: when `decision` is [`Decision::Rewrite`], `parse_policy`
+/// requires it (see [`PolicyError::MissingRewriteExactArgs`]), and
+/// `evaluate` rewrites only when the matched invocation's arguments equal
+/// `exact_args` exactly, denying naming the target otherwise. It is
+/// always `None` for every other decision kind. A Fields rule can never
+/// have a `Decision::Rewrite` at all (see
+/// [`PolicyError::RewriteUnsupportedOnFieldsRule`]): no Fields rewrite
+/// semantics exist, since a Fields call's JSON input has no argument
+/// list to judge losslessness against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
@@ -367,6 +411,7 @@ pub struct Rule {
     pub requires: Vec<RequiredLookup>,
     pub decision: Decision,
     pub needs_operator: bool,
+    pub exact_args: Option<Vec<String>>,
 }
 
 /// One job `legion sym` serves (FR-CMD-007): the sym command that job maps
@@ -375,6 +420,10 @@ pub struct Rule {
 /// split into args, e.g. `grep -rn foo src` at any position or depth), or
 /// the raw text of an [`crate::Opaque::Interpreter`] body the tokenizer
 /// cannot parse into args at all (e.g. a Python one-liner).
+///
+/// A sym job never rewrites: it always denies naming `sym_command`. See
+/// [`crate::evaluate`]'s `find_sym_job` for why -- rewriting a sym-served
+/// search needs an argument-carrying template that does not exist yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymJob {
     pub id: String,
@@ -625,26 +674,66 @@ fn convert_rules(
                 context,
                 &raw_rule.predicate,
             )?;
-            let (decision, needs_operator) =
-                convert_decision(&format!("{rule_pointer}/outcome"), &raw_rule.outcome)?;
+            let (decision, needs_operator, exact_args) = convert_decision(
+                &format!("{rule_pointer}/outcome"),
+                context,
+                &raw_rule.outcome,
+            )?;
             Ok(Rule {
                 id: raw_rule.id,
                 predicate: raw_rule.predicate,
                 requires: raw_rule.requires,
                 decision,
                 needs_operator,
+                exact_args,
             })
         })
         .collect()
 }
 
-/// Converts a rule's raw `outcome` JSON into a validated [`Decision`] plus
-/// its `needs_operator` mark. Building the `Decision` through its own
-/// constructors (`Decision::deny`, `Decision::ask`, `ProxyReason::try_from`)
-/// rather than re-implementing their non-empty checks here means the two
-/// cannot drift apart, and nothing downstream needs to `.expect()` past an
-/// invariant this function already enforced.
-fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), PolicyError> {
+/// Rejects a rewrite `target` naming a `{...}` placeholder other than
+/// `{repo}` (FR-CMD-008): `route` passes `target` through unchanged, so
+/// `{repo}` -- substituted from `Context.repo` by the adapter -- is the
+/// only placeholder any downstream code fills in. An unterminated `{` is
+/// rejected the same way: whatever follows it can never be a valid
+/// placeholder either.
+fn validate_rewrite_target(pointer: &str, target: &str) -> Result<(), PolicyError> {
+    let mut rest = target;
+    while let Some(open) = rest.find('{') {
+        let after_open = &rest[open + 1..];
+        let placeholder_and_rest = after_open.find('}').map(|close| {
+            let (placeholder, after_close) = after_open.split_at(close);
+            (placeholder, &after_close[1..])
+        });
+        let Some((placeholder, after_close)) = placeholder_and_rest else {
+            return Err(PolicyError::UnsupportedRewriteTargetPlaceholder {
+                pointer: pointer.to_string(),
+                placeholder: after_open.to_string(),
+            });
+        };
+        if placeholder != "repo" {
+            return Err(PolicyError::UnsupportedRewriteTargetPlaceholder {
+                pointer: pointer.to_string(),
+                placeholder: placeholder.to_string(),
+            });
+        }
+        rest = after_close;
+    }
+    Ok(())
+}
+
+/// Converts a rule's raw `outcome` JSON into a validated [`Decision`],
+/// its `needs_operator` mark, and -- for a `"rewrite"` outcome -- its
+/// FR-CMD-008 `exact_args` declaration. Building the `Decision` through
+/// its own constructors (`Decision::deny`, `Decision::ask`,
+/// `ProxyReason::try_from`) rather than re-implementing their non-empty
+/// checks here means the two cannot drift apart, and nothing downstream
+/// needs to `.expect()` past an invariant this function already enforced.
+fn convert_decision(
+    pointer: &str,
+    context: PredicateContext,
+    value: &Value,
+) -> Result<(Decision, bool, Option<Vec<String>>), PolicyError> {
     let kind =
         value
             .get("kind")
@@ -678,6 +767,16 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
             ),
         });
     }
+    // `exact_args` (FR-CMD-008) only means anything on a `rewrite`
+    // outcome, the same reasoning as `needs_operator` above.
+    if kind != "rewrite" && value.get("exact_args").is_some() {
+        return Err(PolicyError::InvalidOutcome {
+            pointer: pointer.to_string(),
+            message: format!(
+                "\"exact_args\" only applies to a \"rewrite\" outcome, not \"{kind}\""
+            ),
+        });
+    }
 
     match kind {
         "allow" => Ok((
@@ -685,16 +784,46 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                 note: field("note"),
             },
             false,
+            None,
         )),
         "rewrite" => {
+            // No Fields rewrite semantics exist (FR-CMD-008): a Fields
+            // call's JSON input has no argument list to judge losslessness
+            // against, so a "rewrite" outcome here is rejected outright
+            // rather than accepted with no eligibility check at all.
+            if let PredicateContext::Fields = context {
+                return Err(PolicyError::RewriteUnsupportedOnFieldsRule {
+                    pointer: pointer.to_string(),
+                });
+            }
             let target = required_field("target")?;
             let reason = required_field("reason")?;
+            validate_rewrite_target(&format!("{pointer}/target"), &target)?;
+            // FR-CMD-008: a rewrite fires only when the matched
+            // invocation's arguments equal `exact_args` exactly.
+            let exact_args = match value.get("exact_args") {
+                Some(raw) => {
+                    let args: Vec<String> = serde_json::from_value(raw.clone()).map_err(|e| {
+                        PolicyError::InvalidOutcome {
+                            pointer: format!("{pointer}/exact_args"),
+                            message: format!("invalid \"exact_args\": {e}"),
+                        }
+                    })?;
+                    args
+                }
+                None => {
+                    return Err(PolicyError::MissingRewriteExactArgs {
+                        pointer: pointer.to_string(),
+                    });
+                }
+            };
             Ok((
                 Decision::Rewrite {
                     target: ManagedTarget::new(target),
                     reason,
                 },
                 false,
+                Some(exact_args),
             ))
         }
         "proxy" => {
@@ -709,7 +838,7 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                     value: raw_reason,
                 }
             })?;
-            Ok((Decision::Proxy { reason }, false))
+            Ok((Decision::Proxy { reason }, false, None))
         }
         "deny" => {
             let reason = field("reason").unwrap_or_default();
@@ -720,7 +849,7 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                     message: "a \"deny\" outcome must have a non-empty \"reason\" and \"instead\""
                         .to_string(),
                 })?;
-            Ok((decision, false))
+            Ok((decision, false, None))
         }
         "ask" => {
             let question = field("question").unwrap_or_default();
@@ -733,7 +862,7 @@ fn convert_decision(pointer: &str, value: &Value) -> Result<(Decision, bool), Po
                 .get("needs_operator")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            Ok((decision, needs_operator))
+            Ok((decision, needs_operator, None))
         }
         other => Err(PolicyError::UnknownDecisionKind {
             pointer: pointer.to_string(),
@@ -1004,6 +1133,170 @@ mod tests {
             }
             other => panic!("expected Invocation matcher, got {other:?}"),
         }
+    }
+
+    // -- FR-CMD-008 applies to every rewrite, not only sym jobs: a Bash
+    // family rule's "rewrite" outcome must declare "exact_args", and a
+    // Fields rule's must not (it has no argument list to check). A sym
+    // job never declares a rewrite at all -- see find_sym_job's doc.
+
+    #[test]
+    fn bash_family_rewrite_outcome_without_exact_args_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "why"}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::MissingRewriteExactArgs { pointer } => {
+                assert_eq!(pointer, "/tools/Bash/families/gh issue/rules/0/outcome");
+            }
+            other => panic!("expected MissingRewriteExactArgs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_family_rewrite_outcome_with_exact_args_parses() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "why",
+                         "exact_args": ["issue", "list"]}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("valid exact_args rewrite should parse");
+        match policy.tools.get(&ToolKind::Bash) {
+            Some(ToolRules::Bash { families, .. }) => {
+                let rule = &families.get("gh issue").expect("gh issue family").rules[0];
+                assert_eq!(
+                    rule.exact_args.as_deref(),
+                    Some(["issue".to_string(), "list".to_string()].as_slice())
+                );
+            }
+            other => panic!("expected Bash families, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_family_rewrite_outcome_with_empty_exact_args_parses() {
+        // An empty list is not meaningless -- it declares a rewrite whose
+        // invocation must carry no argument at all.
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh": {"rules": [
+            {"id": "r1", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion gh", "reason": "why",
+                         "exact_args": []}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("an empty exact_args declaration should parse");
+        match policy.tools.get(&ToolKind::Bash) {
+            Some(ToolRules::Bash { families, .. }) => {
+                let rule = &families.get("gh").expect("gh family").rules[0];
+                assert_eq!(rule.exact_args.as_deref(), Some([].as_slice()));
+            }
+            other => panic!("expected Bash families, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fields_rule_rewrite_outcome_with_exact_args_is_rejected_with_pointer() {
+        // No Fields rewrite semantics exist: the "rewrite" outcome kind
+        // itself is rejected on a Fields rule, not just its exact_args.
+        let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
+            {"id": "r1", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion edit", "reason": "why",
+                         "exact_args": ["x"]}}
+        ]}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::RewriteUnsupportedOnFieldsRule { pointer } => {
+                assert_eq!(pointer, "/tools/Edit/rules/0/outcome");
+            }
+            other => panic!("expected RewriteUnsupportedOnFieldsRule, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fields_rule_rewrite_outcome_without_exact_args_is_still_rejected_with_pointer() {
+        let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
+            {"id": "r1", "predicate": "always",
+             "outcome": {"kind": "rewrite", "target": "legion edit", "reason": "why"}}
+        ]}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::RewriteUnsupportedOnFieldsRule { pointer } => {
+                assert_eq!(pointer, "/tools/Edit/rules/0/outcome");
+            }
+            other => panic!("expected RewriteUnsupportedOnFieldsRule, got {other:?}"),
+        }
+    }
+
+    // -- Rewrite target placeholders: only {repo} is supported
+    // (FR-CMD-008) --------------------------------------------------------
+
+    #[test]
+    fn rewrite_target_with_the_repo_placeholder_parses() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                         "reason": "why", "exact_args": ["issue", "list"]}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("the {repo} placeholder should parse");
+        match policy.tools.get(&ToolKind::Bash) {
+            Some(ToolRules::Bash { families, .. }) => {
+                let rule = &families.get("gh issue").expect("gh issue family").rules[0];
+                match &rule.decision {
+                    Decision::Rewrite { target, .. } => {
+                        assert_eq!(target.as_str(), "legion issue list --repo {repo}")
+                    }
+                    other => panic!("expected Rewrite, got {other:?}"),
+                }
+            }
+            other => panic!("expected Bash families, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_target_with_an_unsupported_placeholder_is_rejected_with_pointer() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list --label {label}",
+                         "reason": "why", "exact_args": ["issue", "list"]}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::UnsupportedRewriteTargetPlaceholder {
+                pointer,
+                placeholder,
+            } => {
+                assert_eq!(
+                    pointer,
+                    "/tools/Bash/families/gh issue/rules/0/outcome/target"
+                );
+                assert_eq!(placeholder, "label");
+            }
+            other => panic!("expected UnsupportedRewriteTargetPlaceholder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_target_with_an_unterminated_placeholder_is_rejected() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo",
+                         "reason": "why", "exact_args": ["issue", "list"]}}
+        ]}}}}}"#;
+        let err = parse_policy(text).unwrap_err();
+        assert!(matches!(
+            err,
+            PolicyError::UnsupportedRewriteTargetPlaceholder { .. }
+        ));
+    }
+
+    #[test]
+    fn rewrite_target_with_no_placeholder_at_all_parses() {
+        let text = r#"{"tools": {"Bash": {"kind": "bash", "families": {"gh issue": {"rules": [
+            {"id": "r1", "predicate": {"arg_equals": "list"},
+             "outcome": {"kind": "rewrite", "target": "legion issue list",
+                         "reason": "why", "exact_args": ["issue", "list"]}}
+        ]}}}}}"#;
+        assert!(parse_policy(text).is_ok());
     }
 
     // -- A tool kind's rules must be shaped for that kind -------------------
