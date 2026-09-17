@@ -48,9 +48,10 @@ has to cover; write the specific questions this intent raises under each:
 - **Governance.** What governs it: credentials, boundaries, audit, who may see what.
 - **Failure.** Where does it break, who notices, what do they see, and how do they recover?
 
-When the customer is an agent (sd-service-design, "The customer may be an agent"), ask
-each question twice: once for the agent that uses the product and once for the human who
-may never know it exists.
+When the customer is an agent (sd-service-design, "The customer may be an agent"), the
+agent is the primary actor, and the human behind it is a beneficiary and risk-holder with
+no direct touchpoint. Ask each question twice: once for the agent that uses the product
+and once for the human who may never know it exists.
 
 ## Five passes find the questions
 

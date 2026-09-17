@@ -73,7 +73,8 @@ never hands the gap to the operator.
   is the primary actor: it picks tools from help text, docs, and predictable output, and
   the moments of truth happen with it. The human behind it may never know the product
   exists, yet carries the risk and sees only outcomes. Design for both, and never assume
-  the product can ask the human anything.
+  the product can ask the human anything. An agent is always an actor acting for someone
+  (the intermediary or delegate pattern), never a standalone user.
 
 ## The pipeline
 
