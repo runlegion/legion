@@ -1,0 +1,1195 @@
+[
+  {
+    "id": "commit-msg-heredoc-in-subst",
+    "cmd": "git add src/a.rs && git commit -m \"$(cat <<'EOF'\nfix: don't trust the agent's \"quotes\" (it's a body)\nEOF\n)\" && git push origin HEAD",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ],
+      [
+        "cat",
+        "Substitution"
+      ],
+      [
+        "git",
+        "AfterOperator"
+      ]
+    ],
+    "note": "two git invocations both AfterOperator (add is First, commit and push are AfterOperator); heredoc inside $() parses as literal text feeding cat, the apostrophe in the body does not break quoting"
+  },
+  {
+    "id": "FP-git-stash-push",
+    "cmd": "git stash push -- src/a.rs\ngit status --short",
+    "expected": "benign",
+    "managed": [
+      [
+        "git",
+        "First"
+      ],
+      [
+        "git",
+        "AfterOperator"
+      ]
+    ],
+    "note": "any-token heuristic sees git + push; the scanner resolves two ordinary git invocations, nothing search-shaped"
+  },
+  {
+    "id": "FP-no-gh-for-loop-word",
+    "cmd": "for src in legion gh curl; do n=$(jq -r --arg s \"$src\" 'select(test($s))' c.jsonl | wc -l); echo \"$src $n\"; done",
+    "expected": "benign",
+    "managed": [
+      [
+        "jq",
+        "Substitution"
+      ],
+      [
+        "wc",
+        "Substitution"
+      ],
+      [
+        "echo",
+        "AfterOperator"
+      ]
+    ],
+    "forbidden": [
+      "gh"
+    ],
+    "note": "gh is a for-loop list word, never a command position"
+  },
+  {
+    "id": "FP-gh-word-in-reflection",
+    "cmd": "legion reflect --repo legion --text \"use gh via legion issue; find the spec with grep\"",
+    "expected": "benign",
+    "managed": [
+      [
+        "legion",
+        "First"
+      ]
+    ],
+    "forbidden": [
+      "gh",
+      "grep",
+      "find"
+    ]
+  },
+  {
+    "id": "plain-grep",
+    "cmd": "grep -rn foo src",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "cd-and-gh",
+    "cmd": "cd /Volumes/store/projects/runlegion/legion && gh pr view 1142 --json title",
+    "expected": "visible",
+    "managed": [
+      [
+        "cd",
+        "First"
+      ],
+      [
+        "gh",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "git-status-then-push",
+    "cmd": "git status && git push origin main",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ],
+      [
+        "git",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "xargs-grep",
+    "cmd": "git ls-files '*.rs' | xargs grep -l claim_inbox",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ],
+      [
+        "grep",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "xargs-nice-rg",
+    "cmd": "git ls-files | xargs -n 50 nice -n 10 rg -l RouteTable",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ],
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "find-exec-grep",
+    "cmd": "find src -name '*.rs' -exec grep -l 'fn route' {} \\;",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "First"
+      ],
+      [
+        "grep",
+        "FindExec"
+      ]
+    ]
+  },
+  {
+    "id": "find-exec-plus",
+    "cmd": "find . -type f -execdir rg -n TODO {} +",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "First"
+      ],
+      [
+        "rg",
+        "FindExec"
+      ]
+    ]
+  },
+  {
+    "id": "timeout-gh",
+    "cmd": "timeout 30 gh run watch 123456",
+    "expected": "visible",
+    "managed": [
+      [
+        "gh",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "env-assign-rg",
+    "cmd": "env -u PAGER LC_ALL=C rg -n foo",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "sudo-find",
+    "cmd": "sudo -u root find / -name core",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "command-grep",
+    "cmd": "command grep -c x file",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "command-v-is-lookup",
+    "cmd": "command -v gh >/dev/null && echo yes",
+    "expected": "benign",
+    "managed": [
+      [
+        "command",
+        "First"
+      ],
+      [
+        "echo",
+        "AfterOperator"
+      ]
+    ],
+    "forbidden": [
+      "gh"
+    ],
+    "note": "command -v is a lookup, not a wrapper: gh is never invoked"
+  },
+  {
+    "id": "which-gh-is-lookup",
+    "cmd": "which gh rg fd",
+    "expected": "benign",
+    "managed": [
+      [
+        "which",
+        "First"
+      ]
+    ],
+    "forbidden": [
+      "gh",
+      "rg",
+      "fd"
+    ]
+  },
+  {
+    "id": "abs-grep",
+    "cmd": "/usr/bin/grep -n foo bar.txt",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "backslash-grep",
+    "cmd": "\\grep -n foo bar.txt",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "quoted-binary",
+    "cmd": "\"grep\" -n foo bar.txt",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "assignment-prefix",
+    "cmd": "GH_PAGER= gh issue list --limit 5",
+    "expected": "visible",
+    "managed": [
+      [
+        "gh",
+        "AfterAssignment"
+      ]
+    ]
+  },
+  {
+    "id": "subst-find-awk",
+    "cmd": "wc -l $(find src -name '*.rs' | awk '{print $1}')",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "Substitution"
+      ],
+      [
+        "wc",
+        "First"
+      ]
+    ],
+    "opaque": [
+      "Interpreter:awk"
+    ]
+  },
+  {
+    "id": "subst-pipeline-grep",
+    "cmd": "COUNT=$(legion recall --repo legion --latest | grep -c checkpoint); echo $COUNT",
+    "expected": "visible",
+    "managed": [
+      [
+        "legion",
+        "Substitution"
+      ],
+      [
+        "grep",
+        "Substitution"
+      ],
+      [
+        "echo",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "subst-in-double-quotes",
+    "cmd": "echo \"branch is $(git branch --show-current), grep says $(grep -c x f)\"",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "Substitution"
+      ],
+      [
+        "grep",
+        "Substitution"
+      ],
+      [
+        "echo",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "backtick-subst",
+    "cmd": "for f in `ls src`; do echo $f; done",
+    "expected": "visible",
+    "managed": [
+      [
+        "ls",
+        "Substitution"
+      ],
+      [
+        "echo",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "git-grep-in-subst",
+    "cmd": "vim $(git grep -l RouteTable)",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "Substitution"
+      ],
+      [
+        "vim",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "for-loop-find",
+    "cmd": "for f in $(find . -name '*.toml'); do wc -l \"$f\"; done",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "Substitution"
+      ],
+      [
+        "wc",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "sh-c-curl-grep",
+    "cmd": "sh -c 'curl -s localhost:8080/health | grep -q ok && echo up'",
+    "expected": "visible",
+    "managed": [
+      [
+        "curl",
+        "InlineShell"
+      ],
+      [
+        "grep",
+        "InlineShell"
+      ],
+      [
+        "echo",
+        "InlineShell"
+      ]
+    ]
+  },
+  {
+    "id": "bash-o-pipefail-c",
+    "cmd": "bash -o pipefail -c \"gh pr checks 12 | tail -5\"",
+    "expected": "visible",
+    "managed": [
+      [
+        "gh",
+        "InlineShell"
+      ],
+      [
+        "tail",
+        "InlineShell"
+      ]
+    ]
+  },
+  {
+    "id": "find-xargs-sh-c-awk",
+    "cmd": "find . -name '*.rs' -print0 | xargs -0 -I{} sh -c 'grep -c unwrap {} | awk \"{print \\$1}\"'",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "First"
+      ],
+      [
+        "grep",
+        "InlineShell"
+      ]
+    ],
+    "opaque": [
+      "Interpreter:awk"
+    ]
+  },
+  {
+    "id": "find-exec-sh-c-grep",
+    "cmd": "find . -name '*.md' -exec sh -c 'grep -l TODO \"$1\"' _ {} \\;",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "First"
+      ],
+      [
+        "grep",
+        "InlineShell"
+      ]
+    ],
+    "note": "corrected label: FINDINGS.md's own note ('the class names the most advanced feature') described a label chosen to match code, not FR-CMD-007's per-position semantics; the immediate mechanism resolving grep is sh -c (InlineShell), not find -exec, matching every other nested-wrapper fixture in this battery (see find-xargs-sh-c-awk)"
+  },
+  {
+    "id": "bash-heredoc-search",
+    "cmd": "bash <<'EOF'\ncd src\nrg -n 'fn main' .\nEOF",
+    "expected": "visible",
+    "managed": [
+      [
+        "bash",
+        "First"
+      ],
+      [
+        "cd",
+        "HeredocShell"
+      ],
+      [
+        "rg",
+        "HeredocShell"
+      ]
+    ]
+  },
+  {
+    "id": "cat-heredoc-then-gh",
+    "cmd": "cat <<EOF > /tmp/body.md\nuse grep and find freely here\nEOF\ngh issue create --body-file /tmp/body.md",
+    "expected": "visible",
+    "managed": [
+      [
+        "cat",
+        "First"
+      ],
+      [
+        "gh",
+        "AfterOperator"
+      ]
+    ],
+    "forbidden": [
+      "grep",
+      "find"
+    ],
+    "note": "the heredoc body is literal data for cat (a non-shell owner), never parsed"
+  },
+  {
+    "id": "python-heredoc-str-find",
+    "cmd": "python3 <<'PY'\ns = open('x').read()\nprint(s.find('grep'))\nPY",
+    "expected": "opaque",
+    "opaque": [
+      "StdinScript"
+    ]
+  },
+  {
+    "id": "python-subprocess-git-grep",
+    "cmd": "python3 -c \"import subprocess; print(subprocess.check_output(['git','grep','-n','RouteTable']).decode())\"",
+    "expected": "opaque",
+    "opaque": [
+      "Interpreter:python3"
+    ]
+  },
+  {
+    "id": "python-rglob-structs",
+    "cmd": "python3 - <<'PY'\nimport pathlib, re\nfor p in pathlib.Path('src').rglob('*.rs'):\n    for m in re.finditer(r'^pub struct (\\w+)', p.read_text(), re.M):\n        print(p, m.group(1))\nPY",
+    "expected": "opaque",
+    "opaque": [
+      "StdinScript"
+    ]
+  },
+  {
+    "id": "STRUCTS-python-heredoc-shell-pipe-grep",
+    "cmd": "cd /Volumes/store/projects/runlegion/legion && python3 <<'PY' | grep -E '^(pub )?struct' | sort | uniq -c\nimport os, subprocess\nout = subprocess.run(\"find src -name '*.rs' | xargs cat | grep -n 'struct '\", shell=True, capture_output=True, text=True).stdout\nfor line in out.splitlines():\n    print(line.split(':', 1)[1].strip())\nPY",
+    "expected": "visible",
+    "managed": [
+      [
+        "cd",
+        "First"
+      ],
+      [
+        "grep",
+        "AfterOperator"
+      ],
+      [
+        "sort",
+        "AfterOperator"
+      ],
+      [
+        "uniq",
+        "AfterOperator"
+      ]
+    ],
+    "opaque": [
+      "StdinScript"
+    ],
+    "note": "the outer grep|sort|uniq pipeline is visible; the find|xargs|grep string inside the python body is opaque by design (StdinScript)"
+  },
+  {
+    "id": "STRUCTS-script-file-then-python",
+    "cmd": "cat > /tmp/structs.py <<'PY'\nimport subprocess\nprint(subprocess.getoutput(\"rg -n '^pub struct' src\"))\nPY\npython3 /tmp/structs.py | grep -v test | head -50",
+    "expected": "visible",
+    "managed": [
+      [
+        "cat",
+        "First"
+      ],
+      [
+        "grep",
+        "AfterOperator"
+      ],
+      [
+        "head",
+        "AfterOperator"
+      ]
+    ],
+    "opaque": [
+      "ScriptFile"
+    ]
+  },
+  {
+    "id": "STRUCTS-bash-c-python-os-system",
+    "cmd": "bash -c \"python3 -c 'import os; os.system(\\\"grep -rn struct src | wc -l\\\")' | tee /tmp/n\"",
+    "expected": "visible",
+    "managed": [
+      [
+        "tee",
+        "InlineShell"
+      ]
+    ],
+    "opaque": [
+      "Interpreter:python3"
+    ],
+    "note": "bash -c is walked; python -c inside it is opaque"
+  },
+  {
+    "id": "script-written-then-run",
+    "cmd": "cat > run2.sh <<'EOF'\n#!/bin/bash\ngrep -rn foo .\nEOF\nchmod +x run2.sh && bash run2.sh",
+    "expected": "visible",
+    "managed": [
+      [
+        "cat",
+        "First"
+      ],
+      [
+        "chmod",
+        "AfterOperator"
+      ]
+    ],
+    "opaque": [
+      "ScriptFile"
+    ]
+  },
+  {
+    "id": "dot-slash-script",
+    "cmd": "./scripts/release.sh --dry-run",
+    "expected": "opaque",
+    "opaque": [
+      "ScriptFile"
+    ]
+  },
+  {
+    "id": "eval-word-in-quoted-query",
+    "cmd": "legion recall --repo legion --context \"eval harness scoring\" --limit 3",
+    "expected": "benign",
+    "managed": [
+      [
+        "legion",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "eval-real",
+    "cmd": "eval \"$(ssh-agent -s)\"",
+    "expected": "opaque",
+    "managed": [
+      [
+        "ssh-agent",
+        "Substitution"
+      ]
+    ],
+    "opaque": [
+      "Eval"
+    ]
+  },
+  {
+    "id": "dynamic-command-var",
+    "cmd": "$SEARCH -rn foo src",
+    "expected": "opaque",
+    "opaque": [
+      "DynamicCommand"
+    ]
+  },
+  {
+    "id": "dynamic-command-subst",
+    "cmd": "$(which rg) -n foo",
+    "expected": "opaque",
+    "managed": [
+      [
+        "which",
+        "Substitution"
+      ]
+    ],
+    "opaque": [
+      "DynamicCommand"
+    ]
+  },
+  {
+    "id": "sqlite3-legion-db",
+    "cmd": "sqlite3 ~/Library/Application\\ Support/legion/legion.db 'select count(*) from reflections'",
+    "expected": "visible",
+    "managed": [
+      [
+        "sqlite3",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "db-path-in-variable",
+    "cmd": "DB=~/.local/share/legion/legion.db; ls -la \"$DB\"",
+    "expected": "visible",
+    "managed": [
+      [
+        "ls",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "find-name-db",
+    "cmd": "find ~ -name legion.db -maxdepth 4 2>/dev/null",
+    "expected": "visible",
+    "managed": [
+      [
+        "find",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "FP-jq-regex-names-db",
+    "cmd": "jq -s 'map(select(test(\"legion\\\\.db\"))) | length' corpus/agent-commands.jsonl",
+    "expected": "benign",
+    "managed": [
+      [
+        "jq",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "FP-jq-heredoc-rglob",
+    "cmd": "jq -s -f /dev/stdin corpus/agent-commands.jsonl <<'JQ'\nmap(select(test(\"rglob|walkdir|grep\"))) | length\nJQ",
+    "expected": "benign",
+    "managed": [
+      [
+        "jq",
+        "First"
+      ]
+    ],
+    "forbidden": [
+      "grep"
+    ]
+  },
+  {
+    "id": "grep-word-in-string",
+    "cmd": "echo \"use grep or find\" && git commit -m 'drop find usage'",
+    "expected": "benign",
+    "managed": [
+      [
+        "echo",
+        "First"
+      ],
+      [
+        "git",
+        "AfterOperator"
+      ]
+    ],
+    "forbidden": [
+      "grep",
+      "find"
+    ]
+  },
+  {
+    "id": "git-global-opts-push",
+    "cmd": "git -C ../other -c push.default=current push",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "git-log-S",
+    "cmd": "git log -S RouteTable --oneline",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "git-log-plain",
+    "cmd": "git log --oneline -5",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "pnpm-wrangler",
+    "cmd": "pnpm wrangler deploy --env prod",
+    "expected": "visible",
+    "managed": [
+      [
+        "pnpm",
+        "First"
+      ]
+    ],
+    "forbidden": [
+      "wrangler"
+    ],
+    "note": "corrected: FR-CMD-007 states a bare `pnpm <name>` stays an ordinary pnpm invocation; the research toy's own label ('wrangler'/wrapper) contradicts that requirement and is not carried over"
+  },
+  {
+    "id": "pnpm-exec-wrangler",
+    "cmd": "pnpm exec wrangler tail",
+    "expected": "visible",
+    "managed": [
+      [
+        "wrangler",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "comment-hides-nothing",
+    "cmd": "# grep -rn secret .\ngh auth status",
+    "expected": "benign",
+    "managed": [
+      [
+        "gh",
+        "AfterOperator"
+      ]
+    ],
+    "forbidden": [
+      "grep"
+    ]
+  },
+  {
+    "id": "subshell-parens",
+    "cmd": "(cd src && rg -n foo)",
+    "expected": "visible",
+    "managed": [
+      [
+        "cd",
+        "First"
+      ],
+      [
+        "rg",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "if-then-grep",
+    "cmd": "if grep -q foo bar; then echo hit; fi",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "while-read-gh",
+    "cmd": "cat ids.txt | while read id; do gh issue close \"$id\"; done",
+    "expected": "visible",
+    "managed": [
+      [
+        "cat",
+        "First"
+      ],
+      [
+        "read",
+        "AfterOperator"
+      ],
+      [
+        "gh",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "time-keyword",
+    "cmd": "time rg -n foo",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "herestring-grep",
+    "cmd": "grep -c x <<< \"$(cat file)\"",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "First"
+      ],
+      [
+        "cat",
+        "Substitution"
+      ]
+    ]
+  },
+  {
+    "id": "line-continuation",
+    "cmd": "gh pr create \\\n  --title x \\\n  --body y",
+    "expected": "visible",
+    "managed": [
+      [
+        "gh",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "stderr-redirect-pipe",
+    "cmd": "cargo test 2>&1 | grep -E 'FAILED|panicked'",
+    "expected": "visible",
+    "managed": [
+      [
+        "cargo",
+        "First"
+      ],
+      [
+        "grep",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "process-substitution",
+    "cmd": "diff <(ls a) <(ls b)",
+    "expected": "visible",
+    "managed": [
+      [
+        "ls",
+        "Substitution"
+      ],
+      [
+        "diff",
+        "First"
+      ]
+    ]
+  },
+  {
+    "id": "too-deep",
+    "cmd": "echo $(echo $(echo $(grep -c x f)))",
+    "expected": "opaque",
+    "opaque": [
+      "TooDeep"
+    ]
+  },
+  {
+    "id": "unterminated-quote",
+    "cmd": "grep -n 'oops src",
+    "expected": "error"
+  },
+  {
+    "id": "arithmetic-not-subst",
+    "cmd": "echo $((1 + 2)) && ls",
+    "expected": "visible",
+    "managed": [
+      [
+        "ls",
+        "AfterOperator"
+      ]
+    ],
+    "forbidden": [
+      "1"
+    ],
+    "note": "$((...)) is arithmetic expansion, not a command substitution; nothing inside it is a command position"
+  },
+  {
+    "id": "case-pattern",
+    "cmd": "case \"$x\" in a) rg foo ;; *) fd bar ;; esac",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "AfterOperator"
+      ],
+      [
+        "fd",
+        "AfterOperator"
+      ]
+    ]
+  },
+  {
+    "id": "npx-grep-nonsense",
+    "cmd": "npx -y rg --version",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ]
+  },
+  {
+    "id": "perl-ne",
+    "cmd": "perl -ne 'print if /struct/' src/lib.rs",
+    "expected": "opaque",
+    "opaque": [
+      "Interpreter:perl"
+    ]
+  },
+  {
+    "id": "node-script-file",
+    "cmd": "node scripts/scan.mjs --grep foo",
+    "expected": "opaque",
+    "opaque": [
+      "ScriptFile"
+    ]
+  },
+  {
+    "id": "silent-miss-dynamic-command-echo",
+    "cmd": "\"$(echo grep)\" -rn foo src",
+    "expected": "opaque",
+    "opaque": [
+      "DynamicCommand"
+    ],
+    "source": "FINDINGS.md caveats: silent-miss class, command name built at runtime"
+  },
+  {
+    "id": "silent-miss-positional-params",
+    "cmd": "set -- grep -rn foo src; \"$@\"",
+    "expected": "visible",
+    "managed": [
+      [
+        "set",
+        "First"
+      ]
+    ],
+    "opaque": [
+      "DynamicCommand"
+    ],
+    "source": "FINDINGS.md caveats: silent-miss class, \"$@\" after set --; honest bounded behavior is DynamicCommand for the quoted $@ word, since scan does not track shell state across a semicolon to know it now holds ['grep', ...]"
+  },
+  {
+    "id": "silent-miss-source-process-subst",
+    "cmd": "source <(echo 'grep -rn foo src')",
+    "expected": "opaque",
+    "opaque": [
+      "Sourced"
+    ],
+    "source": "FINDINGS.md caveats: silent-miss class, script fed from a substitution"
+  },
+  {
+    "id": "hardening-env-dash-s",
+    "cmd": "env -S \"grep -rn foo src\" file.txt",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: add env -S to the wrapper table"
+  },
+  {
+    "id": "silent-miss-function-name-form",
+    "cmd": "function g { grep -rn \"$@\"; }; g foo src",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "FunctionBody"
+      ],
+      [
+        "g",
+        "AfterOperator"
+      ]
+    ],
+    "source": "FINDINGS.md caveats: silent-miss class, function name { } form; the definition's body is visible (FunctionBody per the next_step.if_yes hardening item), the later call to g is an ordinary, unresolved-as-a-function invocation (scan does not track that g was just defined)"
+  },
+  {
+    "id": "silent-miss-git-bang-alias",
+    "cmd": "git -c alias.s='!grep -rn foo src' s",
+    "expected": "visible",
+    "managed": [
+      [
+        "git",
+        "First"
+      ]
+    ],
+    "source": "FINDINGS.md caveats: silent-miss class, git ! alias; RESEARCH-CMD-bounded-tokenizer lists this as semantic, not grammatical, so no parser fixes it -- the honest bounded result is an ordinary git invocation with the alias definition as a literal -c value"
+  },
+  {
+    "id": "silent-miss-globbed-binary",
+    "cmd": "/usr/bin/gr?p -n foo bar.txt",
+    "expected": "visible",
+    "managed": [
+      [
+        "gr?p",
+        "First"
+      ]
+    ],
+    "source": "FINDINGS.md caveats: silent-miss class, globbed or shell-expanded binary name; glob expansion is a runtime shell behavior, so the literal glob text is the honest basename"
+  },
+  {
+    "id": "hardening-watch-wrapper",
+    "cmd": "watch -n 5 rg -n foo src",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: add watch to the wrapper table"
+  },
+  {
+    "id": "hardening-ssh-wrapper",
+    "cmd": "ssh build-host grep -c foo /var/log/app.log",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: add ssh to the wrapper table"
+  },
+  {
+    "id": "hardening-parallel-wrapper",
+    "cmd": "parallel -j 4 rg -l foo ::: src",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: add parallel to the wrapper table"
+  },
+  {
+    "id": "hardening-setsid-wrapper",
+    "cmd": "setsid rg -n foo",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: add setsid to the wrapper table"
+  },
+  {
+    "id": "hardening-docker-exec-wrapper",
+    "cmd": "docker exec app-container grep -c error /var/log/app.log",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: add docker exec to the wrapper table"
+  },
+  {
+    "id": "hardening-time-before-keyword",
+    "cmd": "time if grep -q foo bar; then echo hit; fi",
+    "expected": "visible",
+    "managed": [
+      [
+        "grep",
+        "Wrapper"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: time as a wrapper before a keyword"
+  },
+  {
+    "id": "hardening-name-paren-function-def",
+    "cmd": "g() { rg -n foo; }; g",
+    "expected": "visible",
+    "managed": [
+      [
+        "rg",
+        "FunctionBody"
+      ]
+    ],
+    "source": "RESEARCH-CMD-bounded-tokenizer next_step.if_yes: NAME() is a definition, not a call"
+  },
+  {
+    "id": "benign-git-grep-reflog",
+    "cmd": "git log --grep-reflog=x",
+    "expected": "benign",
+    "managed": [
+      [
+        "git",
+        "First"
+      ]
+    ],
+    "source": "FR-CMD-007 known false positive: git log --grep-reflog=x"
+  },
+  {
+    "id": "benign-git-dash-s-foo",
+    "cmd": "git log -- -Sfoo",
+    "expected": "benign",
+    "managed": [
+      [
+        "git",
+        "First"
+      ]
+    ],
+    "source": "FR-CMD-007 known false positive: git log -- -Sfoo"
+  }
+]
