@@ -96,8 +96,9 @@ stops here: the intent comes first, and writing one is not this pipeline's job).
    where the questions about what makes the intent a product get asked and answered;
    what lands is the map with the answers built in, plus the few choices only the
    operator can make, each with a recommendation. It may park on eavesdrop questions.
-4. **The writers, once the ecosystem's register is empty** -- every question out to real
-   people answered and folded in, every operator choice ruled on. Then, in dependency
+4. **The writers, once the ecosystem's register is empty** -- every entry marked
+   `ANSWERED:` and the ecosystem at `done` (sd-ecosystem-imagine, "The status says what
+   is open"). Then, in dependency
    order per chain: `sd-write-persona` first (its actor
    must exist in the landed ecosystem), then `sd-write-journey` for that persona (it
    consumes the persona document by id), then `sd-write-blueprint` for that journey (its

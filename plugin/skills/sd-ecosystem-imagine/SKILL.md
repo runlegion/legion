@@ -87,7 +87,8 @@ Every question goes to whoever can answer it, in this order:
    a question eavesdrop asks on the right lens. `legion signal` the eavesdrop agent with
    the question and the lens, land the ecosystem as a `draft` with the answers so far,
    and park (sd-service-design, Park and resume). When answers arrive, fold them in and
-   redraw.
+   redraw. Expect a few questions here too: each costs real people's time and days of
+   waiting, and a long list means step 1 was skipped.
 4. **The operator -- only strategy and values.** What the product should be, whom it
    serves first, what it refuses to do. Each such choice goes up with a recommended
    answer and its reasoning, so the operator can agree in one line. Expect a handful, not
@@ -134,6 +135,14 @@ schema's meta also requires `status`, `date`, and `author` alongside `title` and
   answered, not registered. Write each entry into the document's `failure_modes`, in the
   order you will report them, naming the question and where it went, and report the
   register to whoever invoked you.
+- **The status says what is open.** With questions out to real people, the document
+  lands at `draft` and parks. With only operator choices open, it lands at `review` and
+  parks for the rulings. With the register empty, it lands at `done`.
+- **A redraw revises in place.** When answers arrive, revise the same document
+  (`legion document revise`): write each answer into the entry's `recovery`, prefixed
+  `ANSWERED:`, and build what it settles into the rest of the map. Never remove or
+  reorder a register entry, since its position is its prediction id. The register is
+  empty when every entry is answered.
 - **Emit the predictions** (Instrumentation below), once the create returns an id: one
   per register entry, staking whether its drafted answer holds. Then report to whoever invoked
   you: the ecosystem id, the register, and beside each entry its prediction id and the
@@ -170,8 +179,8 @@ emit mechanics -- session id and model, the exit-0 rule, the 180-day orphan wind
 non-blocking emission, never self-witnessing -- are held once in the sd-service-design
 skill (Instrumentation, "Emit mechanics") and bind here. What is this step's alone: the
 check is each fingerprint against the landed `failure_modes` order, and the report
-carries the ids beside the register, with each entry's route, for the conductor to hand
-to the blueprint writers.
+carries the ids beside the register, with each entry's route, for the conductor to keep
+until every entry is answered.
 
 **Who witnesses, and when.** An open entry is settled when its answer arrives, and each
 kind of answer has an owner:
