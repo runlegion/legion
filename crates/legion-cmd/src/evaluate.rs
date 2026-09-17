@@ -282,9 +282,9 @@ fn evaluate_invocation(
 /// `exact_args` is declared (FR-CMD-008) is checked against `input`'s
 /// arguments before its decision is trusted: the invocation's arguments
 /// must equal `exact_args` exactly, or it denies naming the rewrite's
-/// target instead of rewriting. `exact_args` is `None` for a Fields
-/// rule's Rewrite (`parse_policy` forbids it there), so this never runs
-/// against `MatchInput::Json`.
+/// target instead of rewriting. A Fields rule never carries a Rewrite
+/// (`parse_policy` rejects one outright, `RewriteUnsupportedOnFieldsRule`),
+/// so this check never runs against `MatchInput::Json`.
 fn evaluate_rules(
     rules: &[Rule],
     input: MatchInput<'_>,
