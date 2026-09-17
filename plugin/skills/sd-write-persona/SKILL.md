@@ -15,6 +15,14 @@ allowed-tools: Bash, Read
 A persona here is a compression of evidence, not a character sketch. If the discovery and
 intent cannot support a sentence about this person, the sentence does not get written.
 
+**When the customer is an agent.** If the ecosystem names an agent as the primary actor
+(sd-service-design, "The customer may be an agent"), the personas are agents and the
+humans behind them, written separately. An agent persona is about how it chooses a tool,
+reads output, guesses, asks, and recovers: from help text, docs, predictable output, and
+errors that name the next step. The human persona is an unaware beneficiary who carries
+the risk, trusts their agent rather than the product, and sees only outcomes; it has no
+direct touchpoint with the product and never gets one invented.
+
 ## Procedure
 
 1. Read the inputs by id: the intent, the Discovery, the Ecosystem

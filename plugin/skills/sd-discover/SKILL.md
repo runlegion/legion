@@ -71,11 +71,14 @@ For each claim with evidence available:
   null-control probe on the same lens, rerank both candidate sets against the claim in
   ONE call, and read how the claim's hits rank against the control's. Claim hits that
   outrank the control support the claim; hits that rank no better than the control do
-  not. The null is the hard part and nobody has validated one for claims yet (an
+  not. Report the separation as G = 2*AUC - 1 between the two reranked score lists (0:
+  the claim retrieves nothing better than the control; 1: every claim hit outranks every
+  control hit), with its standard error, as evidence and never as a cutoff. The null is
+  the hard part and nobody has validated one for claims yet (an
   off-topic null measures writing register, not coverage, and cosine cannot see negation,
-  so a negated claim lands on the same text). Record the null query you used and how the
-  ranking came out in the insight's `evidence.gaps`, and never put a number bar on any
-  score or on the ranking.
+  so a negated claim lands on the same text). Record the null query you used, G, and its
+  standard error in the insight's `evidence.gaps`, and never put a number bar on any
+  score, on the ranking, or on G.
 - **Absence only from a census.** "Nobody says this" is a count, not a ranking:
   `eavesdrop search <lens> -t "<token>" -n 100000 --json`. The default `-n` is 10, so a
   count is a census only when it comes back below `-n`. It counts spellings, not ideas:
@@ -249,6 +252,8 @@ for no stated reason has skipped a step; say so in the report.
   cutting, weakening, or rewriting any intent claim or feature: the operator rules, the
   intent's owner edits.
 - Sending the operator a question the world can answer: that question goes to eavesdrop.
+- Using eavesdrop's NLI stance reader to decide a verdict. It does not read first-hand
+  testimony as supporting a general claim, so it reads real support as none.
 - Carrying evidence anywhere except this Discovery -- downstream artifacts cite insights,
   they do not re-argue evidence.
 - Waiting synchronously on a crawl: a crawl in flight is a park, never a blocked session.
