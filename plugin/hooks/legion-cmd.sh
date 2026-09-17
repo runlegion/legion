@@ -65,25 +65,12 @@ if [ -z "$LEGION_BIN_PATH" ] || [ ! -x "$LEGION_BIN_PATH" ]; then
   exit 0
 fi
 
-# Portable timeout, no external `timeout`/`gtimeout` binary required (not
-# preinstalled on macOS): background the binary directly, with both its
-# input and its output redirected to plain files -- NOT a pipe in either
-# direction. Two independent reasons:
-#   1. `a | b &` makes `$!` the PID of a subshell wrapping the whole
-#      pipeline, not of `b` itself, so a SIGTERM sent to it never reaches
-#      the binary and a hang runs to completion regardless.
-#   2. Capturing output via `OUTPUT=$(cmd &  ...; wait)` has the same
-#      problem in the other direction: `$(...)` blocks until EOF on its
-#      read end of the pipe, and EOF only happens once EVERY process
-#      holding that pipe's write end has exited -- including a grandchild
-#      the killed binary spawned and left running, which inherits the
-#      same fd and keeps the pipe open for its own remaining lifetime.
-#      Measured: with `OUTPUT=$(... &)`, killing the direct child at the
-#      1s timeout still left the wrapper blocked for the fake binary's
-#      full 30s hang, because its orphaned `sleep 30` never closed the
-#      inherited stdout pipe. A plain file has no such reader/writer
-#      handshake -- reading it after `wait` returns whatever was written
-#      up to that point, no matter who still has it open.
+# Portable timeout (macOS ships no `timeout`): run the binary in the
+# background with its input and output in plain files, not pipes. With a
+# pipe, `$!` names the pipeline's subshell rather than the binary, and
+# `$(...)` waits for every process holding the pipe -- including anything
+# a killed binary left behind -- so a hang would still block. A file is
+# read once `wait` returns, whoever still has it open.
 INPUT_FILE=$(mktemp)
 OUTPUT_FILE=$(mktemp)
 trap 'rm -f "$INPUT_FILE" "$OUTPUT_FILE"' EXIT
@@ -92,37 +79,17 @@ printf '%s' "$INPUT" > "$INPUT_FILE"
 "$LEGION_BIN_PATH" cmd-check --hook < "$INPUT_FILE" > "$OUTPUT_FILE" 2>/dev/null &
 CHILD=$!
 
-# The watcher subshell's `sleep` and `kill` are both backgrounded with the
-# SUBSHELL's own stdout/stderr redirected to /dev/null -- NOT inherited
-# from this script. Without that, killing the watcher (below, on the fast
-# path where CHILD finishes first) leaves its `sleep` orphaned and
-# running for the rest of the timeout, and an orphaned process that
-# inherited THIS SCRIPT's own stdout keeps that pipe open for its
-# remaining lifetime -- the harness reading this script's stdout blocks
-# until EOF, which does not arrive until every such holder exits.
-# Measured: without the redirect, a FAST binary's response was delayed by
-# the full configured timeout even though the binary itself answered
-# immediately, because the leftover `sleep` held the pipe open.
-#
-# `sleep` and `kill` run sequentially INSIDE one subshell (not `sleep &`
-# as a separate top-level job the subshell then `wait`s on): a subshell
-# can only `wait` on its own direct children, not a sibling the outer
-# script forked -- an earlier version of this script split them and
-# `wait`ed on the sibling from inside the subshell, which fails
-# immediately (not a child of that shell) and killed CHILD right away
-# regardless of the configured timeout. Keeping both steps as one
-# subshell's own sequential children avoids that failure mode entirely.
-#
-# On the fast path, `kill "$WATCHER"` below interrupts the subshell while
-# it is still inside its own `sleep`, orphaning that `sleep` rather than
-# killing it directly (there is no portable, job-control-free way to
-# reach a subshell's own child PID from outside it). That orphan is
-# harmless, not just tolerated: its stdout/stderr were already redirected
-# away from this script's real stdout, so it cannot block the harness --
-# it simply finishes counting down and exits on its own, well after this
-# script has already returned its answer.
+# The watcher kills CHILD once the timeout passes. Its output goes to
+# /dev/null: a watcher holding this script's stdout would keep the
+# harness's read open until the watcher exits, delaying every answer by
+# the full timeout. Its `sleep` is its own child so it can `wait` on it,
+# and the TERM trap kills that `sleep` when the fast path stops the
+# watcher, so nothing is left running after this script answers.
 (
-  sleep "$LEGION_CMD_HOOK_TIMEOUT_SECS"
+  sleep "$LEGION_CMD_HOOK_TIMEOUT_SECS" &
+  SLEEP_PID=$!
+  trap 'kill "$SLEEP_PID" 2>/dev/null; exit 0' TERM
+  wait "$SLEEP_PID"
   kill -TERM "$CHILD" 2>/dev/null
 ) >/dev/null 2>&1 &
 WATCHER=$!

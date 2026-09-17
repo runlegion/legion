@@ -85,10 +85,8 @@ assert_contains "a broken binary (non-zero exit) still denies" "$OUT" '"permissi
 OUT=$(FAKE_CMD_CHECK_EMPTY=1 run_hook_with_bin "$FAKE_LEGION")
 assert_contains "a silent binary (empty stdout) still denies" "$OUT" '"permissionDecision":"deny"'
 
-# within_seconds DESC MAX_SECS -- run the rest of the pipeline via stdin,
-# asserting the elapsed wall time is at most MAX_SECS, using the shared
-# assert_eq helper (a boolean-as-string comparison, not a hand-rolled
-# PASS/FAIL count) rather than a bespoke numeric assertion.
+# within_seconds DESC MAX_SECS ELAPSED -- asserts ELAPSED (whole seconds)
+# is at most MAX_SECS, through the shared assert_eq helper.
 within_seconds() {
   local desc="$1" max_secs="$2" elapsed="$3"
   local verdict="too slow"
