@@ -149,11 +149,12 @@ pub enum RequiredLookup {
 /// `Not`) let a policy author build a compound condition out of the
 /// primitives without inventing a second predicate language.
 ///
-/// `ArgEquals`/`ArgAbsent`/`OperandContains` read a Bash invocation's
-/// argument list; `Field`/`FieldContains` read a top-level field of a
-/// non-Bash tool call's JSON input. Evaluating the wrong kind of predicate
-/// against the wrong kind of input is not an error -- it simply does not
-/// match, since a Bash rule and a Fields rule never share a family.
+/// `ArgEquals`/`ArgAbsent`/`OperandContains`/`TargetLooksLikeDirectory`
+/// read a Bash invocation's argument list; `Field`/`FieldContains` read a
+/// top-level field of a non-Bash tool call's JSON input. Evaluating the
+/// wrong kind of predicate against the wrong kind of input is not an
+/// error -- it simply does not match, since a Bash rule and a Fields rule
+/// never share a family.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Predicate {
@@ -168,6 +169,22 @@ pub enum Predicate {
     ArgAbsent(String),
     /// Some argument contains `needle` as a substring.
     OperandContains(String),
+    /// True when the invocation has a second non-flag argument (treating
+    /// the first non-flag argument as the search pattern) whose final
+    /// `/`-separated segment does not look like a single file
+    /// (`name.extension`). Built for a tool like `rg`/`ag` that recurses
+    /// from a directory by default with no `-r` flag needed, so a
+    /// directory-looking last operand -- e.g. `rg foo src` -- is content
+    /// search territory (FR-CMD-007's second recall pass on #1227) while a
+    /// file-looking one -- `rg foo src/main.rs` -- stays excluded as
+    /// single-file territory. A missing second operand does NOT match:
+    /// though `rg`/`ag` search the current directory by default when given
+    /// no path, that same shape is indistinguishable from `rg pattern` fed
+    /// by a preceding pipe (searching piped text, not files on disk) or
+    /// `rg --version` (no search at all) using args alone, and the
+    /// corpus measurement that motivated this predicate found both firing
+    /// on real commands.
+    TargetLooksLikeDirectory,
     /// The named top-level JSON field, read as a string, equals `equals`.
     Field {
         path: String,
@@ -212,6 +229,10 @@ impl Predicate {
                 MatchInput::Args(args) => args.iter().any(|a| a.contains(needle.as_str())),
                 MatchInput::Json(_) => false,
             },
+            Predicate::TargetLooksLikeDirectory => match input {
+                MatchInput::Args(args) => target_looks_like_directory(args),
+                MatchInput::Json(_) => false,
+            },
             Predicate::Field { path, equals } => match input {
                 MatchInput::Json(value) => value
                     .get(path)
@@ -231,6 +252,49 @@ impl Predicate {
             Predicate::Not(inner) => !inner.matches(input),
         }
     }
+}
+
+/// Implements [`Predicate::TargetLooksLikeDirectory`]: treats the first
+/// non-flag argument as the search pattern and, if a second non-flag
+/// argument exists, checks whether its final path segment has a
+/// `name.extension` shape. No second operand at all does NOT match, even
+/// though a tool like `rg`/`ag` recurses from the current directory by
+/// default when given no path -- measuring this predicate's "no operand"
+/// case on a real corpus (#1227's second recall pass) found it firing on
+/// `rg --version` (no pattern, no search at all) and on `rg pattern` fed
+/// by a preceding pipe (`git branch -a | rg 1058`, searching piped text,
+/// not files on disk, the same territory `cat f | grep foo` is already
+/// excluded from). `Predicate` sees only args, not tokenizer `Position`,
+/// so it cannot tell an implicit-cwd search apart from either of those --
+/// requiring an explicit second operand is what keeps this predicate from
+/// matching them. This is a naive, args-only check consistent with the
+/// rest of `Predicate` -- it does not know which flags consume a
+/// following value word, so a flag argument (e.g. `--glob '*.rs'`) can
+/// itself be miscounted as an operand. That is an accepted imprecision,
+/// the same kind `OperandContains` already carries.
+fn target_looks_like_directory(args: &[String]) -> bool {
+    let mut operands = args.iter().filter(|a| !a.starts_with('-'));
+    let _pattern = operands.next();
+    let Some(last) = operands.next_back() else {
+        return false;
+    };
+    !looks_like_a_file_name(last)
+}
+
+/// A path's final `/`-separated segment looks like a file name when
+/// splitting it on `.` yields at least two parts with the first and last
+/// both non-empty (`"foo.rs"`), not a bare dot or dotfile-shaped segment
+/// (`"."`, `".."`, `".git"`) or a plain name with no dot at all (`"src"`).
+fn looks_like_a_file_name(operand: &str) -> bool {
+    let segment = operand.rsplit('/').next().unwrap_or(operand);
+    let mut parts = segment.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let Some(last) = parts.next_back() else {
+        return false;
+    };
+    !first.is_empty() && !last.is_empty()
 }
 
 /// One argument-level rule (FR-CMD-011): a predicate, the lookups it
@@ -943,6 +1007,66 @@ mod tests {
         let p = Predicate::OperandContains("foo".to_string());
         assert!(p.matches(MatchInput::Args(&["barfoobaz".to_string()])));
         assert!(!p.matches(MatchInput::Args(&["barbaz".to_string()])));
+    }
+
+    // -- TargetLooksLikeDirectory: no path operand, or a directory-looking
+    // one, matches; a file-looking last operand does not (#1227's recall
+    // pass on rg/ag, which recurse by default with no operand at all).
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn target_looks_like_directory_does_not_match_with_no_second_operand() {
+        // A bare pattern with no path operand cannot be told apart from
+        // `rg` reading a preceding pipe or a bare `rg --version`, both of
+        // which the real-corpus measurement found matching here before
+        // this case was excluded.
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(!p.matches(MatchInput::Args(&args(&["foo"]))));
+        assert!(!p.matches(MatchInput::Args(&args(&["--version"]))));
+    }
+
+    #[test]
+    fn target_looks_like_directory_matches_a_bare_dot() {
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(p.matches(MatchInput::Args(&args(&["foo", "."]))));
+    }
+
+    #[test]
+    fn target_looks_like_directory_matches_a_plain_directory_name() {
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(p.matches(MatchInput::Args(&args(&["foo", "src"]))));
+        assert!(p.matches(MatchInput::Args(&args(&["foo", "src/"]))));
+        assert!(p.matches(MatchInput::Args(&args(&["foo", "packages/ui/src"]))));
+    }
+
+    #[test]
+    fn target_looks_like_directory_matches_a_dotfile_shaped_segment() {
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(p.matches(MatchInput::Args(&args(&["foo", ".git"]))));
+        assert!(p.matches(MatchInput::Args(&args(&["foo", ".."]))));
+    }
+
+    #[test]
+    fn target_looks_like_directory_does_not_match_a_file_looking_operand() {
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(!p.matches(MatchInput::Args(&args(&["foo", "src/main.rs"]))));
+        assert!(!p.matches(MatchInput::Args(&args(&["foo", "crates/x/src/diff.rs"]))));
+    }
+
+    #[test]
+    fn target_looks_like_directory_uses_the_last_operand_when_several_are_given() {
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(p.matches(MatchInput::Args(&args(&["foo", "src/main.rs", "tests"]))));
+        assert!(!p.matches(MatchInput::Args(&args(&["foo", "tests", "src/main.rs"]))));
+    }
+
+    #[test]
+    fn target_looks_like_directory_never_matches_json_input() {
+        let p = Predicate::TargetLooksLikeDirectory;
+        assert!(!p.matches(MatchInput::Json(&serde_json::json!({"file_path": "src"}))));
     }
 
     #[test]

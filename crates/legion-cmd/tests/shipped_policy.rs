@@ -97,6 +97,67 @@ fn grep_on_a_single_named_file_is_not_a_sym_job() {
     assert!(matches!(routed.decision, Decision::Allow { .. }));
 }
 
+// -- rg/ag: a second, targeted recall pass on #1227's invocation sym jobs.
+// rg/ag recurse from a directory by default with no flag, so the shape
+// that matters is the last operand, not a recursive flag. Measured on the
+// real corpus: a bare "." (already covered) and a directory-looking last
+// operand together outnumbered it by roughly 10:1 and hand-checked clean;
+// "no path operand at all" looked material too (33 hits) but hand-checking
+// it found it firing on `rg --version` (no search at all) and on `rg
+// pattern` fed by a preceding pipe (searching piped text, not files on
+// disk) far more often than on a genuine implicit-cwd search, so that
+// shape was left out rather than forced in.
+
+#[test]
+fn rg_bare_dot_reaches_find_content() {
+    assert_eq!(deny_instead("rg -n foo ."), "legion sym etc find-content");
+}
+
+#[test]
+fn rg_directory_operand_reaches_find_content() {
+    assert_eq!(deny_instead("rg foo src"), "legion sym etc find-content");
+    assert_eq!(
+        deny_instead("rg foo packages/ui/src"),
+        "legion sym etc find-content"
+    );
+}
+
+// -- Negative: a file-looking last operand is single-file territory -------
+
+#[test]
+fn rg_on_a_single_named_file_is_not_a_sym_job() {
+    let routed = route(
+        &policy(),
+        &bash_call("rg foo src/main.rs"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+// -- Negative: no path operand is excluded (piped stdin / --version risk) --
+
+#[test]
+fn rg_with_no_path_operand_is_not_a_sym_job() {
+    let routed = route(&policy(), &bash_call("rg foo"), &Context::default());
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
+fn rg_reading_a_pipe_is_not_a_sym_job() {
+    let routed = route(
+        &policy(),
+        &bash_call("git branch -a | rg foo"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
+fn rg_version_is_not_a_sym_job() {
+    let routed = route(&policy(), &bash_call("rg --version"), &Context::default());
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
 // -- Every declared sym job is reachable, in the order it is declared -----
 
 #[test]

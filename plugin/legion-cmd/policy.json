@@ -130,7 +130,7 @@
       "sym_command": "legion sym etc find-content",
       "invocation": {
         "binary": "rg",
-        "predicate": { "arg_equals": "." }
+        "predicate": "target_looks_like_directory"
       }
     },
     {
@@ -138,7 +138,7 @@
       "sym_command": "legion sym etc find-content",
       "invocation": {
         "binary": "ag",
-        "predicate": { "arg_equals": "." }
+        "predicate": "target_looks_like_directory"
       }
     },
     {
