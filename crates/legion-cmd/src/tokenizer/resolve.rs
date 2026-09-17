@@ -1,7 +1,7 @@
 //! Grouping the lexer's token stream into simple commands, and resolving
 //! each command position to an [`Invocation`] or an [`Opaque`] region.
 
-use super::lexer::{Scanner, Tok, Word};
+use super::lexer::{Scanner, SepKind, Tok, Word};
 use super::tables::{
     CLAUSE_KEYWORDS, END_KEYWORDS, INTERPRETERS, LOOKUPS, PREFIX_KEYWORDS, SCRIPT_EXTENSIONS,
     SHELLS, TWO_WORD_WRAPPERS, TwoWordWrapper, UNKNOWN_WRAPPERS, WRAPPERS,
@@ -27,12 +27,23 @@ enum CmdOrDef {
     Def { body: String },
 }
 
-fn group(toks: Vec<Tok>, out: &mut Vec<CmdOrDef>) {
+/// Groups `toks` into simple commands and definitions, and reports
+/// whether any [`SepKind::Other`] separator appeared anywhere in the
+/// stream (FR-CMD-008): a background `&`, a pipe, `&&`/`||`, a `;;` case
+/// terminator, or a `(...)` subshell boundary. This is a property of the
+/// whole token stream, not of any single [`Cmd`] -- a *trailing* `&`
+/// leaves no second command for a group count to catch (nothing follows
+/// it), so [`walk`] cannot infer it from `out`'s length alone.
+fn group(toks: Vec<Tok>, out: &mut Vec<CmdOrDef>) -> bool {
     let mut cur = Cmd::default();
     let mut redirect_pending = false;
+    let mut saw_other_operator = false;
     for t in toks {
         match t {
-            Tok::Sep => {
+            Tok::Sep(kind) => {
+                if kind == SepKind::Other {
+                    saw_other_operator = true;
+                }
                 if !cur.words.is_empty() || !cur.heredocs.is_empty() {
                     out.push(CmdOrDef::Cmd(std::mem::take(&mut cur)));
                 }
@@ -69,6 +80,7 @@ fn group(toks: Vec<Tok>, out: &mut Vec<CmdOrDef>) {
     if !cur.words.is_empty() || !cur.heredocs.is_empty() {
         out.push(CmdOrDef::Cmd(cur));
     }
+    saw_other_operator
 }
 
 fn is_assignment(text: &str) -> bool {
@@ -94,7 +106,7 @@ pub(super) fn walk(
 ) -> Result<(), ScanError> {
     let toks = Scanner::new(src).run()?;
     let mut grouped = Vec::new();
-    group(toks, &mut grouped);
+    let saw_other_operator = group(toks, &mut grouped);
     for item in &grouped {
         match item {
             CmdOrDef::Cmd(cmd) => {
@@ -123,20 +135,25 @@ pub(super) fn walk(
     // lossless only when the invocation it targets IS the whole command.
     // Computed once, at the true top level (never inside a substitution,
     // wrapper, or other recursion -- `inherited` is `None` only there):
-    // exactly one top-level group, with no redirect and no heredoc on it
-    // (an operator or `;`/`&&`/`|` would already have produced a second
-    // group via `Tok::Sep`, but a redirect target is dropped rather than
-    // grouped, so it needs its own check), and the whole scan -- including
-    // whatever the group's words recursed into -- resolved to exactly one
+    // no `SepKind::Other` operator anywhere (a background `&`, a pipe,
+    // `&&`/`||`, `;;`, or a `(...)` subshell -- checked over the whole
+    // token stream via `saw_other_operator`, not just the group count,
+    // since a *trailing* one leaves no second group for that count to
+    // catch), exactly one top-level group, with no redirect and no
+    // heredoc on it (a redirect target is dropped rather than grouped, so
+    // it needs its own check), and the whole scan -- including whatever
+    // the group's words recursed into -- resolved to exactly one
     // invocation, at `Position::First` (not `AfterAssignment`: an
     // `env_var=1 rewritable` prefix would also be dropped by a whole-string
     // replacement, and is not visible to the invocation's own `args`),
     // with nothing left opaque.
     if depth == 0 && inherited.is_none() {
-        out.is_single_simple_command = matches!(
-            grouped.as_slice(),
-            [CmdOrDef::Cmd(cmd)] if !cmd.has_redirect && cmd.heredocs.is_empty()
-        ) && out.opaque.is_empty()
+        out.is_single_simple_command = !saw_other_operator
+            && matches!(
+                grouped.as_slice(),
+                [CmdOrDef::Cmd(cmd)] if !cmd.has_redirect && cmd.heredocs.is_empty()
+            )
+            && out.opaque.is_empty()
             && matches!(out.invocations.as_slice(), [inv] if inv.position == Position::First);
     }
     Ok(())
@@ -255,13 +272,21 @@ fn resolve_at(
     out: &mut Scan,
 ) -> Result<(), ScanError> {
     let Some(w) = words.get(i) else { return Ok(()) };
-    if w.whole_subst || (w.text.starts_with('$') && w.text.len() > 1) {
-        // A bare `$VAR`, `$@`, `$*`, `${...}`, or a whole-word substitution
-        // as the command name: built at runtime, not resolvable without
-        // executing it. This holds even when the word was written `"$@"`
-        // (quoted for correct word-splitting) -- quoting changes how the
-        // shell splits the result, not whether the head is known ahead of
-        // execution.
+    if w.whole_subst
+        || (w.text.starts_with('$') && w.text.len() > 1)
+        || (!w.quoted && (w.text.contains('$') || w.text.contains('`')))
+    {
+        // A bare `$VAR`, `$@`, `$*`, `${...}`, a whole-word substitution,
+        // or ANY unquoted parameter expansion or substitution anywhere in
+        // the command name word (e.g. `gh${IFS}issue${IFS}list`, where the
+        // shell's own word-splitting after expansion turns one token into
+        // the governed `gh issue list`): built or reshaped at runtime, not
+        // resolvable without executing it. The first two arms hold even
+        // when the word was written `"$@"` (quoted for correct
+        // word-splitting) -- quoting changes how the shell splits the
+        // result, not whether the head is known ahead of execution; the
+        // third arm is `!w.quoted`-gated because a fully single-quoted
+        // `$` (`'$literal'`) is inert text, never an expansion.
         out.opaque.push(Opaque::DynamicCommand);
         return Ok(());
     }

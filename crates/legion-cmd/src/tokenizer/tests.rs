@@ -471,6 +471,35 @@ fn dynamic_command_from_positional_args_array_is_opaque() {
 }
 
 #[test]
+fn dynamic_command_from_an_embedded_unquoted_parameter_expansion_is_opaque() {
+    // The shell expands `${IFS}` (commonly whitespace) and then
+    // word-splits the result, turning one token into the governed
+    // `gh issue list` -- resolvable only by executing it, so it must
+    // never be silently allowed as an unrecognized literal binary.
+    let scan = scan("gh${IFS}issue${IFS}list").expect("valid");
+    assert!(
+        scan.invocations.is_empty(),
+        "must not resolve an invocation"
+    );
+    assert!(
+        scan.opaque
+            .iter()
+            .any(|o| matches!(o, Opaque::DynamicCommand))
+    );
+}
+
+#[test]
+fn a_quoted_dollar_inside_an_argument_stays_an_ordinary_argument() {
+    // Only the command-name word is checked for an unquoted expansion;
+    // a quoted `$` in an ARGUMENT is inert text and must resolve as a
+    // plain argument, not trigger anything.
+    let scan = scan("grep '$PATTERN' file.txt").expect("valid");
+    let inv = invocation(&scan, "grep").expect("grep resolved");
+    assert_eq!(inv.args, vec!["$PATTERN", "file.txt"]);
+    assert!(scan.opaque.is_empty());
+}
+
+#[test]
 fn sourced_substitution_is_opaque() {
     let scan = scan("source <(echo \"grep -rn foo src\")").expect("valid");
     assert!(scan.opaque.iter().any(|o| matches!(o, Opaque::Sourced)));
@@ -673,6 +702,25 @@ fn an_and_and_compound_is_not_a_single_simple_command() {
 #[test]
 fn a_semicolon_compound_is_not_a_single_simple_command() {
     let scan = scan("gh issue list; echo done").expect("valid command");
+    assert!(!scan.is_single_simple_command);
+}
+
+#[test]
+fn a_trailing_semicolon_alone_is_still_a_single_simple_command() {
+    // A lone trailing `;` (or newline) ends the command with no other
+    // effect -- semantically identical to the bare command -- unlike a
+    // trailing `&`, which backgrounds it.
+    let scan = scan("gh issue list;").expect("valid command");
+    assert!(scan.is_single_simple_command);
+}
+
+#[test]
+fn a_trailing_background_operator_is_not_a_single_simple_command() {
+    // The group count alone cannot catch this: nothing follows the `&`,
+    // so there is still only one top-level group, but backgrounding
+    // changes what the command does -- a rewrite that drops it is not
+    // lossless.
+    let scan = scan("gh issue list &").expect("valid command");
     assert!(!scan.is_single_simple_command);
 }
 

@@ -518,6 +518,14 @@ fn gh_issue_list_after_and_and_denies_instead_of_rewriting_the_whole_command() {
 }
 
 #[test]
+fn gh_issue_list_backgrounded_denies_instead_of_rewriting_the_whole_command() {
+    // A trailing `&` leaves no second top-level group (nothing follows
+    // it), so this can only be caught by tracking the operator itself,
+    // not the group count.
+    assert_eq!(deny_instead("gh issue list &"), GH_ISSUE_LIST_TARGET);
+}
+
+#[test]
 fn gh_pr_merge_admin_asks() {
     let routed = route(
         &policy(),

@@ -112,14 +112,15 @@ pub enum PolicyError {
     )]
     MissingRewriteExactArgs { pointer: String },
 
-    /// A Fields rule's `"rewrite"` outcome declares `"exact_args"`. A
-    /// Fields call's JSON input has no argument list for it to check, so
-    /// the declaration could never take effect -- rejected here rather
-    /// than silently ignored.
+    /// A Fields rule's outcome is `"rewrite"`. No Fields rewrite semantics
+    /// exist: FR-CMD-008's lossless check reads an invocation's argument
+    /// list, which a Fields call's JSON input does not have, so nothing
+    /// could ever judge such a rewrite lossless -- rejected outright
+    /// rather than accepted with no eligibility check at all.
     #[error(
-        "{pointer}: a Fields rule's \"rewrite\" outcome cannot declare \"exact_args\"; its JSON input has no argument list to check"
+        "{pointer}: a Fields rule cannot use a \"rewrite\" outcome; no Fields rewrite semantics exist"
     )]
-    RewriteExactArgsOnFieldsRule { pointer: String },
+    RewriteUnsupportedOnFieldsRule { pointer: String },
 }
 
 /// The tool kinds the policy can route on (FR-CMD-011). A `Bash` call
@@ -394,15 +395,15 @@ fn looks_like_a_file_name(operand: &str) -> bool {
 /// otherwise.
 ///
 /// `exact_args` is FR-CMD-008's lossless-rewrite declaration for this
-/// rule: when `decision` is [`Decision::Rewrite`] and the rule governs a
-/// Bash invocation's arguments, `parse_policy` requires it (see
-/// [`PolicyError::MissingRewriteExactArgs`]), and `evaluate` rewrites only
-/// when the matched invocation's arguments equal `exact_args` exactly,
-/// denying naming the target otherwise. It is always `None` for every
-/// other decision kind, and `parse_policy` refuses it on a Fields rule's
-/// Rewrite decision (see [`PolicyError::RewriteExactArgsOnFieldsRule`]),
-/// since a Fields call's JSON input has no argument list to check it
-/// against.
+/// rule: when `decision` is [`Decision::Rewrite`], `parse_policy`
+/// requires it (see [`PolicyError::MissingRewriteExactArgs`]), and
+/// `evaluate` rewrites only when the matched invocation's arguments equal
+/// `exact_args` exactly, denying naming the target otherwise. It is
+/// always `None` for every other decision kind. A Fields rule can never
+/// have a `Decision::Rewrite` at all (see
+/// [`PolicyError::RewriteUnsupportedOnFieldsRule`]): no Fields rewrite
+/// semantics exist, since a Fields call's JSON input has no argument
+/// list to judge losslessness against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub id: String,
@@ -786,35 +787,33 @@ fn convert_decision(
             None,
         )),
         "rewrite" => {
+            // No Fields rewrite semantics exist (FR-CMD-008): a Fields
+            // call's JSON input has no argument list to judge losslessness
+            // against, so a "rewrite" outcome here is rejected outright
+            // rather than accepted with no eligibility check at all.
+            if let PredicateContext::Fields = context {
+                return Err(PolicyError::RewriteUnsupportedOnFieldsRule {
+                    pointer: pointer.to_string(),
+                });
+            }
             let target = required_field("target")?;
             let reason = required_field("reason")?;
             validate_rewrite_target(&format!("{pointer}/target"), &target)?;
             // FR-CMD-008: a rewrite fires only when the matched
-            // invocation's arguments equal `exact_args` exactly -- a Bash
-            // rule's invocation carries an argument list to check this
-            // against; a Fields rule's JSON input does not, so the
-            // declaration is required for one context and forbidden for
-            // the other.
-            let exact_args_value = value.get("exact_args");
-            let exact_args = match (context, exact_args_value) {
-                (PredicateContext::Args, Some(raw)) => {
+            // invocation's arguments equal `exact_args` exactly.
+            let exact_args = match value.get("exact_args") {
+                Some(raw) => {
                     let args: Vec<String> = serde_json::from_value(raw.clone()).map_err(|e| {
                         PolicyError::InvalidOutcome {
                             pointer: format!("{pointer}/exact_args"),
                             message: format!("invalid \"exact_args\": {e}"),
                         }
                     })?;
-                    Some(args)
+                    args
                 }
-                (PredicateContext::Args, None) => {
+                None => {
                     return Err(PolicyError::MissingRewriteExactArgs {
                         pointer: pointer.to_string(),
-                    });
-                }
-                (PredicateContext::Fields, None) => None,
-                (PredicateContext::Fields, Some(_)) => {
-                    return Err(PolicyError::RewriteExactArgsOnFieldsRule {
-                        pointer: format!("{pointer}/exact_args"),
                     });
                 }
             };
@@ -824,7 +823,7 @@ fn convert_decision(
                     reason,
                 },
                 false,
-                exact_args,
+                Some(exact_args),
             ))
         }
         "proxy" => {
@@ -1197,6 +1196,8 @@ mod tests {
 
     #[test]
     fn fields_rule_rewrite_outcome_with_exact_args_is_rejected_with_pointer() {
+        // No Fields rewrite semantics exist: the "rewrite" outcome kind
+        // itself is rejected on a Fields rule, not just its exact_args.
         let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
             {"id": "r1", "predicate": "always",
              "outcome": {"kind": "rewrite", "target": "legion edit", "reason": "why",
@@ -1204,25 +1205,25 @@ mod tests {
         ]}}}"#;
         let err = parse_policy(text).unwrap_err();
         match err {
-            PolicyError::RewriteExactArgsOnFieldsRule { pointer } => {
-                assert_eq!(pointer, "/tools/Edit/rules/0/outcome/exact_args");
+            PolicyError::RewriteUnsupportedOnFieldsRule { pointer } => {
+                assert_eq!(pointer, "/tools/Edit/rules/0/outcome");
             }
-            other => panic!("expected RewriteExactArgsOnFieldsRule, got {other:?}"),
+            other => panic!("expected RewriteUnsupportedOnFieldsRule, got {other:?}"),
         }
     }
 
     #[test]
-    fn fields_rule_rewrite_outcome_without_exact_args_parses() {
+    fn fields_rule_rewrite_outcome_without_exact_args_is_still_rejected_with_pointer() {
         let text = r#"{"tools": {"Edit": {"kind": "fields", "rules": [
             {"id": "r1", "predicate": "always",
              "outcome": {"kind": "rewrite", "target": "legion edit", "reason": "why"}}
         ]}}}"#;
-        let policy = parse_policy(text).expect("valid Fields rewrite should parse");
-        match policy.tools.get(&ToolKind::Edit) {
-            Some(ToolRules::Fields { rules }) => {
-                assert_eq!(rules[0].exact_args, None);
+        let err = parse_policy(text).unwrap_err();
+        match err {
+            PolicyError::RewriteUnsupportedOnFieldsRule { pointer } => {
+                assert_eq!(pointer, "/tools/Edit/rules/0/outcome");
             }
-            other => panic!("expected Edit fields rules, got {other:?}"),
+            other => panic!("expected RewriteUnsupportedOnFieldsRule, got {other:?}"),
         }
     }
 

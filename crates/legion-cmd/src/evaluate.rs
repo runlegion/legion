@@ -125,11 +125,12 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 /// FR-CMD-008: the harness that acts on a [`Decision::Rewrite`] replaces
 /// the WHOLE command string with the rewrite's target, so a rewrite is
 /// lossless only when the invocation it targets IS the whole command --
-/// `scan.is_single_simple_command` is that fact. Applied once, here,
-/// after either a sym job's precedence-step decision or the
-/// strictest-order fold has produced the final [`Decision`], so it
-/// governs a sym-job Rewrite and a family-rule Rewrite identically and
-/// lives in route rather than needing a matching check in the adapter.
+/// `scan.is_single_simple_command` is that fact. Wraps only the
+/// strictest-order fold's result, since that is the one place a
+/// [`Decision::Rewrite`] can come from: a sym job never rewrites (it
+/// always denies naming the sym command, see `find_sym_job`'s doc) and
+/// returns before this ever runs, so this gate governs family rewrites
+/// alone, in route rather than needing a matching check in the adapter.
 fn gate_rewrite_on_whole_command(routed: Routed, is_single_simple_command: bool) -> Routed {
     if is_single_simple_command {
         return routed;

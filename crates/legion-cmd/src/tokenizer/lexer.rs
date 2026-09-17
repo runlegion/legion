@@ -19,12 +19,31 @@ pub(super) struct Word {
     pub(super) substs: Vec<String>,
 }
 
+/// Which kind of command boundary a [`Tok::Sep`] is (FR-CMD-008): a plain
+/// sequential separator, or an operator whose semantics differ from just
+/// running the next command in sequence (backgrounding, piping, `&&`/`||`
+/// short-circuiting, a `(...)` subshell, or a `;;` case terminator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SepKind {
+    /// `;` or a newline: ends the current command with no other effect.
+    Sequential,
+    /// `&`, `|`, `&&`, `||`, `|&`, `;;`, `(`, or `)`: the operator's
+    /// spelling changes what the command does (backgrounds it, pipes it,
+    /// short-circuits on it, scopes it in a subshell, ...), so a rewrite
+    /// that discards it -- as replacing the whole command string would --
+    /// is never lossless.
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum Tok {
     Word(Word),
-    /// `;` `&` `&&` `||` `|` `|&` `;;` newline `(` `)`. The operator's own
-    /// spelling never matters downstream -- only that a boundary occurred.
-    Sep,
+    /// `;` `&` `&&` `||` `|` `|&` `;;` newline `(` `)`: a command
+    /// boundary. Every spelling ends the current command the same way
+    /// downstream in `resolve::group`, but which one it was still
+    /// matters for FR-CMD-008's whole-command-atomicity fact -- see
+    /// [`SepKind`].
+    Sep(SepKind),
     /// A redirect operator; the next word is its target, not an argument.
     Redirect,
     /// A heredoc body, attached to the command whose `<<` introduced it.
@@ -116,7 +135,7 @@ impl Scanner {
                 '\\' if self.peek(1) == Some('\n') => self.i += 2,
                 '\n' => {
                     self.i += 1;
-                    toks.push(Tok::Sep);
+                    toks.push(Tok::Sep(SepKind::Sequential));
                     self.read_heredoc_bodies(&mut pending, &mut toks)?;
                     at_token_start = true;
                 }
@@ -141,13 +160,22 @@ impl Scanner {
                                 | ('|', Some('&'))
                         );
                         self.i += if two_char { 2 } else { 1 };
-                        toks.push(Tok::Sep);
+                        // A lone `;` just ends the command; every other
+                        // spelling here -- `&` (background), `|`/`|&`
+                        // (pipe), `&&`/`||` (short-circuit), `;;` (case
+                        // terminator) -- changes what runs (FR-CMD-008).
+                        let kind = if !two_char && ch == ';' {
+                            SepKind::Sequential
+                        } else {
+                            SepKind::Other
+                        };
+                        toks.push(Tok::Sep(kind));
                     }
                     at_token_start = true;
                 }
                 '(' | ')' => {
                     self.i += 1;
-                    toks.push(Tok::Sep);
+                    toks.push(Tok::Sep(SepKind::Other));
                     at_token_start = true;
                 }
                 '<' | '>' => {
