@@ -9,7 +9,8 @@ use crate::decision::{
     Context, DecidingEntry, Decision, Facts, Lookup, ManagedTarget, ProxyReason, Routed, ToolCall,
 };
 use crate::policy::{
-    Family, MatchInput, Policy, RequiredLookup, Rule, SymJob, SymJobMatcher, ToolKind, ToolRules,
+    BinaryOptions, Family, MatchInput, Policy, RequiredLookup, Rule, SymJob, SymJobMatcher,
+    ToolKind, ToolRules,
 };
 use crate::tokenizer::{self, Invocation, Opaque, Scan};
 
@@ -129,55 +130,136 @@ fn evaluate_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         };
     }
 
-    let families = bash_families(policy);
+    let (families, binaries) = bash_tool_rules(policy);
     let mut parts: Vec<(Decision, DecidingEntry)> = scan
         .invocations
         .iter()
-        .map(|inv| evaluate_invocation(families, inv, ctx))
+        .map(|inv| evaluate_invocation(families, binaries, inv, ctx))
         .collect();
     parts.extend(scan.opaque.iter().map(|_| opaque_part()));
 
     fold(parts, facts)
 }
 
-fn bash_families(policy: &Policy) -> &BTreeMap<String, Family> {
-    static EMPTY: BTreeMap<String, Family> = BTreeMap::new();
+fn bash_tool_rules(
+    policy: &Policy,
+) -> (&BTreeMap<String, Family>, &BTreeMap<String, BinaryOptions>) {
+    static EMPTY_FAMILIES: BTreeMap<String, Family> = BTreeMap::new();
+    static EMPTY_BINARIES: BTreeMap<String, BinaryOptions> = BTreeMap::new();
     match policy.tools.get(&ToolKind::Bash) {
-        Some(ToolRules::Bash { families }) => families,
-        _ => &EMPTY,
+        Some(ToolRules::Bash { families, binaries }) => (families, binaries),
+        _ => (&EMPTY_FAMILIES, &EMPTY_BINARIES),
     }
+}
+
+/// The first non-flag argument in `inv.args` -- `binary`'s subcommand, if
+/// any -- found by skipping `binary`'s own global options that take a
+/// separate value word (e.g. `git -C <dir>`) so a global option's value
+/// is never mistaken for the subcommand. `None` when no non-flag argument
+/// remains (or exists at all): `binary` was invoked with no subcommand.
+/// Also returns whether that resolution is doubtful: `true` when at least
+/// one flag was skipped before settling on the verb that was not in
+/// `binary`'s declared `global_value_options`, meaning an unlisted option
+/// could have consumed the next word as its own value rather than that
+/// word being the real subcommand.
+fn subcommand_word<'a>(
+    binaries: &BTreeMap<String, BinaryOptions>,
+    inv: &'a Invocation,
+) -> (Option<&'a str>, bool) {
+    let value_options: &[String] = binaries
+        .get(&inv.binary)
+        .map(|b| b.global_value_options.as_slice())
+        .unwrap_or(&[]);
+    let mut index = 0;
+    let mut doubtful = false;
+    while index < inv.args.len() {
+        let arg = &inv.args[index];
+        if arg.starts_with('-') {
+            if value_options.iter().any(|opt| opt == arg) {
+                index += 2;
+            } else {
+                doubtful = true;
+                index += 1;
+            }
+            continue;
+        }
+        return (Some(arg), doubtful);
+    }
+    (None, doubtful)
 }
 
 /// Finds the family governing `inv`, trying the verb-scoped two-word key
 /// (`"git push"`) before falling back to the binary alone (`"git"`), so a
 /// family can govern one subcommand of a binary without governing every
-/// other subcommand (FR-CMD-011's `"git push"` example key).
-fn find_family<'p>(families: &'p BTreeMap<String, Family>, inv: &Invocation) -> Option<&'p Family> {
-    if let Some(first) = inv.args.first()
-        && !first.starts_with('-')
-    {
-        let two_word = format!("{} {first}", inv.binary);
+/// other subcommand (FR-CMD-011's `"git push"` example key). The
+/// subcommand word is found by skipping `binary`'s own global value
+/// options (e.g. `git -C /tmp push` resolves to `"git push"`, not the
+/// undefined `"git -C"` a naive first-argument check would produce).
+/// Also returns whether that resolution is doubtful (see
+/// [`subcommand_word`]) -- the caller decides whether an unresolved,
+/// doubtful call is worth failing closed over.
+fn find_family<'p>(
+    families: &'p BTreeMap<String, Family>,
+    binaries: &BTreeMap<String, BinaryOptions>,
+    inv: &Invocation,
+) -> (Option<&'p Family>, bool) {
+    let (verb, doubtful) = subcommand_word(binaries, inv);
+    if let Some(verb) = verb {
+        let two_word = format!("{} {verb}", inv.binary);
         if let Some(family) = families.get(&two_word) {
-            return Some(family);
+            return (Some(family), doubtful);
         }
     }
-    families.get(&inv.binary)
+    (families.get(&inv.binary), doubtful)
+}
+
+/// True when `families` governs at least one subcommand of `inv.binary`
+/// (a key of the form `"<binary> <verb>"`) and that verb literally
+/// appears somewhere in `inv.args`. Consulted only when [`find_family`]'s
+/// resolution came back both unresolved and doubtful (an unlisted global
+/// option could have consumed the real verb as its own value, e.g.
+/// `git --unlisted-opt value push`) -- an unresolved but *confident*
+/// resolution (the verb was found with no doubt, e.g. `git branch -d
+/// push`, a branch named `push`) is trusted and never fails closed on an
+/// unrelated word (FR-CMD-016).
+fn governed_subcommand_present(families: &BTreeMap<String, Family>, inv: &Invocation) -> bool {
+    let prefix = format!("{} ", inv.binary);
+    families.keys().any(|key| {
+        key.strip_prefix(prefix.as_str())
+            .is_some_and(|verb| inv.args.iter().any(|arg| arg == verb))
+    })
 }
 
 fn evaluate_invocation(
     families: &BTreeMap<String, Family>,
+    binaries: &BTreeMap<String, BinaryOptions>,
     inv: &Invocation,
     ctx: &Context,
 ) -> (Decision, DecidingEntry) {
-    let Some(family) = find_family(families, inv) else {
-        // FR-CMD-016: no managed binary and no matching rule -> allow,
-        // surfaced to the agent.
+    let (family, resolution_is_doubtful) = find_family(families, binaries, inv);
+    if let Some(family) = family {
+        return evaluate_rules(&family.rules, MatchInput::Args(&inv.args), ctx);
+    }
+    if resolution_is_doubtful && governed_subcommand_present(families, inv) {
+        // FR-CMD-016: the subcommand resolver skipped an unlisted flag
+        // before settling on a verb, so that verb could really be a
+        // skipped option's value -- and a governed verb is plainly
+        // present in the args anyway. Fail closed, deny, rather than
+        // trust a resolution that was already in doubt.
         return (
-            allow_default(default_messages::NO_MANAGED_BINARY),
+            deny_default(default_messages::UNRESOLVED_MANAGED_RULE),
             DecidingEntry::Default,
         );
-    };
-    evaluate_rules(&family.rules, MatchInput::Args(&inv.args), ctx)
+    }
+    // FR-CMD-016: no managed binary and no matching rule -> allow,
+    // surfaced to the agent. This also covers a confident resolution that
+    // simply named an ungoverned verb (e.g. `git status`, or `push` as a
+    // `git branch -d push` operand, not a subcommand) -- no reason to
+    // second-guess a resolution nothing cast doubt on.
+    (
+        allow_default(default_messages::NO_MANAGED_BINARY),
+        DecidingEntry::Default,
+    )
 }
 
 /// Walks `rules` in declared order, returning the first whose predicate
@@ -234,7 +316,7 @@ fn opaque_part() -> (Decision, DecidingEntry) {
         Decision::Proxy {
             reason: ProxyReason::Opaque,
         },
-        DecidingEntry::Default,
+        DecidingEntry::Opaque,
     )
 }
 
@@ -676,6 +758,16 @@ mod tests {
                 reason: ProxyReason::Opaque
             }
         );
+    }
+
+    #[test]
+    fn opaque_region_is_tagged_deciding_entry_opaque_not_default() {
+        // An opaque Proxy part is recorded as DecidingEntry::Opaque, not
+        // DecidingEntry::Default, so the ledger can tell a genuinely
+        // opaque region apart from an FR-CMD-016 default that happens to
+        // produce the same Proxy decision.
+        let routed = evaluate(&policy(), &bash_call("./deploy.sh"), &Context::default());
+        assert_eq!(routed.entry, DecidingEntry::Opaque);
     }
 
     #[test]

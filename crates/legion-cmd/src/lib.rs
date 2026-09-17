@@ -22,8 +22,8 @@ pub use decision::{
     ManagedTarget, NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };
 pub use policy::{
-    ArgSpec, Family, MatchInput, Policy, PolicyError, Predicate, RequiredLookup, RewriteSpec, Rule,
-    SymJob, SymJobMatcher, ToolKind, ToolRules, parse_policy,
+    ArgSpec, BinaryOptions, Family, MatchInput, Policy, PolicyError, Predicate, RequiredLookup,
+    RewriteSpec, Rule, SymJob, SymJobMatcher, ToolKind, ToolRules, parse_policy,
 };
 pub use route::route;
 pub use tokenizer::{Invocation, MAX_DEPTH, Opaque, Position, Scan, ScanError, scan};

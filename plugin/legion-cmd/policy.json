@@ -3,6 +3,21 @@
   "tools": {
     "Bash": {
       "kind": "bash",
+      "binaries": {
+        "git": {
+          "global_value_options": [
+            "-C",
+            "-c",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--exec-path"
+          ]
+        },
+        "gh": {
+          "global_value_options": ["-R", "--repo", "--hostname"]
+        }
+      },
       "families": {
         "git push": {
           "rules": [

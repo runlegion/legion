@@ -412,6 +412,13 @@ pub enum DecidingEntry {
     /// result, or an empty policy).
     Default,
 
+    /// A region the tokenizer could not see into (FR-CMD-004, FR-CMD-007)
+    /// contributed a [`Decision::Proxy`] part. Distinct from `Default`
+    /// even though both can produce the same `Proxy` decision, so the
+    /// ledger can tell an FR-CMD-016 default apart from a command that was
+    /// genuinely opaque -- the two need different coverage bookkeeping.
+    Opaque,
+
     /// The tokenizer could not parse the command (FR-CMD-007); `route`
     /// returns [`Decision::Ask`] and this entry carries the parse error's
     /// message.

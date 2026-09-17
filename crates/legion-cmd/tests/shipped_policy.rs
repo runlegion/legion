@@ -355,6 +355,86 @@ fn git_push_force_denies() {
     );
 }
 
+// -- A managed binary's own global value option must not hide its
+// subcommand from family resolution (correctness review on PR #1240).
+
+#[test]
+fn git_with_a_global_value_option_before_push_still_denies_force() {
+    assert_eq!(
+        deny_instead("git -C /tmp push --force"),
+        "git push --force-with-lease"
+    );
+}
+
+#[test]
+fn git_with_a_short_value_option_before_push_still_denies_force() {
+    assert_eq!(
+        deny_instead("git -c user.name=x push --force"),
+        "git push --force-with-lease"
+    );
+}
+
+#[test]
+fn gh_with_a_global_value_option_before_pr_merge_still_asks() {
+    let routed = route(
+        &policy(),
+        &bash_call("gh --repo owner/repo pr merge 42 --admin"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Ask(_)));
+}
+
+#[test]
+fn git_with_a_global_value_option_before_an_ungoverned_subcommand_still_allows() {
+    let routed = route(
+        &policy(),
+        &bash_call("git -C /tmp status"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
+fn git_with_an_unlisted_global_flag_still_fails_closed_to_deny() {
+    // "--foo" is not in git's declared global_value_options, so
+    // subcommand_word misreads "bar" (--foo's value) as the subcommand
+    // and "git bar" resolves to no family. "push" is still literally
+    // present in the args, so this must deny, never fall through to the
+    // no-managed-binary allow default.
+    let routed = route(
+        &policy(),
+        &bash_call("git --foo bar push --force"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Deny(_)));
+}
+
+#[test]
+fn git_grep_option_naming_a_governed_verb_still_allows() {
+    // subcommand_word finds "log" as the very first argument -- no flag
+    // was skipped, so the resolution is confident, not doubtful. "push"
+    // only appears as --grep's search text, not a real subcommand, so
+    // the fail-closed net must not fire on it.
+    let routed = route(
+        &policy(),
+        &bash_call("git log --grep push"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
+#[test]
+fn git_branch_operand_naming_a_governed_verb_still_allows() {
+    // Same shape: "branch" resolves confidently as the first argument,
+    // and "push" here is a branch name being deleted, not a subcommand.
+    let routed = route(
+        &policy(),
+        &bash_call("git branch -d push"),
+        &Context::default(),
+    );
+    assert!(matches!(routed.decision, Decision::Allow { .. }));
+}
+
 #[test]
 fn chmod_777_denies() {
     assert_eq!(deny_instead("chmod 777 x"), "chmod 755");
