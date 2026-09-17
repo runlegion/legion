@@ -18,8 +18,8 @@ fn write_policy(dir: &Path, contents: &str) -> std::path::PathBuf {
 /// Runs `legion cmd-check --hook` once with `payload` on stdin, in a fresh
 /// tempdir. `policy` is written as `LEGION_CMD_POLICY` when given; `None`
 /// leaves it (and `CLAUDE_PLUGIN_ROOT`) unset, exercising the
-/// no-policy-configured path. Every test in this file drives the same
-/// binary boundary through this one helper so the process/env/stdin
+/// no-policy-configured path. Every `--hook` test in this file drives the
+/// same binary boundary through this one helper so the process/env/stdin
 /// wiring is written once.
 fn run_hook_cli(policy: Option<&str>, payload: &[u8]) -> Output {
     let tmp = TempDir::new().expect("tempdir");
