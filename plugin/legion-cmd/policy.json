@@ -1,0 +1,264 @@
+{
+  "_comment": "legion-cmd's default routing policy (FR-CMD-011). Parsed by legion-cmd::parse_policy; route never reads this file itself -- the adapter does. This slice ships only enough rules to exercise every Decision arm end to end; the hook-parity issue fills in the rules that account for the current hooks.",
+  "tools": {
+    "Bash": {
+      "kind": "bash",
+      "binaries": {
+        "git": {
+          "global_value_options": [
+            "-C",
+            "-c",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--exec-path"
+          ]
+        },
+        "gh": {
+          "global_value_options": ["-R", "--repo", "--hostname"]
+        }
+      },
+      "families": {
+        "git push": {
+          "rules": [
+            {
+              "id": "git-push-force",
+              "predicate": { "arg_equals": "--force" },
+              "outcome": {
+                "kind": "deny",
+                "reason": "a force-push rewrites shared history other agents may already be based on",
+                "instead": "git push --force-with-lease"
+              }
+            },
+            {
+              "id": "git-push-default",
+              "predicate": "always",
+              "outcome": { "kind": "allow", "note": null }
+            }
+          ]
+        },
+        "chmod": {
+          "rules": [
+            {
+              "id": "chmod-world-writable",
+              "predicate": { "operand_contains": "777" },
+              "outcome": {
+                "kind": "deny",
+                "reason": "777 opens the tree to every user on the machine",
+                "instead": "chmod 755"
+              }
+            }
+          ]
+        },
+        "gh issue": {
+          "rules": [
+            {
+              "id": "gh-issue-list",
+              "predicate": { "arg_equals": "list" },
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion issue list",
+                "reason": "gh issue list duplicates legion's own issue tracking surface"
+              }
+            }
+          ]
+        },
+        "gh pr": {
+          "rules": [
+            {
+              "id": "gh-pr-merge-admin",
+              "predicate": {
+                "all": [
+                  { "arg_equals": "merge" },
+                  { "arg_equals": "--admin" }
+                ]
+              },
+              "outcome": {
+                "kind": "ask",
+                "question": "merge this PR bypassing branch protection?",
+                "reason": "--admin skips required status checks and reviews",
+                "needs_operator": true
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "sym_jobs": [
+    {
+      "id": "invocation-find-content-grep",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "grep",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-r" },
+            { "arg_equals": "-R" },
+            { "arg_equals": "--recursive" },
+            { "arg_equals": "-rn" },
+            { "arg_equals": "-nr" },
+            { "arg_equals": "-rl" },
+            { "arg_equals": "-lr" },
+            { "arg_equals": "-ri" },
+            { "arg_equals": "-ir" },
+            { "arg_equals": "-rw" },
+            { "arg_equals": "-wr" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invocation-find-content-egrep",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "egrep",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-r" },
+            { "arg_equals": "-R" },
+            { "arg_equals": "--recursive" },
+            { "arg_equals": "-rn" },
+            { "arg_equals": "-nr" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invocation-find-content-fgrep",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "fgrep",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-r" },
+            { "arg_equals": "-R" },
+            { "arg_equals": "--recursive" },
+            { "arg_equals": "-rn" },
+            { "arg_equals": "-nr" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "invocation-find-content-rg",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "rg",
+        "predicate": "target_looks_like_directory"
+      }
+    },
+    {
+      "id": "invocation-find-content-ag",
+      "sym_command": "legion sym etc find-content",
+      "invocation": {
+        "binary": "ag",
+        "predicate": "target_looks_like_directory"
+      }
+    },
+    {
+      "id": "invocation-find-file-find",
+      "sym_command": "legion sym etc find-file",
+      "invocation": {
+        "binary": "find",
+        "predicate": {
+          "any": [
+            { "arg_equals": "-name" },
+            { "arg_equals": "-iname" },
+            { "arg_equals": "-path" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "interpreter-find-content-pathlib",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["rglob(", "read_text()"]
+    },
+    {
+      "id": "interpreter-find-content-oswalk",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.walk(", ".read()"]
+    },
+    {
+      "id": "interpreter-find-content-oswalk-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.walk(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-pathlib-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["rglob(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-glob",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["glob.glob(", ".read()"]
+    },
+    {
+      "id": "interpreter-find-content-glob-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["glob.glob(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-glob-readlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["glob.glob(", "readlines()"]
+    },
+    {
+      "id": "interpreter-find-content-oslistdir",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.listdir(", ".read()"]
+    },
+    {
+      "id": "interpreter-find-content-oslistdir-iterlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.listdir(", "enumerate("]
+    },
+    {
+      "id": "interpreter-find-content-oslistdir-readlines",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["os.listdir(", "readlines()"]
+    },
+    {
+      "id": "interpreter-find-content-node",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["readdirSync(", "readFileSync("]
+    },
+    {
+      "id": "interpreter-find-file-pathlib",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["rglob("]
+    },
+    {
+      "id": "interpreter-find-file-glob",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["glob.glob("]
+    },
+    {
+      "id": "interpreter-find-file-oswalk",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["os.walk("]
+    },
+    {
+      "id": "interpreter-find-file-oslistdir",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["os.listdir("]
+    },
+    {
+      "id": "interpreter-find-file-node",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["readdirSync("]
+    },
+    {
+      "id": "interpreter-find-file-subprocess-find-single-quoted",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["subprocess", "'find'"]
+    },
+    {
+      "id": "interpreter-find-file-subprocess-find-double-quoted",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": ["subprocess", "\"find\""]
+    }
+  ]
+}
