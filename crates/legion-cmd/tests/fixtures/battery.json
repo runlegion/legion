@@ -14,7 +14,8 @@
     "cmd": "git stash push -- src/a.rs\ngit status --short",
     "note": "any-token sees git + push",
     "expected": "benign",
-    "managed": [["git", "first"], ["git", "after-operator"]]
+    "managed": [["git", "first"], ["git", "after-operator"]],
+    "absent": ["push"]
   },
   {
     "id": "FP-no-gh-for-loop-word",
@@ -390,7 +391,8 @@
     "cmd": "jq -s -f /dev/stdin corpus/agent-commands.jsonl <<'JQ'\nmap(select(test(\"rglob|walkdir|grep\"))) | length\nJQ",
     "expected": "benign",
     "managed": [["jq", "first"]],
-    "unreduced": ["interpreter-body"]
+    "unreduced": ["interpreter-body"],
+    "absent": ["grep"]
   },
   {
     "id": "grep-word-in-string",

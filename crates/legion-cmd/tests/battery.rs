@@ -102,6 +102,22 @@ fn assert_managed_subset(id: &str, scan: &Scan, expected: &[Value]) {
     }
 }
 
+/// Asserts a benign row's `managed` list is exhaustive: every pair the row
+/// names is present (`assert_managed_subset`'s multiplicity check), and no
+/// other invocation resolves alongside them. A benign row exists to prove a
+/// naive heuristic's false positive stays absent; a subset check alone would
+/// pass whether or not that false positive resolved, since it only ever
+/// asserts about what the row lists, never about what else showed up.
+fn assert_managed_exact(id: &str, scan: &Scan, expected: &[Value]) {
+    assert_managed_subset(id, scan, expected);
+    assert_eq!(
+        scan.invocations.len(),
+        expected.len(),
+        "{id}: a benign row's managed list must account for every invocation, got {:#?}",
+        scan.invocations
+    );
+}
+
 fn assert_unreduced_set(id: &str, scan: &Scan, expected: &[Value]) {
     let expected_reasons: HashSet<UnreducedReason> = expected
         .iter()
@@ -182,9 +198,6 @@ fn battery_rows_run_and_report_parse_errors() {
         let scan =
             result.unwrap_or_else(|err| panic!("{id}: expected a Scan, got ScanError: {err}"));
 
-        if let Some(managed) = row.get("managed").and_then(Value::as_array) {
-            assert_managed_subset(id, &scan, managed);
-        }
         // A row that names no `unreduced` key means none: this is the
         // mechanical check that no `Unreduced` region -- in particular no
         // `WrapperPayload` or `ScriptFile`, which would mean a name crept
@@ -195,8 +208,51 @@ fn battery_rows_run_and_report_parse_errors() {
             .cloned()
             .unwrap_or_default();
         assert_unreduced_set(id, &scan, &unreduced);
-        if let Some(absent) = row.get("absent").and_then(Value::as_array) {
-            assert_absent(id, &scan, absent);
+
+        // Each verdict gates something beyond the optional keys a row
+        // happens to carry: a declared `expected` is a claim about the row,
+        // not just a label that skips the malformed-input branch above.
+        match expected {
+            Expected::Error => unreachable!("Error rows continue above"),
+            Expected::Visible => {
+                let managed = row
+                    .get("managed")
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| {
+                        panic!("{id}: a visible row must carry a non-empty managed list")
+                    });
+                assert!(
+                    !managed.is_empty(),
+                    "{id}: a visible row must carry a non-empty managed list"
+                );
+                assert_managed_subset(id, &scan, managed);
+            }
+            Expected::Opaque => {
+                assert!(
+                    !unreduced.is_empty(),
+                    "{id}: an opaque row must carry a non-empty unreduced list"
+                );
+                if let Some(managed) = row.get("managed").and_then(Value::as_array) {
+                    assert_managed_subset(id, &scan, managed);
+                }
+            }
+            Expected::Benign => {
+                // A benign row's whole claim is that nothing beyond its
+                // declared invocations resolves, so `managed` must name every
+                // invocation the command produces -- not merely a subset --
+                // or the row would pass whether or not the false positive it
+                // exists to catch actually appeared.
+                let managed = row
+                    .get("managed")
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| {
+                        panic!("{id}: a benign row must carry the managed list of what it resolves")
+                    });
+                assert_managed_exact(id, &scan, managed);
+                if let Some(absent) = row.get("absent").and_then(Value::as_array) {
+                    assert_absent(id, &scan, absent);
+                }
+            }
         }
     }
 

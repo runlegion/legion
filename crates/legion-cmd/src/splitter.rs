@@ -221,11 +221,15 @@ fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
 fn too_deep(text: &str, depth: u8) -> Scan {
     Scan {
         invocations: Vec::new(),
-        unreduced: vec![Unreduced {
-            text: text.to_string(),
-            reason: UnreducedReason::TooDeep,
-            depth,
-        }],
+        unreduced: vec![too_deep_unreduced(text, depth)],
+    }
+}
+
+fn too_deep_unreduced(text: &str, depth: u8) -> Unreduced {
+    Unreduced {
+        text: text.to_string(),
+        reason: UnreducedReason::TooDeep,
+        depth,
     }
 }
 
@@ -367,12 +371,32 @@ fn walk_command(
         Command::Function(function_def) => {
             walk_function_body(text, &function_def.body, depth, scan);
         }
-        Command::ExtendedTest(_, redirects) => {
-            // Not walked: `[[ ... ]]`'s own words are not among the
-            // word-parse sites this module's docs enumerate.
+        Command::ExtendedTest(extended_test, redirects) => {
+            walk_extended_test_expr(&extended_test.expr, depth, scan);
             if let Some(redirects) = redirects {
                 walk_redirect_list(text, redirects, depth, scan);
             }
+        }
+    }
+}
+
+/// Walks a `[[ ... ]]` extended test expression for its own words: the
+/// expression carries `Word`s (in its unary and binary tests) like any other
+/// command, and the walk word-parses every word so a substitution inside one
+/// is not lost.
+fn walk_extended_test_expr(expr: &ast::ExtendedTestExpr, depth: u8, scan: &mut Scan) {
+    match expr {
+        ast::ExtendedTestExpr::And(left, right) | ast::ExtendedTestExpr::Or(left, right) => {
+            walk_extended_test_expr(left, depth, scan);
+            walk_extended_test_expr(right, depth, scan);
+        }
+        ast::ExtendedTestExpr::Not(inner) | ast::ExtendedTestExpr::Parenthesized(inner) => {
+            walk_extended_test_expr(inner, depth, scan);
+        }
+        ast::ExtendedTestExpr::UnaryTest(_, word) => walk_word(word, depth, scan),
+        ast::ExtendedTestExpr::BinaryTest(_, left, right) => {
+            walk_word(left, depth, scan);
+            walk_word(right, depth, scan);
         }
     }
 }
@@ -403,12 +427,7 @@ fn walk_simple_command(
 
     if let Some(word) = &simple.word_or_name {
         match classify_command_word(word, depth) {
-            CommandWord::Dynamic => scan.unreduced.push(Unreduced {
-                text: word.value.clone(),
-                reason: UnreducedReason::DynamicName,
-                depth,
-            }),
-            CommandWord::Unparseable(reason) => scan.unreduced.push(Unreduced {
+            CommandWord::Unreduced(reason) => scan.unreduced.push(Unreduced {
                 text: word.value.clone(),
                 reason,
                 depth,
@@ -443,8 +462,7 @@ fn walk_simple_command(
 
 enum CommandWord {
     Literal,
-    Dynamic,
-    Unparseable(UnreducedReason),
+    Unreduced(UnreducedReason),
 }
 
 /// A command word is dynamic (FR-CMD-007's `DynamicName`) when any piece of
@@ -455,20 +473,20 @@ enum CommandWord {
 /// glob-like literal (`gr?p`) has no such piece, so it is left as an
 /// ordinary, if unmatched, binary -- the splitter does not get to decide
 /// what a glob means. A word past the bracket-nesting guard, or one
-/// `word::parse` itself cannot parse, is `Unparseable`: the caller records it
-/// as `Unreduced` with the matching reason, the same as `walk_word` does for
+/// `word::parse` itself cannot parse, is also `Unreduced`, carrying the
+/// matching reason: the caller records it the same as `walk_word` does for
 /// any other word, rather than resolving a binary from text the guard
 /// refused to look at.
 fn classify_command_word(word: &ast::Word, depth: u8) -> CommandWord {
     match parse_word_pieces(&word.value, depth) {
         Ok(pieces) => {
             if pieces.iter().any(|piece| is_dynamic_piece(&piece.piece)) {
-                CommandWord::Dynamic
+                CommandWord::Unreduced(UnreducedReason::DynamicName)
             } else {
                 CommandWord::Literal
             }
         }
-        Err(reason) => CommandWord::Unparseable(reason),
+        Err(reason) => CommandWord::Unreduced(reason),
     }
 }
 
@@ -603,8 +621,97 @@ fn walk_word_piece(piece: &WordPiece, depth: u8, scan: &mut Scan) {
                 walk_word_piece(&nested.piece, depth, scan);
             }
         }
-        _ => {}
+        WordPiece::ParameterExpansion(expr) => walk_parameter_expr(expr, depth, scan),
+        WordPiece::ArithmeticExpression(expr) => walk_embedded_text(&expr.value, depth, scan),
+        // No embedded shell text: nothing to walk.
+        WordPiece::Text(_)
+        | WordPiece::SingleQuotedText(_)
+        | WordPiece::AnsiCQuotedText(_)
+        | WordPiece::EscapeSequence(_)
+        | WordPiece::TildeExpansion(_) => {}
     }
+}
+
+/// Walks a `ParameterExpr`'s own embedded shell text (FR-CMD-007's "the walk
+/// word-parses every word"): several of its fields -- a default, alternative
+/// or error value, a pattern, a replacement, an offset or length -- carry raw
+/// shell text the grammar has not yet parsed into pieces (unlike
+/// `DoubleQuotedSequence`, which the parser already broke down). A command
+/// substitution buried in one of these must not be lost, the same as one
+/// buried in an `ArithmeticExpression` piece.
+fn walk_parameter_expr(expr: &word::ParameterExpr, depth: u8, scan: &mut Scan) {
+    use word::ParameterExpr as PE;
+    match expr {
+        PE::UseDefaultValues { default_value, .. }
+        | PE::AssignDefaultValues { default_value, .. } => {
+            walk_embedded_text_opt(default_value, depth, scan);
+        }
+        PE::IndicateErrorIfNullOrUnset { error_message, .. } => {
+            walk_embedded_text_opt(error_message, depth, scan);
+        }
+        PE::UseAlternativeValue {
+            alternative_value, ..
+        } => {
+            walk_embedded_text_opt(alternative_value, depth, scan);
+        }
+        PE::RemoveSmallestSuffixPattern { pattern, .. }
+        | PE::RemoveLargestSuffixPattern { pattern, .. }
+        | PE::RemoveSmallestPrefixPattern { pattern, .. }
+        | PE::RemoveLargestPrefixPattern { pattern, .. }
+        | PE::UppercaseFirstChar { pattern, .. }
+        | PE::UppercasePattern { pattern, .. }
+        | PE::LowercaseFirstChar { pattern, .. }
+        | PE::LowercasePattern { pattern, .. } => {
+            walk_embedded_text_opt(pattern, depth, scan);
+        }
+        PE::Substring { offset, length, .. } => {
+            walk_embedded_text(&offset.value, depth, scan);
+            if let Some(length) = length {
+                walk_embedded_text(&length.value, depth, scan);
+            }
+        }
+        PE::ReplaceSubstring {
+            pattern,
+            replacement,
+            ..
+        } => {
+            walk_embedded_text(pattern, depth, scan);
+            walk_embedded_text_opt(replacement, depth, scan);
+        }
+        // No embedded shell text: a bare parameter reference, its length, a
+        // transform (none of whose operations carry raw text), or a literal
+        // variable-name prefix.
+        PE::Parameter { .. }
+        | PE::ParameterLength { .. }
+        | PE::Transform { .. }
+        | PE::VariableNames { .. }
+        | PE::MemberKeys { .. } => {}
+    }
+}
+
+fn walk_embedded_text_opt(text: &Option<String>, depth: u8, scan: &mut Scan) {
+    if let Some(text) = text {
+        walk_embedded_text(text, depth, scan);
+    }
+}
+
+/// Word-parses a raw string extracted from a piece's own field (a parameter
+/// expansion's default value, an arithmetic expression's raw text) rather
+/// than a grammar-carried `Word`, so a synthetic `Word` wraps it for
+/// `walk_word`'s existing guard-then-parse-then-walk path. `depth` is passed
+/// through unchanged, not incremented: this is further parsing of text that
+/// already sits inside the enclosing word, not a re-entry into a new command
+/// scope the way a command substitution is -- the extracted text is always a
+/// proper substring of the word `parse_word_pieces` already guarded at this
+/// same depth, so recursion here is bounded by that substring's shrinking
+/// length. A real depth bump still happens the moment a nested command
+/// substitution surfaces and `rescan_substitution` re-parses it as a program.
+fn walk_embedded_text(text: &str, depth: u8, scan: &mut Scan) {
+    let word = ast::Word {
+        value: text.to_string(),
+        loc: None,
+    };
+    walk_word(&word, depth, scan);
 }
 
 /// Re-enters a command or process substitution's text (FR-CMD-007): the
@@ -641,11 +748,7 @@ fn walk_process_substitution(text: &str, subshell: &SubshellCommand, depth: u8, 
             .location()
             .map(|loc| slice_bytes(text, loc.start.offset, loc.end.offset))
             .unwrap_or_default();
-        scan.unreduced.push(Unreduced {
-            text: raw,
-            reason: UnreducedReason::TooDeep,
-            depth: next_depth,
-        });
+        scan.unreduced.push(too_deep_unreduced(&raw, next_depth));
         return;
     }
     walk_list(
@@ -722,9 +825,12 @@ fn walk_compound_command_tagged(
                 scan,
             );
         }
-        // Not walked: arithmetic expressions are not among the word-parse
-        // sites this module's docs enumerate.
-        CompoundCommand::Arithmetic(_) | CompoundCommand::ArithmeticForClause(_) => {}
+        CompoundCommand::ArithmeticForClause(arithmetic_for_clause) => {
+            walk_list(text, &arithmetic_for_clause.body.list, depth, tag, scan);
+        }
+        // Not walked: an arithmetic evaluation carries no command position --
+        // it names variables and operators, never a command word.
+        CompoundCommand::Arithmetic(_) => {}
     }
 }
 
@@ -850,6 +956,43 @@ mod tests {
             positions(&process_sub, "grep"),
             vec![Position::FunctionBody]
         );
+    }
+
+    #[test]
+    fn arithmetic_for_clause_body_is_walked() {
+        let scan = scan("for ((i=0; i<10; i++)); do rg secret .; done").expect("parses");
+        assert_eq!(positions(&scan, "rg"), vec![Position::First]);
+    }
+
+    #[test]
+    fn extended_test_words_are_walked_for_substitutions() {
+        let scan = scan("[[ -n $(ls src) ]] && echo ok").expect("parses");
+        assert_eq!(positions(&scan, "ls"), vec![Position::Substitution]);
+        assert_eq!(positions(&scan, "echo"), vec![Position::AfterOperator]);
+    }
+
+    #[test]
+    fn parameter_expansion_default_value_is_walked_for_substitutions() {
+        let scan = scan("echo ${x:-$(hostname)}").expect("parses");
+        assert_eq!(positions(&scan, "hostname"), vec![Position::Substitution]);
+        let hostname = scan
+            .invocations
+            .iter()
+            .find(|inv| inv.binary == "hostname")
+            .expect("hostname invocation");
+        assert_eq!(hostname.depth, 1);
+    }
+
+    #[test]
+    fn arithmetic_expression_piece_is_walked_for_substitutions() {
+        let scan = scan("echo $(( $(wc -l < f) + 1 ))").expect("parses");
+        assert_eq!(positions(&scan, "wc"), vec![Position::Substitution]);
+        let wc = scan
+            .invocations
+            .iter()
+            .find(|inv| inv.binary == "wc")
+            .expect("wc invocation");
+        assert_eq!(wc.depth, 1);
     }
 
     #[test]
@@ -997,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_command_word_reports_unparseable_instead_of_a_silent_literal() {
+    fn classify_command_word_reports_unreduced_instead_of_a_silent_literal() {
         // Directly exercised because the TooDeep arm cannot be reached
         // through `scan`: `scan_at`'s own bracket-nesting guard already
         // refuses the whole command before a nested command word's text -- a
@@ -1010,7 +1153,7 @@ mod tests {
         };
         assert!(matches!(
             classify_command_word(&too_deep, 0),
-            CommandWord::Unparseable(UnreducedReason::TooDeep)
+            CommandWord::Unreduced(UnreducedReason::TooDeep)
         ));
 
         let unparsed = ast::Word {
@@ -1019,7 +1162,7 @@ mod tests {
         };
         assert!(matches!(
             classify_command_word(&unparsed, 0),
-            CommandWord::Unparseable(UnreducedReason::Unparsed)
+            CommandWord::Unreduced(UnreducedReason::Unparsed)
         ));
     }
 
