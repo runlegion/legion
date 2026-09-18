@@ -471,6 +471,14 @@
     "managed": [["rg", "first"]]
   },
   {
+    "id": "time-before-keyword",
+    "source": "next_step: time as a wrapper before keyword",
+    "cmd": "time if rg -q foo f; then grep -n bar f; fi",
+    "note": "time before a compound keyword is grammar (Pipeline::timed), not a wrapper name: both commands inside the if resolve, and the splitter never reads the word time",
+    "expected": "visible",
+    "managed": [["rg", "first"], ["grep", "first"]]
+  },
+  {
     "id": "herestring-grep",
     "source": "synthetic",
     "cmd": "grep -c x <<< \"$(cat file)\"",
