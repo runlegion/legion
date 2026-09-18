@@ -708,6 +708,29 @@ mod tests {
     }
 
     #[test]
+    fn scan_at_carries_depth_across_a_reentry() {
+        // A caller re-entering a wrapper payload (the router, once the
+        // policy names the wrapper) passes its own depth through scan_at;
+        // this is the mechanism that keeps a chain of re-entries bounded by
+        // one shared counter.
+        let scan = scan_at("grep -rn foo src", 3).expect("parses");
+        assert_eq!(scan.invocations[0].position, Position::First);
+        assert_eq!(scan.invocations[0].depth, 3);
+    }
+
+    #[test]
+    fn scan_at_at_the_bound_is_too_deep_not_an_error() {
+        // Entering exactly at MAX_DEPTH is refused as a region, not a
+        // ScanError: the depth bound is a walk limit, not a parse failure.
+        let scan = scan_at("grep -rn foo src", MAX_DEPTH).expect("a Scan, not a ScanError");
+        assert!(scan.invocations.is_empty());
+        assert_eq!(scan.unreduced.len(), 1);
+        assert_eq!(scan.unreduced[0].reason, UnreducedReason::TooDeep);
+        assert_eq!(scan.unreduced[0].text, "grep -rn foo src");
+        assert_eq!(scan.unreduced[0].depth, MAX_DEPTH);
+    }
+
+    #[test]
     fn first_position_plain_command() {
         let scan = scan("grep -rn foo src").expect("parses");
         assert_eq!(positions(&scan, "grep"), vec![Position::First]);
@@ -890,14 +913,28 @@ mod tests {
     }
 
     #[test]
-    fn never_panics_on_non_char_boundary_slicing() {
-        // Multi-byte UTF-8 around a deeply nested region exercises
-        // `slice_bytes`'s char-boundary fallback.
+    fn never_panics_on_deeply_nested_multi_byte_input() {
+        // Multi-byte UTF-8 mixed into deeply nested command substitution
+        // text must not panic, whatever recursion path it takes.
         let mut nested = String::from("grep -c x f");
         for _ in 0..30 {
             nested = format!("echo $({nested} \u{1F600})");
         }
         let _ = scan(&nested);
+    }
+
+    #[test]
+    fn slice_bytes_falls_back_to_the_nearest_char_boundary() {
+        // `slice_bytes` is `scan`'s only raw byte-range copy (used when a
+        // too-deep process substitution's raw text is reported); a request
+        // that lands mid-codepoint must not panic, and should widen to the
+        // smallest slice that contains the requested range on valid
+        // boundaries rather than losing the multi-byte character.
+        let text = "grep \u{1F600} foo";
+        // Byte 6 sits inside the 4-byte emoji that starts at byte 5.
+        let sliced = slice_bytes(text, 0, 6);
+        assert!(sliced.starts_with("grep "));
+        assert!(sliced.contains('\u{1F600}'));
     }
 
     /// A small seeded generator over a byte alphabet that includes quotes,

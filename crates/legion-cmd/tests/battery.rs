@@ -48,20 +48,32 @@ fn parse_reason(raw: &str) -> UnreducedReason {
     }
 }
 
+/// Asserts every `(binary, position)` pair the row names is present in
+/// `scan`'s invocations *with at least the multiplicity the row names it*.
+/// A plain per-pair `.any()` check would let a row like `process-substitution`
+/// (`[["ls","substitution"],["ls","substitution"]]`) pass on a single `ls`,
+/// asserting the same thing twice instead of two distinct invocations.
 fn assert_managed_subset(id: &str, scan: &Scan, expected: &[Value]) {
+    let mut expected_counts: std::collections::HashMap<(&str, Position), usize> =
+        std::collections::HashMap::new();
     for pair in expected {
         let pair = pair
             .as_array()
             .expect("managed entry must be [binary, position]");
         let binary = pair[0].as_str().expect("binary must be a string");
         let position = parse_position(pair[1].as_str().expect("position must be a string"));
-        let found = scan
+        *expected_counts.entry((binary, position)).or_insert(0) += 1;
+    }
+
+    for ((binary, position), expected_count) in expected_counts {
+        let actual_count = scan
             .invocations
             .iter()
-            .any(|inv| inv.binary == binary && inv.position == position);
+            .filter(|inv| inv.binary == binary && inv.position == position)
+            .count();
         assert!(
-            found,
-            "{id}: expected an invocation of {binary:?} at {position:?}, got {:#?}",
+            actual_count >= expected_count,
+            "{id}: expected at least {expected_count} invocation(s) of {binary:?} at {position:?}, found {actual_count}, got {:#?}",
             scan.invocations
         );
     }
@@ -146,12 +158,17 @@ fn battery_rows_run_and_report_parse_errors() {
         if let Some(managed) = row.get("managed").and_then(Value::as_array) {
             assert_managed_subset(id, &scan, managed);
         }
-        if let Some(unreduced) = row.get("unreduced").and_then(Value::as_array) {
-            assert_unreduced_set(id, &scan, unreduced);
-        }
-        if expected == "benign"
-            && let Some(absent) = row.get("absent").and_then(Value::as_array)
-        {
+        // A row that names no `unreduced` key means none: this is the
+        // mechanical check that no `Unreduced` region -- in particular no
+        // `WrapperPayload` or `ScriptFile`, which would mean a name crept
+        // into the walk -- appears unless the row declares it.
+        let unreduced = row
+            .get("unreduced")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_unreduced_set(id, &scan, &unreduced);
+        if let Some(absent) = row.get("absent").and_then(Value::as_array) {
             assert_absent(id, &scan, absent);
         }
     }
