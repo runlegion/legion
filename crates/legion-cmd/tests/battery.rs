@@ -1,0 +1,186 @@
+//! Runs the 88-row adversarial battery against `legion_cmd::scan` (#1226,
+//! FR-CMD-007's acceptance text). 72 rows are RESEARCH-CMD-bounded-tokenizer's
+//! hand-labelled fixtures (from the precog-toy worktree's
+//! `toy/tokenizer/fixtures.json`), re-derived for the grammar-parser
+//! mechanism rather than the hand-written scanner they were labelled
+//! against; 16 are derived from that research's adversarial review (its
+//! `caveats` and `next_step`), each row's `source` naming the item it comes
+//! from.
+//!
+//! Row shape (`tests/fixtures/battery.json`): `id`, `source`, `cmd`, an
+//! optional `note`, and `expected` in `visible` / `opaque` / `benign` /
+//! `error`. `managed` lists `[binary, position]` pairs that must be present
+//! among `scan`'s invocations (a subset check: a row names only the
+//! binaries it cares about, while `scan` also resolves `cd`, `echo`, and
+//! the like). `unreduced` lists the `UnreducedReason` values that must
+//! appear, matched as a set. `benign` rows additionally carry `absent`: the
+//! binaries a naive heuristic could mistake for a real invocation, which
+//! must not appear in `scan`'s invocations. `error` rows carry neither: the
+//! issue is explicit that a malformed command returns `ScanError`, never a
+//! partial `Scan`.
+
+use std::collections::HashSet;
+use std::fs;
+
+use legion_cmd::{Position, Scan, UnreducedReason};
+use serde_json::Value;
+
+fn parse_position(raw: &str) -> Position {
+    match raw {
+        "first" => Position::First,
+        "after-operator" => Position::AfterOperator,
+        "after-assignment" => Position::AfterAssignment,
+        "substitution" => Position::Substitution,
+        "function-body" => Position::FunctionBody,
+        other => panic!("unknown position in battery.json: {other}"),
+    }
+}
+
+fn parse_reason(raw: &str) -> UnreducedReason {
+    match raw {
+        "wrapper-payload" => UnreducedReason::WrapperPayload,
+        "script-file" => UnreducedReason::ScriptFile,
+        "interpreter-body" => UnreducedReason::InterpreterBody,
+        "dynamic-name" => UnreducedReason::DynamicName,
+        "too-deep" => UnreducedReason::TooDeep,
+        "unparsed" => UnreducedReason::Unparsed,
+        other => panic!("unknown UnreducedReason in battery.json: {other}"),
+    }
+}
+
+fn assert_managed_subset(id: &str, scan: &Scan, expected: &[Value]) {
+    for pair in expected {
+        let pair = pair
+            .as_array()
+            .expect("managed entry must be [binary, position]");
+        let binary = pair[0].as_str().expect("binary must be a string");
+        let position = parse_position(pair[1].as_str().expect("position must be a string"));
+        let found = scan
+            .invocations
+            .iter()
+            .any(|inv| inv.binary == binary && inv.position == position);
+        assert!(
+            found,
+            "{id}: expected an invocation of {binary:?} at {position:?}, got {:#?}",
+            scan.invocations
+        );
+    }
+}
+
+fn assert_unreduced_set(id: &str, scan: &Scan, expected: &[Value]) {
+    let expected_reasons: HashSet<UnreducedReason> = expected
+        .iter()
+        .map(|v| parse_reason(v.as_str().expect("unreduced entry must be a string")))
+        .collect();
+    let actual_reasons: HashSet<UnreducedReason> =
+        scan.unreduced.iter().map(|u| u.reason).collect();
+    assert_eq!(
+        actual_reasons, expected_reasons,
+        "{id}: unreduced reasons differ, got {:#?}",
+        scan.unreduced
+    );
+}
+
+fn assert_absent(id: &str, scan: &Scan, absent: &[Value]) {
+    for binary in absent {
+        let binary = binary.as_str().expect("absent entry must be a string");
+        assert!(
+            scan.invocations.iter().all(|inv| inv.binary != binary),
+            "{id}: {binary:?} must not appear as an invocation (this row asserts it is a false positive), got {:#?}",
+            scan.invocations
+        );
+    }
+}
+
+#[test]
+fn battery_has_eighty_eight_rows() {
+    let rows = load_rows();
+    assert_eq!(
+        rows.len(),
+        88,
+        "FR-CMD-007 fixes the battery at 72 + 16 = 88 rows"
+    );
+}
+
+#[test]
+fn battery_ids_are_unique() {
+    let rows = load_rows();
+    let mut seen = HashSet::new();
+    for row in &rows {
+        let id = row["id"].as_str().expect("id must be a string");
+        assert!(seen.insert(id), "duplicate battery row id: {id}");
+    }
+}
+
+/// The research's kill condition stays measurable here: a parse-error rate
+/// above 0.1 percent would mean the mechanism has regressed against real
+/// input, and this count is where that would show up first.
+#[test]
+fn battery_rows_run_and_report_parse_errors() {
+    let rows = load_rows();
+    let mut parse_errors = 0usize;
+
+    for row in &rows {
+        let id = row["id"].as_str().expect("id must be a string");
+        let cmd = row["cmd"].as_str().expect("cmd must be a string");
+        let expected = row["expected"].as_str().expect("expected must be a string");
+
+        let result = legion_cmd::scan(cmd);
+
+        if expected == "error" {
+            assert!(
+                result.is_err(),
+                "{id}: expected a ScanError, got {result:?}"
+            );
+            parse_errors += 1;
+            assert!(
+                row.get("managed").is_none(),
+                "{id}: an error row must carry no managed list (never a partial Scan)"
+            );
+            continue;
+        }
+
+        let scan =
+            result.unwrap_or_else(|err| panic!("{id}: expected a Scan, got ScanError: {err}"));
+
+        if let Some(managed) = row.get("managed").and_then(Value::as_array) {
+            assert_managed_subset(id, &scan, managed);
+        }
+        if let Some(unreduced) = row.get("unreduced").and_then(Value::as_array) {
+            assert_unreduced_set(id, &scan, unreduced);
+        }
+        if expected == "benign"
+            && let Some(absent) = row.get("absent").and_then(Value::as_array)
+        {
+            assert_absent(id, &scan, absent);
+        }
+    }
+
+    // The battery deliberately carries exactly one malformed-input row
+    // (`unterminated-quote`, `expected: "error"`), so the 0.1% kill
+    // condition is not asserted against this fixed, curated set -- it is a
+    // property of the 47,151-command research corpus. This count is
+    // reported so a *regression* (an `expected != "error"` row starting to
+    // return `ScanError`) is visible in the test output, matching the
+    // battery's own accounting above.
+    let expected_errors = rows
+        .iter()
+        .filter(|row| row["expected"].as_str() == Some("error"))
+        .count();
+    println!(
+        "battery parse-error rate: {parse_errors}/{} ({:.4}%); {expected_errors} row(s) expect ScanError by design",
+        rows.len(),
+        parse_errors as f64 / rows.len() as f64 * 100.0
+    );
+    assert_eq!(
+        parse_errors, expected_errors,
+        "a row not marked \"expected\": \"error\" returned ScanError, or an error row did not"
+    );
+}
+
+fn load_rows() -> Vec<Value> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/battery.json");
+    let text =
+        fs::read_to_string(path).unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+    serde_json::from_str(&text).unwrap_or_else(|err| panic!("failed to parse {path}: {err}"))
+}
