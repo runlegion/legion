@@ -647,11 +647,35 @@
   },
   {
     "id": "ssh-remote-command-string",
-    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (ssh)",
     "cmd": "ssh host \"grep -rn foo src\"",
-    "note": "stands for the watch/ssh/parallel/setsid class -- each takes a command string as an ordinary argument the splitter does not walk",
+    "note": "ssh's remote command string is an ordinary argument the splitter does not walk, needing ssh in the wrapper table (#1227) to be resolved",
     "expected": "visible",
     "managed": [["ssh", "first"]]
+  },
+  {
+    "id": "watch-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (watch)",
+    "cmd": "watch -n 5 'grep -rn foo src'",
+    "note": "watch's repeated command is an ordinary argument the splitter does not walk, needing watch in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["watch", "first"]]
+  },
+  {
+    "id": "parallel-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (parallel)",
+    "cmd": "parallel 'grep -rn foo {}' ::: src/a.rs src/b.rs",
+    "note": "parallel's job template is an ordinary argument the splitter does not walk, needing parallel in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["parallel", "first"]]
+  },
+  {
+    "id": "setsid-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (setsid)",
+    "cmd": "setsid grep -rn foo src",
+    "note": "setsid's argv is an ordinary argument the splitter does not walk, needing setsid in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["setsid", "first"]]
   },
   {
     "id": "docker-exec-wrapper",
@@ -662,12 +686,28 @@
     "managed": [["docker", "first"]]
   },
   {
+    "id": "zgrep-family-content-search",
+    "source": "next_step: classify the zgrep family, sed -n and awk as content searches (the zgrep family)",
+    "cmd": "zegrep -c pat file.gz",
+    "note": "zegrep, like zgrep, zfgrep, bzgrep and xzgrep, resolves as an ordinary invocation -- the splitter holds no table of search tools, compressed-file variants included",
+    "expected": "visible",
+    "managed": [["zegrep", "first"]]
+  },
+  {
     "id": "sed-as-content-search",
-    "source": "next_step: classify the zgrep family, sed -n and awk as content searches",
+    "source": "next_step: classify the zgrep family, sed -n and awk as content searches (sed -n /pat/p FILE)",
     "cmd": "sed -n '/pat/p' FILE",
     "note": "sed resolves as an ordinary invocation like any other search tool the splitter does not have a table for",
     "expected": "visible",
     "managed": [["sed", "first"]]
+  },
+  {
+    "id": "awk-as-content-search",
+    "source": "next_step: classify the zgrep family, sed -n and awk as content searches (awk /pat/ FILE)",
+    "cmd": "awk '/pat/' FILE",
+    "note": "awk resolves as an ordinary invocation like any other search tool the splitter does not have a table for",
+    "expected": "visible",
+    "managed": [["awk", "first"]]
   },
   {
     "id": "benign-git-log-grep-reflog",

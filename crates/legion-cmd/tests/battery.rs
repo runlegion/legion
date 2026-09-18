@@ -1,11 +1,28 @@
-//! Runs the 88-row adversarial battery against `legion_cmd::scan` (#1226,
-//! FR-CMD-007's acceptance text). 72 rows are RESEARCH-CMD-bounded-tokenizer's
+//! Runs the adversarial battery against `legion_cmd::scan` (#1226, FR-CMD-007's
+//! acceptance text). 72 rows are RESEARCH-CMD-bounded-tokenizer's
 //! hand-labelled fixtures (from the precog-toy worktree's
 //! `toy/tokenizer/fixtures.json`), re-derived for the grammar-parser
 //! mechanism rather than the hand-written scanner they were labelled
-//! against; 16 are derived from that research's adversarial review (its
-//! `caveats` and `next_step`), each row's `source` naming the item it comes
-//! from.
+//! against; the remaining rows are derived from that research's adversarial
+//! review (its `caveats` and `next_step`), each row's `source` naming the
+//! item it comes from, plus the known-false-positive commands the issue asks
+//! for separately.
+//!
+//! The battery carries 93 rows, not FR-CMD-007's stated 88 (72 + 16): a 2026-09-18
+//! verify pass found three of the "16 derived" rows padded with a `source`
+//! that named neither `caveats` nor `next_step` (they named the issue's
+//! separate known-false-positives bullet instead), and two other rows each
+//! folded multiple `next_step` items behind one tested example (`ssh` stood
+//! for `ssh`/`watch`/`parallel`/`setsid`; `sed -n` stood for the zgrep
+//! family, `sed -n`, and `awk` as well). Honoring "each row names the item
+//! it comes from" for those two foldings alone yields 18 caveat/next_step-derived
+//! rows, and the 3 known-false-positive commands the issue also asks for
+//! (`git log --grep-reflog=x`, `git log -- -Sfoo`, `pnpm grep`) trace to
+//! neither `caveats` nor `next_step` and have no slot in a fixed 72+16 count
+//! that excludes them. 72 + 18 + 3 = 93. This is a spec undercount in
+//! FR-CMD-007's acceptance text and the issue's row-count arithmetic, not a
+//! grouping choice available to the implementer -- see the escalation on
+//! issue #1226 rather than re-folding rows to force 88.
 //!
 //! Row shape (`tests/fixtures/battery.json`): `id`, `source`, `cmd`, an
 //! optional `note`, and `expected` in `visible` / `opaque` / `benign` /
@@ -69,6 +86,16 @@ fn parse_expected(raw: &str) -> Expected {
         "error" => Expected::Error,
         other => panic!("unknown expected verdict in battery.json: {other}"),
     }
+}
+
+/// A row's `managed` array, or a panic naming the row and why it must have
+/// one. Both the `Visible` and `Benign` arms need this same extraction with
+/// their own message; a shared helper means the message is written once
+/// instead of drifting between two near-identical panics.
+fn managed_list<'a>(id: &str, row: &'a Value, why: &str) -> &'a Vec<Value> {
+    row.get("managed")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{id}: {why}"))
 }
 
 /// Asserts every `(binary, position)` pair the row names is present in
@@ -144,12 +171,18 @@ fn assert_absent(id: &str, scan: &Scan, absent: &[Value]) {
 }
 
 #[test]
-fn battery_has_eighty_eight_rows() {
+fn battery_has_ninety_three_rows() {
+    // See the module doc comment: FR-CMD-007 states 72 + 16 = 88, but an
+    // honest split of the folded next_step rows plus the required
+    // known-false-positive rows the issue asks for separately lands at
+    // 72 + 18 + 3 = 93. Escalated on issue #1226 rather than re-folded to
+    // force the stated count.
     let rows = load_rows();
     assert_eq!(
         rows.len(),
-        88,
-        "FR-CMD-007 fixes the battery at 72 + 16 = 88 rows"
+        93,
+        "battery count drifted from 72 research + 18 derived + 3 known-false-positive rows -- \
+         see the module doc comment and issue #1226's escalation before changing this number"
     );
 }
 
@@ -215,12 +248,8 @@ fn battery_rows_run_and_report_parse_errors() {
         match expected {
             Expected::Error => unreachable!("Error rows continue above"),
             Expected::Visible => {
-                let managed = row
-                    .get("managed")
-                    .and_then(Value::as_array)
-                    .unwrap_or_else(|| {
-                        panic!("{id}: a visible row must carry a non-empty managed list")
-                    });
+                let managed =
+                    managed_list(id, row, "a visible row must carry a non-empty managed list");
                 assert!(
                     !managed.is_empty(),
                     "{id}: a visible row must carry a non-empty managed list"
@@ -242,17 +271,22 @@ fn battery_rows_run_and_report_parse_errors() {
                 // invocation the command produces -- not merely a subset --
                 // or the row would pass whether or not the false positive it
                 // exists to catch actually appeared.
-                let managed = row
-                    .get("managed")
-                    .and_then(Value::as_array)
-                    .unwrap_or_else(|| {
-                        panic!("{id}: a benign row must carry the managed list of what it resolves")
-                    });
+                let managed = managed_list(
+                    id,
+                    row,
+                    "a benign row must carry the managed list of what it resolves",
+                );
                 assert_managed_exact(id, &scan, managed);
-                if let Some(absent) = row.get("absent").and_then(Value::as_array) {
-                    assert_absent(id, &scan, absent);
-                }
             }
+        }
+
+        // `absent` is not exclusive to benign rows -- `comment-hides-nothing`
+        // is `visible` and still names a false positive (`grep`, hidden
+        // behind a `#` comment) that must never resolve. Checking it here,
+        // once, for every row that declares it, covers that shape instead of
+        // only the row shapes the match arms happen to test.
+        if let Some(absent) = row.get("absent").and_then(Value::as_array) {
+            assert_absent(id, &scan, absent);
         }
     }
 

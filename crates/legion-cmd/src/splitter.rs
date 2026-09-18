@@ -362,16 +362,20 @@ fn exceeds_depth_guard(text: &str, depth: u8) -> bool {
 /// A reserved word is recognized only as a standalone token bounded by
 /// whitespace or a shell metacharacter, so an identifier like `for_each` or
 /// a basename like `ifconfig` is never split into a false match. A token
-/// inside a single-quoted span is skipped, the same as in
-/// `exceeds_depth_guard`, so a quoted argument that merely contains the
-/// letters cannot trip it; a token elsewhere that happens to match is
-/// counted regardless of quoting or context, which stays conservative in
-/// the same over-counting-is-safe direction as the bracket guard.
+/// inside a single- or double-quoted span is skipped, the same as in
+/// `exceeds_depth_guard`'s single-quote handling, so a quoted argument that
+/// merely contains the letters cannot trip it -- a shell never treats a word
+/// inside either quote kind as its own token, so `git commit -m "fix for
+/// f"` carries no more reserved-word nesting than the same message
+/// single-quoted would. A token elsewhere that happens to match is counted
+/// regardless of context, which stays conservative in the same
+/// over-counting-is-safe direction as the bracket guard.
 fn exceeds_keyword_depth_guard(text: &str, depth: u8) -> bool {
     let budget = MAX_DEPTH.saturating_sub(depth);
     let mut level: u32 = 0;
     let mut max_level: u32 = 0;
     let mut in_single_quote = false;
+    let mut in_double_quote = false;
     let mut word_start: Option<usize> = None;
     let bytes = text.as_bytes();
 
@@ -382,12 +386,20 @@ fn exceeds_keyword_depth_guard(text: &str, depth: u8) -> bool {
             }
             continue;
         }
+        if in_double_quote {
+            if byte == b'"' {
+                in_double_quote = false;
+            }
+            continue;
+        }
         if is_shell_word_boundary(byte) {
             if let Some(start) = word_start.take() {
                 apply_keyword_nesting(&text[start..index], &mut level, &mut max_level);
             }
             if byte == b'\'' {
                 in_single_quote = true;
+            } else if byte == b'"' {
+                in_double_quote = true;
             }
         } else if word_start.is_none() {
             word_start = Some(index);
@@ -659,17 +671,23 @@ fn walk_simple_command(
                     reason,
                     depth,
                 });
-                // A dynamic command word (`$(...)`, a backquoted
-                // substitution, an expansion used as the command name
-                // itself) still carries a nested command position the
-                // grammar shows: re-enter its pieces the same way an
-                // ordinary word's substitution is walked, so the region is
-                // reported opaque *and* its inner commands are not
-                // silently dropped. `TooDeep` and `Unparsed` need no such
-                // re-entry: the word already failed to parse (or was
-                // refused before parsing), so there are no pieces to walk.
-                if reason == UnreducedReason::DynamicName {
-                    walk_word(word, depth, scan);
+            }
+            // A dynamic command word (`$(...)`, a backquoted substitution,
+            // an expansion used as the command name itself) still carries a
+            // nested command position the grammar shows: walk the pieces
+            // `classify_command_word` already parsed the same way an
+            // ordinary word's substitution is walked, so the region is
+            // reported opaque *and* its inner commands are not silently
+            // dropped. The pieces are reused rather than re-parsing
+            // `word.value` a second time through `walk_word`.
+            CommandWord::Dynamic(pieces) => {
+                scan.unreduced.push(Unreduced {
+                    text: word.value.clone(),
+                    reason: UnreducedReason::DynamicName,
+                    depth,
+                });
+                for piece in &pieces {
+                    walk_word_piece(&piece.piece, depth, scan);
                 }
             }
             CommandWord::Literal(literal) => {
@@ -733,6 +751,11 @@ enum CommandWord {
     /// (`word_literal_text`) rather than re-unquoted from the word's raw
     /// source.
     Literal(String),
+    /// The word is dynamic (`UnreducedReason::DynamicName`), carrying its
+    /// already-parsed pieces so the caller can walk them for embedded
+    /// command positions without a second call to `parse_word_pieces` on
+    /// the same text.
+    Dynamic(Vec<word::WordPieceWithSource>),
     Unreduced(UnreducedReason),
 }
 
@@ -752,7 +775,7 @@ fn classify_command_word(word: &ast::Word, depth: u8) -> CommandWord {
     match parse_word_pieces(&word.value, depth) {
         Ok(pieces) => {
             if pieces.iter().any(|piece| is_dynamic_piece(&piece.piece)) {
-                CommandWord::Unreduced(UnreducedReason::DynamicName)
+                CommandWord::Dynamic(pieces)
             } else {
                 CommandWord::Literal(word_literal_text(&pieces))
             }
@@ -802,7 +825,10 @@ fn word_literal_text(pieces: &[word::WordPieceWithSource]) -> String {
 /// judged non-dynamic, so the five dynamic-only variants never arrive here;
 /// they are listed rather than covered by a wildcard so a new `WordPiece`
 /// variant added upstream fails to compile here instead of silently
-/// resolving to an empty string.
+/// resolving to an empty string. Each panics rather than returning an empty
+/// string if it is ever reached anyway: a future narrowing of
+/// `is_dynamic_piece` that stops excluding one of these variants must fail
+/// loudly here, not hand `to_binary` a silently truncated binary.
 fn piece_literal_text(piece: &WordPiece) -> String {
     match piece {
         WordPiece::Text(text)
@@ -820,7 +846,9 @@ fn piece_literal_text(piece: &WordPiece) -> String {
         | WordPiece::ParameterExpansion(_)
         | WordPiece::CommandSubstitution(_)
         | WordPiece::BackquotedCommandSubstitution(_)
-        | WordPiece::ArithmeticExpression(_) => String::new(),
+        | WordPiece::ArithmeticExpression(_) => {
+            unreachable!("is_dynamic_piece excludes this variant from reaching piece_literal_text")
+        }
     }
 }
 
@@ -1729,6 +1757,41 @@ mod tests {
         // reserved words `for`/`if`/`case` followed by something else.
         let command = "for_each=1 ifconfig case_id=2 grep a".repeat(40);
         assert!(!exceeds_keyword_depth_guard(&command, 0));
+    }
+
+    #[test]
+    fn double_quoted_keyword_text_does_not_trip_the_keyword_guard() {
+        // The letters "for" inside a double-quoted commit message are not a
+        // reserved word -- only `exceeds_depth_guard`'s single-quote
+        // handling was mirrored here before this test; double-quoted text
+        // fell through uncounted, so the same message spelled with double
+        // quotes tripped a false TooDeep once repeated past the budget.
+        let mut command = String::new();
+        for i in 0..40 {
+            if i > 0 {
+                command.push_str(" && ");
+            }
+            command.push_str("git commit -m \"fix for f\"");
+        }
+        assert!(!exceeds_keyword_depth_guard(&command, 0));
+    }
+
+    #[test]
+    fn double_quoted_commit_message_keyword_is_visible_end_to_end() {
+        // The guard-level check above in a full `scan`: a chain of ordinary
+        // commits whose messages happen to contain reserved words must
+        // resolve every stage as `visible`, not collapse the whole pipeline
+        // into one TooDeep region.
+        let mut command = String::new();
+        for i in 0..26 {
+            if i > 0 {
+                command.push_str(" && ");
+            }
+            command.push_str("git commit -m \"fix for f\"");
+        }
+        let scan = scan(&command).expect("parses");
+        assert_eq!(positions(&scan, "git").len(), 26);
+        assert!(scan.unreduced.is_empty());
     }
 
     #[test]
