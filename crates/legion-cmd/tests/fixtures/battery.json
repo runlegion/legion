@@ -233,7 +233,7 @@
     "id": "find-exec-sh-c-grep",
     "source": "synthetic",
     "cmd": "find . -name '*.md' -exec sh -c 'grep -l TODO \"$1\"' _ {} \\;",
-    "note": "flip: find -exec's sh -c payload is find's own argument list -- needs find and sh -c to both be wrapper names to walk, which the splitter never holds",
+    "note": "needs find -exec and sh -c; the class names the most advanced feature -- flip: find -exec's sh -c payload is find's own argument list -- needs find and sh -c to both be wrapper names to walk, which the splitter never holds",
     "expected": "visible",
     "managed": [["find", "first"]]
   },
@@ -671,7 +671,7 @@
   },
   {
     "id": "benign-git-log-grep-reflog",
-    "source": "adversarial review's false-positive list (FINDINGS.md), carried by RESEARCH-CMD-bounded-tokenizer's finding",
+    "source": "issue's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
     "cmd": "git log --grep-reflog=x",
     "note": "a flag spelled with grep in it is not a grep invocation",
     "expected": "benign",
@@ -680,7 +680,7 @@
   },
   {
     "id": "benign-git-log-dash-capital-s",
-    "source": "adversarial review's false-positive list (FINDINGS.md), carried by RESEARCH-CMD-bounded-tokenizer's finding",
+    "source": "issue's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
     "cmd": "git log -- -Sfoo",
     "note": "-S is a git log flag, not a separate command",
     "expected": "benign",
@@ -688,7 +688,7 @@
   },
   {
     "id": "benign-pnpm-grep",
-    "source": "adversarial review's false-positive list (FINDINGS.md), carried by RESEARCH-CMD-bounded-tokenizer's finding",
+    "source": "issue's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
     "cmd": "pnpm grep",
     "note": "pnpm's own argument happens to be the word grep; it is not a grep invocation",
     "expected": "benign",

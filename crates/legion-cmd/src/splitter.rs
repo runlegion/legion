@@ -153,14 +153,52 @@ pub enum ScanError {
         /// Byte offset into the given command string.
         offset: usize,
     },
-    /// The command ended before a construct it started was closed (an
-    /// unterminated quote, heredoc, or bracket).
+    /// The parser reached the end of the input with no more specific
+    /// construct identified.
     #[error("unexpected end of input at byte {offset}")]
     UnexpectedEnd {
         /// Byte offset into the given command string (its length).
         offset: usize,
     },
-    /// The tokenizer itself failed on the given command string.
+    /// A single, double, or ANSI-C quote opened at this byte offset was
+    /// never closed.
+    #[error("unterminated quote opened at byte {offset}")]
+    UnterminatedQuote {
+        /// Byte offset of the quote character that opened the construct.
+        offset: usize,
+    },
+    /// A backquoted command substitution opened at this byte offset was
+    /// never closed.
+    #[error("unterminated backquote opened at byte {offset}")]
+    UnterminatedBackquote {
+        /// Byte offset of the backquote that opened the construct.
+        offset: usize,
+    },
+    /// An extended glob pattern opened at this byte offset was never
+    /// closed.
+    #[error("unterminated extended glob opened at byte {offset}")]
+    UnterminatedExtendedGlob {
+        /// Byte offset of the construct that opened the pattern.
+        offset: usize,
+    },
+    /// A command, arithmetic, or parameter expansion was never closed. The
+    /// tokenizer does not tag this construct with its own opening position,
+    /// so `offset` is the end of the given command string.
+    #[error("unterminated expansion at byte {offset}")]
+    UnterminatedExpansion {
+        /// Byte offset into the given command string, when known.
+        offset: usize,
+    },
+    /// A here document was opened but never terminated. The tokenizer does
+    /// not tag this construct with its own opening position, so `offset` is
+    /// the end of the given command string.
+    #[error("unterminated here document at byte {offset}")]
+    UnterminatedHereDocument {
+        /// Byte offset into the given command string, when known.
+        offset: usize,
+    },
+    /// The tokenizer failed on the given command string for a reason not
+    /// named by another variant.
     #[error("failed to tokenize at byte {offset}: {detail}")]
     Tokenize {
         /// Byte offset into the given command string, when known.
@@ -191,7 +229,10 @@ pub fn scan_at(command: &str, depth: u8) -> Result<Scan, ScanError> {
 /// body overrides it) applies exactly as it does for an already-parsed
 /// process substitution walked via [`walk_process_substitution`].
 fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
-    if depth >= MAX_DEPTH || exceeds_depth_guard(command, depth) {
+    if depth >= MAX_DEPTH
+        || exceeds_depth_guard(command, depth)
+        || exceeds_keyword_depth_guard(command, depth)
+    {
         return Ok(too_deep(command, depth));
     }
 
@@ -241,22 +282,48 @@ fn too_deep_unreduced(text: &str, depth: u8) -> Unreduced {
     }
 }
 
-/// Counts nesting over `text`'s raw bytes, ignoring quoting, ahead of any
-/// parse call (FR-CMD-007): the crate's own PEG recursion can abort the
-/// process on deeply nested input even inside a single `parse_program` call,
-/// which a guard that runs after parsing would never reach. A combined
-/// opener set -- parens, braces, brackets, and paired backticks -- covers
-/// subshells, command and arithmetic substitution, process substitution,
-/// and brace groups alike. Over-counting is safe (an over-cautious
-/// `TooDeep`); under-counting is not, so the guard is deliberately
-/// conservative rather than quote-aware.
+/// Counts nesting over `text`'s raw bytes ahead of any parse call
+/// (FR-CMD-007): the crate's own PEG recursion can abort the process on
+/// deeply nested input even inside a single `parse_program` call, which a
+/// guard that runs after parsing would never reach. A combined opener set --
+/// parens, braces, brackets, and paired backticks -- covers subshells,
+/// command and arithmetic substitution, process substitution, and brace
+/// groups alike. Over-counting is safe (an over-cautious `TooDeep`);
+/// under-counting is not.
+///
+/// A byte inside a single-quoted span, or immediately after an unquoted
+/// backslash, contributes no nesting: bash gives single-quoted text no
+/// expansion at all, so the crate's tokenizer scans it as a flat run with no
+/// recursive descent per bracket, and a backslash-escaped bracket is a
+/// literal character, not an opener the grammar recurses through either.
+/// Skipping both keeps an ordinary command with many independent quoted or
+/// escaped brackets -- `grep '[[[[' f`, `rg \( f0 && rg \( f1 && ...` -- from
+/// climbing an unmatched-opener count that never has a matching closer to
+/// bring it back down, which is a false `TooDeep` rather than the crate's
+/// own recursion depth. Every other byte is still counted without regard to
+/// matching bracket type or double-quote nesting, which stays deliberately
+/// conservative: over-counting there is safe.
 fn exceeds_depth_guard(text: &str, depth: u8) -> bool {
     let budget = MAX_DEPTH.saturating_sub(depth);
     let mut level: u32 = 0;
     let mut max_level: u32 = 0;
     let mut in_backtick = false;
+    let mut in_single_quote = false;
+    let mut escaped = false;
     for byte in text.bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_single_quote {
+            if byte == b'\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
         match byte {
+            b'\\' => escaped = true,
+            b'\'' => in_single_quote = true,
             b'(' | b'{' | b'[' => {
                 level += 1;
                 max_level = max_level.max(level);
@@ -279,14 +346,149 @@ fn exceeds_depth_guard(text: &str, depth: u8) -> bool {
     u32::from(budget) < max_level
 }
 
+/// Reserved words whose grammar nests one compound command inside another:
+/// `if`/`fi`, `for`/`done`, `while`/`done`, `until`/`done`, `case`/`esac`.
+/// `brush-parser`'s PEG grammar recurses one level deeper per opener here
+/// exactly as it does per bracket, so deeply nested reserved words can abort
+/// the process the same way deeply nested brackets can, even at bracket
+/// nesting depth 0 -- `exceeds_depth_guard` cannot see this class because
+/// none of these words is a bracket. FR-CMD-007's Behavior section names
+/// bracket nesting as *a* pre-parse guard, not the only one a stack-overflow
+/// risk may need; this closes the gap the bracket guard leaves on reserved
+/// words without adding any binary, wrapper, interpreter, or shell name --
+/// these five words are bash grammar, the same status `time` already has in
+/// this module's docs.
+///
+/// A reserved word is recognized only as a standalone token bounded by
+/// whitespace or a shell metacharacter, so an identifier like `for_each` or
+/// a basename like `ifconfig` is never split into a false match. A token
+/// inside a single-quoted span is skipped, the same as in
+/// `exceeds_depth_guard`, so a quoted argument that merely contains the
+/// letters cannot trip it; a token elsewhere that happens to match is
+/// counted regardless of quoting or context, which stays conservative in
+/// the same over-counting-is-safe direction as the bracket guard.
+fn exceeds_keyword_depth_guard(text: &str, depth: u8) -> bool {
+    let budget = MAX_DEPTH.saturating_sub(depth);
+    let mut level: u32 = 0;
+    let mut max_level: u32 = 0;
+    let mut in_single_quote = false;
+    let mut word_start: Option<usize> = None;
+    let bytes = text.as_bytes();
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        if in_single_quote {
+            if byte == b'\'' {
+                in_single_quote = false;
+            }
+            continue;
+        }
+        if is_shell_word_boundary(byte) {
+            if let Some(start) = word_start.take() {
+                apply_keyword_nesting(&text[start..index], &mut level, &mut max_level);
+            }
+            if byte == b'\'' {
+                in_single_quote = true;
+            }
+        } else if word_start.is_none() {
+            word_start = Some(index);
+        }
+    }
+    if let Some(start) = word_start {
+        apply_keyword_nesting(&text[start..], &mut level, &mut max_level);
+    }
+    u32::from(budget) < max_level
+}
+
+/// Whitespace and the shell metacharacters that end a word without being
+/// part of one, used to tokenize reserved words for
+/// `exceeds_keyword_depth_guard`.
+fn is_shell_word_boundary(byte: u8) -> bool {
+    matches!(
+        byte,
+        b' ' | b'\t'
+            | b'\n'
+            | b'\r'
+            | b';'
+            | b'&'
+            | b'|'
+            | b'('
+            | b')'
+            | b'<'
+            | b'>'
+            | b'`'
+            | b'\''
+            | b'"'
+    )
+}
+
+fn apply_keyword_nesting(word: &str, level: &mut u32, max_level: &mut u32) {
+    match word {
+        "if" | "for" | "while" | "until" | "case" => {
+            *level += 1;
+            *max_level = (*max_level).max(*level);
+        }
+        "fi" | "done" | "esac" => {
+            *level = level.saturating_sub(1);
+        }
+        _ => {}
+    }
+}
+
 fn to_scan_error(err: &brush_parser::ParseError, command: &str) -> ScanError {
     match err {
         brush_parser::ParseError::ParsingNear(pos) => ScanError::Syntax { offset: pos.offset },
         brush_parser::ParseError::ParsingAtEndOfInput => ScanError::UnexpectedEnd {
             offset: command.len(),
         },
-        brush_parser::ParseError::Tokenizing { inner, position } => ScanError::Tokenize {
-            offset: position.as_ref().map_or(command.len(), |p| p.offset),
+        brush_parser::ParseError::Tokenizing { inner, position } => {
+            to_tokenize_scan_error(inner, position, command)
+        }
+    }
+}
+
+/// Names the construct a tokenizer failure points to (Error Handling),
+/// rather than only the kind of failure. Several `TokenizerError` variants
+/// carry the `SourcePosition` where the construct itself opened --
+/// `UnterminatedSingleQuote`, `UnterminatedDoubleQuote`, and
+/// `UnterminatedAnsiCQuote` all record the position of the opening quote,
+/// `UnterminatedBackquote` the opening backquote, `UnterminatedExtendedGlob`
+/// the opening pattern -- and this uses that position rather than the
+/// `ParseError::Tokenizing` position, which is the tokenizer's cursor at the
+/// point it gave up (typically the end of input). The remaining variants
+/// carry no position of their own in the crate, so those fall back to the
+/// outer position: fixing that would mean tracking a construct's opening
+/// offset ourselves, which is exactly the offset work the dependency pin
+/// exists to avoid taking on locally.
+fn to_tokenize_scan_error(
+    inner: &brush_parser::TokenizerError,
+    position: &Option<brush_parser::SourcePosition>,
+    command: &str,
+) -> ScanError {
+    let fallback = position.as_ref().map_or(command.len(), |p| p.offset);
+    match inner {
+        brush_parser::TokenizerError::UnterminatedSingleQuote(pos)
+        | brush_parser::TokenizerError::UnterminatedDoubleQuote(pos)
+        | brush_parser::TokenizerError::UnterminatedAnsiCQuote(pos) => {
+            ScanError::UnterminatedQuote { offset: pos.offset }
+        }
+        brush_parser::TokenizerError::UnterminatedBackquote(pos) => {
+            ScanError::UnterminatedBackquote { offset: pos.offset }
+        }
+        brush_parser::TokenizerError::UnterminatedExtendedGlob(pos) => {
+            ScanError::UnterminatedExtendedGlob { offset: pos.offset }
+        }
+        brush_parser::TokenizerError::UnterminatedCommandSubstitution
+        | brush_parser::TokenizerError::UnterminatedExpansion
+        | brush_parser::TokenizerError::UnterminatedVariable => {
+            ScanError::UnterminatedExpansion { offset: fallback }
+        }
+        brush_parser::TokenizerError::UnterminatedHereDocuments(_, _)
+        | brush_parser::TokenizerError::MissingHereTagForDocumentBody
+        | brush_parser::TokenizerError::MissingHereTag(_) => {
+            ScanError::UnterminatedHereDocument { offset: fallback }
+        }
+        _ => ScanError::Tokenize {
+            offset: fallback,
             detail: inner.to_string(),
         },
     }
@@ -476,10 +678,7 @@ fn walk_simple_command(
                     .suffix
                     .iter()
                     .flat_map(|suffix| &suffix.0)
-                    .filter_map(|item| match item {
-                        CommandPrefixOrSuffixItem::Word(word) => Some(word.value.clone()),
-                        _ => None,
-                    })
+                    .filter_map(|item| suffix_item_arg(text, item))
                     .collect();
                 scan.invocations.push(Invocation {
                     binary,
@@ -495,6 +694,37 @@ fn walk_simple_command(
         for item in &suffix.0 {
             walk_prefix_or_suffix_item(text, item, depth, scan);
         }
+    }
+}
+
+/// The text a suffix item contributes to `Invocation::args`, or `None` for
+/// a redirect (never an argument word).
+///
+/// Only a *leading* assignment, in the command's prefix, is an environment
+/// assignment in bash; the grammar still tags a `NAME=VALUE`-shaped suffix
+/// item as `AssignmentWord` regardless of position, but a suffix one is an
+/// ordinary word the command receives as an argument (`grep a=b file`'s
+/// `a=b` is `grep`'s search pattern, not an assignment), so its raw text is
+/// kept in `args` the same as any other suffix word.
+///
+/// A suffix `ProcessSubstitution` (`<(...)`/`>(...)`) is likewise an
+/// ordinary argument word from the command's point of view. It carries no
+/// `Word` of its own, so its text is rebuilt from the already-parsed
+/// subshell's source span plus its kind's `<`/`>` marker; the inner command
+/// is still walked and reported through `walk_prefix_or_suffix_item`; this
+/// only supplies the text `args` would otherwise be missing entirely.
+fn suffix_item_arg(text: &str, item: &CommandPrefixOrSuffixItem) -> Option<String> {
+    match item {
+        CommandPrefixOrSuffixItem::Word(word)
+        | CommandPrefixOrSuffixItem::AssignmentWord(_, word) => Some(word.value.clone()),
+        CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell) => {
+            let inner = subshell
+                .location()
+                .map(|loc| slice_bytes(text, loc.start.offset, loc.end.offset))
+                .unwrap_or_default();
+            Some(format!("{kind}{inner}"))
+        }
+        CommandPrefixOrSuffixItem::IoRedirect(_) => None,
     }
 }
 
@@ -667,7 +897,7 @@ fn parse_word_pieces(
     value: &str,
     depth: u8,
 ) -> Result<Vec<word::WordPieceWithSource>, UnreducedReason> {
-    if exceeds_depth_guard(value, depth) {
+    if exceeds_depth_guard(value, depth) || exceeds_keyword_depth_guard(value, depth) {
         return Err(UnreducedReason::TooDeep);
     }
     let options = ParserOptions::default();
@@ -1014,6 +1244,15 @@ mod tests {
             .collect()
     }
 
+    fn args_for<'a>(scan: &'a Scan, binary: &str) -> &'a [String] {
+        &scan
+            .invocations
+            .iter()
+            .find(|inv| inv.binary == binary)
+            .expect("binary present")
+            .args
+    }
+
     #[test]
     fn scan_at_carries_depth_across_a_reentry() {
         // A caller re-entering a wrapper payload (the router, once the
@@ -1082,6 +1321,34 @@ mod tests {
     fn substitution_backtick() {
         let scan = scan("for f in `ls src`; do echo $f; done").expect("parses");
         assert_eq!(positions(&scan, "ls"), vec![Position::Substitution]);
+    }
+
+    #[test]
+    fn suffix_assignment_word_is_kept_as_an_ordinary_argument() {
+        // Only a *leading* assignment (in the prefix) is an environment
+        // assignment in bash; a NAME=VALUE-shaped word after the command
+        // name is an ordinary argument the command receives verbatim.
+        let scan = scan("grep a=b file").expect("parses");
+        assert_eq!(args_for(&scan, "grep"), ["a=b", "file"]);
+    }
+
+    #[test]
+    fn multiple_suffix_assignment_words_are_all_kept() {
+        // `env` is an ordinary command word to the splitter (it holds no
+        // wrapper table): `FOO=1 grep -rn foo src` are all `env`'s own
+        // suffix words, and `FOO=1` looking like an assignment does not
+        // make it disappear from `env`'s args.
+        let scan = scan("env FOO=1 grep -rn foo src").expect("parses");
+        assert_eq!(
+            args_for(&scan, "env"),
+            ["FOO=1", "grep", "-rn", "foo", "src"]
+        );
+    }
+
+    #[test]
+    fn suffix_process_substitution_is_kept_as_an_argument() {
+        let scan = scan("diff <(ls a) <(ls b)").expect("parses");
+        assert_eq!(args_for(&scan, "diff"), ["<(ls a)", "<(ls b)"]);
     }
 
     #[test]
@@ -1360,10 +1627,108 @@ mod tests {
     #[test]
     fn malformed_command_is_a_scan_error_not_a_partial_scan() {
         let err = scan("grep -n 'oops src").expect_err("unterminated quote must error");
-        assert!(matches!(
-            err,
-            ScanError::Syntax { .. } | ScanError::UnexpectedEnd { .. } | ScanError::Tokenize { .. }
+        assert!(matches!(err, ScanError::UnterminatedQuote { offset: 8 }));
+    }
+
+    #[test]
+    fn quoted_unbalanced_brackets_do_not_trip_the_depth_guard() {
+        // 26 independent, single-quoted, unclosed openers -- bracket
+        // nesting depth 0 -- must not be refused as TooDeep: each is a
+        // literal character inside a quote the tokenizer scans flat, never
+        // recursing through it.
+        let mut command = String::new();
+        for i in 0..26 {
+            if i > 0 {
+                command.push_str(" && ");
+            }
+            command.push_str(&format!("rg '[' f{i}"));
+        }
+        let scan = scan(&command).expect("parses");
+        assert_eq!(scan.invocations.len(), 26);
+        assert!(
+            scan.unreduced.is_empty(),
+            "expected no unreduced regions, got {:?}",
+            scan.unreduced
+        );
+    }
+
+    #[test]
+    fn escaped_unbalanced_brackets_do_not_trip_the_depth_guard() {
+        // Same shape, unquoted but backslash-escaped: a literal character,
+        // not an opener the grammar recurses through.
+        let mut command = String::new();
+        for i in 0..26 {
+            if i > 0 {
+                command.push_str(" && ");
+            }
+            command.push_str(&format!("rg \\( f{i}"));
+        }
+        let scan = scan(&command).expect("parses");
+        assert_eq!(scan.invocations.len(), 26);
+        assert!(scan.unreduced.is_empty());
+    }
+
+    #[test]
+    fn real_bracket_nesting_past_the_bound_is_still_too_deep() {
+        let mut nested = String::from("grep -c x f");
+        for _ in 0..30 {
+            nested = format!("echo $({nested})");
+        }
+        let scan = scan(&nested).expect("parses");
+        assert!(scan.invocations.iter().all(|inv| inv.binary != "grep"));
+        assert!(
+            scan.unreduced
+                .iter()
+                .any(|u| u.reason == UnreducedReason::TooDeep)
+        );
+    }
+
+    #[test]
+    fn keyword_nesting_past_the_bound_is_guarded_before_parsing() {
+        // Reserved-word nesting at bracket depth 0 must be caught by
+        // exceeds_keyword_depth_guard directly: going through the real
+        // parser at this depth is exactly what aborts the process, so the
+        // guard function is exercised here rather than through `scan`.
+        let mut nested = String::new();
+        for _ in 0..30 {
+            nested.push_str("if true; then ");
+        }
+        nested.push_str("grep a");
+        for _ in 0..30 {
+            nested.push_str("; fi");
+        }
+        assert!(exceeds_keyword_depth_guard(&nested, 0));
+    }
+
+    #[test]
+    fn ordinary_keyword_use_does_not_trip_the_keyword_guard() {
+        assert!(!exceeds_keyword_depth_guard("if true; then grep a; fi", 0));
+        assert!(!exceeds_keyword_depth_guard(
+            "for f in a b c; do grep x \"$f\"; done",
+            0
         ));
+    }
+
+    #[test]
+    fn quoted_keyword_text_does_not_trip_the_keyword_guard() {
+        // The letters "if"/"for"/"case" appearing inside a single-quoted
+        // argument are not reserved words; the guard must not count them.
+        let mut command = String::new();
+        for i in 0..40 {
+            if i > 0 {
+                command.push_str(" && ");
+            }
+            command.push_str("grep 'if for case until while' f");
+        }
+        assert!(!exceeds_keyword_depth_guard(&command, 0));
+    }
+
+    #[test]
+    fn identifier_containing_a_keyword_does_not_trip_the_keyword_guard() {
+        // `for_each`/`ifconfig`/`case_id` are single tokens, not the
+        // reserved words `for`/`if`/`case` followed by something else.
+        let command = "for_each=1 ifconfig case_id=2 grep a".repeat(40);
+        assert!(!exceeds_keyword_depth_guard(&command, 0));
     }
 
     #[test]
