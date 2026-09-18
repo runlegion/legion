@@ -506,10 +506,10 @@
     "managed": [["diff", "first"], ["ls", "substitution"], ["ls", "substitution"]]
   },
   {
-    "id": "too-deep",
+    "id": "shallow-nesting-is-not-too-deep",
     "source": "synthetic",
     "cmd": "echo $(echo $(echo $(grep -c x f)))",
-    "note": "flip: this is depth 3, and MAX_DEPTH is 25 -- grep resolves at Substitution, not TooDeep; see never_too_deep_at_shallow_nesting for the real boundary test",
+    "note": "this is depth 3, and MAX_DEPTH is 25 -- grep resolves at Substitution, not TooDeep; see shallow_nesting_is_not_too_deep in splitter.rs for the boundary test",
     "expected": "visible",
     "managed": [["echo", "first"], ["echo", "substitution"], ["echo", "substitution"], ["grep", "substitution"]]
   },

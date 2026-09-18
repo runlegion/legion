@@ -49,8 +49,7 @@ use std::io::Cursor;
 
 use brush_parser::ast::{
     self, Command, CommandPrefixOrSuffixItem, CompoundCommand, CompoundList, IoFileRedirectTarget,
-    IoRedirect, Pipeline, ProcessSubstitutionKind, RedirectList, SimpleCommand,
-    SourceLocation as _, SubshellCommand,
+    IoRedirect, Pipeline, RedirectList, SimpleCommand, SourceLocation as _, SubshellCommand,
 };
 use brush_parser::word::{self, WordPiece};
 use brush_parser::{Parser, ParserOptions};
@@ -345,7 +344,7 @@ fn walk_command(
             walk_simple_command(text, simple, depth, tag, seq_position, scan)
         }
         Command::Compound(compound, redirects) => {
-            walk_compound_command(text, compound, depth, tag, scan);
+            walk_compound_command_tagged(text, compound, depth, tag, scan);
             if let Some(redirects) = redirects {
                 walk_redirect_list(text, redirects, depth, scan);
             }
@@ -354,8 +353,9 @@ fn walk_command(
             walk_function_body(text, &function_def.body, depth, scan);
         }
         Command::ExtendedTest(_, redirects) => {
-            // Out of scope: `[[ ... ]]` names no command position FR-CMD-007
-            // lists, and its own words are not walked for substitutions.
+            // Not walked: `[[ ... ]]`'s own words are not among the
+            // word-parse sites this module's docs enumerate. Whether that
+            // scope is correct is a spec-vs-diff question, not decided here.
             if let Some(redirects) = redirects {
                 walk_redirect_list(text, redirects, depth, scan);
             }
@@ -388,7 +388,7 @@ fn walk_simple_command(
     };
 
     if let Some(word) = &simple.word_or_name {
-        match classify_command_word(word) {
+        match classify_command_word(word, depth) {
             CommandWord::Dynamic => scan.unreduced.push(Unreduced {
                 text: word.value.clone(),
                 reason: UnreducedReason::DynamicName,
@@ -434,10 +434,12 @@ enum CommandWord {
 /// (`"$(echo grep)"`), an arithmetic expression, or a tilde expansion. A
 /// glob-like literal (`gr?p`) has no such piece, so it is left as an
 /// ordinary, if unmatched, binary -- the splitter does not get to decide
-/// what a glob means.
-fn classify_command_word(word: &ast::Word) -> CommandWord {
-    let options = ParserOptions::default();
-    let Ok(pieces) = word::parse(&word.value, &options) else {
+/// what a glob means. A word past the bracket-nesting guard, or one
+/// `word::parse` itself cannot parse, is treated as an ordinary literal: the
+/// command word still resolves via `to_binary`, just without a dynamic-piece
+/// classification.
+fn classify_command_word(word: &ast::Word, depth: u8) -> CommandWord {
+    let Ok(pieces) = parse_word_pieces(&word.value, depth) else {
         return CommandWord::Literal;
     };
     if pieces.iter().any(|piece| is_dynamic_piece(&piece.piece)) {
@@ -470,11 +472,10 @@ fn is_dynamic_piece(piece: &WordPiece) -> bool {
 fn to_binary(raw: &str) -> String {
     let unquoted = brush_parser::unquote_str(raw);
     let unescaped = unquoted.strip_prefix('\\').unwrap_or(&unquoted);
-    unescaped
-        .rsplit('/')
-        .next()
-        .unwrap_or(unescaped)
-        .to_string()
+    match unescaped.rfind('/') {
+        Some(index) => unescaped[index + 1..].to_string(),
+        None => unescaped.to_string(),
+    }
 }
 
 fn walk_prefix_or_suffix_item(
@@ -487,10 +488,10 @@ fn walk_prefix_or_suffix_item(
         CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
             walk_redirect(text, redirect, depth, scan)
         }
-        CommandPrefixOrSuffixItem::Word(word) => walk_word(text, word, depth, scan),
-        CommandPrefixOrSuffixItem::AssignmentWord(_, word) => walk_word(text, word, depth, scan),
-        CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell) => {
-            walk_process_substitution(text, kind, subshell, depth, scan);
+        CommandPrefixOrSuffixItem::Word(word) => walk_word(word, depth, scan),
+        CommandPrefixOrSuffixItem::AssignmentWord(_, word) => walk_word(word, depth, scan),
+        CommandPrefixOrSuffixItem::ProcessSubstitution(_kind, subshell) => {
+            walk_process_substitution(text, subshell, depth, scan);
         }
     }
 }
@@ -509,45 +510,74 @@ fn walk_redirect(text: &str, redirect: &IoRedirect, depth: u8, scan: &mut Scan) 
             reason: UnreducedReason::InterpreterBody,
             depth,
         }),
-        IoRedirect::HereString(_, word) => walk_word(text, word, depth, scan),
-        IoRedirect::OutputAndError(word, _) => walk_word(text, word, depth, scan),
+        IoRedirect::HereString(_, word) => walk_word(word, depth, scan),
+        IoRedirect::OutputAndError(word, _) => walk_word(word, depth, scan),
     }
 }
 
 fn walk_redirect_target(text: &str, target: &IoFileRedirectTarget, depth: u8, scan: &mut Scan) {
     match target {
         IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
-            walk_word(text, word, depth, scan);
+            walk_word(word, depth, scan);
         }
         IoFileRedirectTarget::Fd(_) => {}
-        IoFileRedirectTarget::ProcessSubstitution(kind, subshell) => {
-            walk_process_substitution(text, kind, subshell, depth, scan);
+        IoFileRedirectTarget::ProcessSubstitution(_kind, subshell) => {
+            walk_process_substitution(text, subshell, depth, scan);
         }
     }
+}
+
+/// Parses a word's text into pieces, the shared entry `classify_command_word`
+/// and `walk_word` both call. The bracket-nesting guard runs first (the
+/// third guard site FR-CMD-007's Behavior names, alongside `scan_at`'s guard
+/// over the top-level command and every re-entered payload): a word whose
+/// raw text is nested past the bound is refused before `word::parse` ever
+/// sees it, the same way `scan_at` refuses a command string. A word the
+/// guard passes but `word::parse` still cannot parse comes back `Unparsed`.
+fn parse_word_pieces(
+    value: &str,
+    depth: u8,
+) -> Result<Vec<word::WordPieceWithSource>, UnreducedReason> {
+    if exceeds_depth_guard(value, depth) {
+        return Err(UnreducedReason::TooDeep);
+    }
+    let options = ParserOptions::default();
+    word::parse(value, &options).map_err(|_| UnreducedReason::Unparsed)
 }
 
 /// Scans a word for embedded command or backquoted substitutions
 /// (FR-CMD-007). Every other piece kind (plain text, parameter expansions,
-/// arithmetic) carries no command position and is left alone.
-fn walk_word(text: &str, word: &ast::Word, depth: u8, scan: &mut Scan) {
-    let options = ParserOptions::default();
-    let Ok(pieces) = word::parse(&word.value, &options) else {
-        return;
+/// arithmetic) carries no command position and is left alone. A word that
+/// fails to parse -- past the bracket-nesting guard, or unparseable outright
+/// -- is reported as `Unreduced` with the matching reason rather than
+/// silently skipped, so a substitution buried in it is not lost from the
+/// scan without a trace.
+fn walk_word(word: &ast::Word, depth: u8, scan: &mut Scan) {
+    let pieces = match parse_word_pieces(&word.value, depth) {
+        Ok(pieces) => pieces,
+        Err(reason) => {
+            scan.unreduced.push(Unreduced {
+                text: word.value.clone(),
+                reason,
+                depth,
+            });
+            return;
+        }
     };
     for piece in &pieces {
-        walk_word_piece(text, &piece.piece, depth, scan);
+        walk_word_piece(&piece.piece, depth, scan);
     }
 }
 
-fn walk_word_piece(text: &str, piece: &WordPiece, depth: u8, scan: &mut Scan) {
+fn walk_word_piece(piece: &WordPiece, depth: u8, scan: &mut Scan) {
     match piece {
         WordPiece::CommandSubstitution(inner) | WordPiece::BackquotedCommandSubstitution(inner) => {
-            rescan_substitution(text, inner, depth, scan);
+            rescan_substitution(inner, depth, scan);
         }
         WordPiece::DoubleQuotedSequence(pieces)
         | WordPiece::GettextDoubleQuotedSequence(pieces) => {
             for nested in pieces {
-                walk_word_piece(text, &nested.piece, depth, scan);
+                walk_word_piece(&nested.piece, depth, scan);
             }
         }
         _ => {}
@@ -560,7 +590,7 @@ fn walk_word_piece(text: &str, piece: &WordPiece, depth: u8, scan: &mut Scan) {
 /// the inner scan finds is retagged `Substitution` -- the immediate,
 /// innermost context always wins -- except one still carrying
 /// `AfterAssignment`, which outranks every other tag.
-fn rescan_substitution(_text: &str, inner: &str, depth: u8, scan: &mut Scan) {
+fn rescan_substitution(inner: &str, depth: u8, scan: &mut Scan) {
     let next_depth = depth.saturating_add(1);
     match scan_at(inner, next_depth) {
         Ok(mut inner_scan) => {
@@ -581,17 +611,10 @@ fn rescan_substitution(_text: &str, inner: &str, depth: u8, scan: &mut Scan) {
 }
 
 /// Walks an already-parsed process substitution (`<(...)`/`>(...)`), which
-/// `brush-parser` hands the splitter as AST rather than raw text -- no fresh
-/// parse call, and so no `ScanError` path; a parse failure inside it cannot
-/// occur because it never happens, and the enclosing `Command`'s own parse
-/// already succeeded.
-fn walk_process_substitution(
-    text: &str,
-    _kind: &ProcessSubstitutionKind,
-    subshell: &SubshellCommand,
-    depth: u8,
-    scan: &mut Scan,
-) {
+/// `brush-parser` hands the splitter as AST rather than raw text: there is no
+/// fresh parse call here, and so no `ScanError` path, because the enclosing
+/// `Command`'s own parse already produced this subshell's tree.
+fn walk_process_substitution(text: &str, subshell: &SubshellCommand, depth: u8, scan: &mut Scan) {
     let next_depth = depth.saturating_add(1);
     if next_depth >= MAX_DEPTH {
         let raw = subshell
@@ -621,16 +644,6 @@ fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mu
     }
 }
 
-fn walk_compound_command(
-    text: &str,
-    compound: &CompoundCommand,
-    depth: u8,
-    tag: Tag,
-    scan: &mut Scan,
-) {
-    walk_compound_command_tagged(text, compound, depth, tag, scan);
-}
-
 fn walk_compound_command_tagged(
     text: &str,
     compound: &CompoundCommand,
@@ -646,7 +659,7 @@ fn walk_compound_command_tagged(
         CompoundCommand::ForClause(for_clause) => {
             if let Some(values) = &for_clause.values {
                 for value in values {
-                    walk_word(text, value, depth, scan);
+                    walk_word(value, depth, scan);
                 }
             }
             walk_list(text, &for_clause.body.list, depth, tag, scan);
@@ -654,7 +667,7 @@ fn walk_compound_command_tagged(
         CompoundCommand::CaseClause(case_clause) => {
             for item in &case_clause.cases {
                 for pattern in &item.patterns {
-                    walk_word(text, pattern, depth, scan);
+                    walk_word(pattern, depth, scan);
                 }
                 if let Some(body) = &item.cmd {
                     walk_list(text, body, depth, tag, scan);
@@ -688,9 +701,9 @@ fn walk_compound_command_tagged(
                 scan,
             );
         }
-        // Out of scope: arithmetic expressions are not walked for embedded
-        // substitutions (the issue names only for/case words, function
-        // bodies, and command/process substitutions).
+        // Not walked: arithmetic expressions are not among the word-parse
+        // sites this module's docs enumerate. Whether that scope is correct
+        // is a spec-vs-diff question, not decided here.
         CompoundCommand::Arithmetic(_) | CompoundCommand::ArithmeticForClause(_) => {}
     }
 }
@@ -913,6 +926,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_word_pieces_rejects_deep_nesting_before_calling_the_parser() {
+        // The third guard site FR-CMD-007's Behavior names: a word's own raw
+        // text, past the bracket-nesting bound, is refused before
+        // `word::parse` ever runs over it -- the same discipline `scan_at`
+        // applies to the top-level command and every re-entered payload.
+        let deeply_nested: String = "(".repeat(usize::from(MAX_DEPTH) + 1);
+        assert!(matches!(
+            parse_word_pieces(&deeply_nested, 0),
+            Err(UnreducedReason::TooDeep)
+        ));
+    }
+
+    #[test]
+    fn parse_word_pieces_reports_unparsed_for_a_word_the_parser_rejects() {
+        assert!(matches!(
+            parse_word_pieces("'unterminated", 0),
+            Err(UnreducedReason::Unparsed)
+        ));
+    }
+
+    #[test]
+    fn walk_word_records_unparsed_instead_of_dropping_the_word() {
+        // Before parse_word_pieces existed, walk_word's `let Ok(..) else {
+        // return }` dropped a word that failed to parse without recording
+        // anything. It must now surface as an Unreduced with Unparsed.
+        let word = ast::Word {
+            value: "'unterminated".to_string(),
+            loc: None,
+        };
+        let mut scan = Scan::default();
+        walk_word(&word, 0, &mut scan);
+        assert_eq!(scan.unreduced.len(), 1);
+        assert_eq!(scan.unreduced[0].reason, UnreducedReason::Unparsed);
+        assert_eq!(scan.unreduced[0].text, "'unterminated");
+    }
+
+    #[test]
     fn never_panics_on_deeply_nested_multi_byte_input() {
         // Multi-byte UTF-8 mixed into deeply nested command substitution
         // text must not panic, whatever recursion path it takes.
@@ -940,9 +990,10 @@ mod tests {
     /// A small seeded generator over a byte alphabet that includes quotes,
     /// `$(`, backticks, braces, newlines, and high-UTF-8 bytes, plus
     /// deliberately deep nesting -- `scan` must never panic or abort on any
-    /// of it. This is the property test the depth guard exists for: without
-    /// it running before the parse call, a deeply nested case kills the
-    /// test runner rather than failing one case.
+    /// of it. Reaching depth 25 here is probabilistic, not guaranteed by
+    /// this generator; `too_deep_is_reported_not_walked` and
+    /// `never_panics_on_deeply_nested_raw_input` cover the depth guard
+    /// deterministically.
     #[test]
     fn proptest_never_panics_over_seeded_alphabet() {
         let alphabet: &[u8] = b"()[]{}`$\"'\\|&;<>* \t\n";

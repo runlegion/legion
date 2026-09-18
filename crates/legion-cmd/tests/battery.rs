@@ -48,6 +48,29 @@ fn parse_reason(raw: &str) -> UnreducedReason {
     }
 }
 
+/// A row's expected verdict (`tests/fixtures/battery.json`'s `expected`
+/// field). A closed set, parsed the same disciplined way as `parse_position`
+/// and `parse_reason`: an unknown string panics rather than silently gating
+/// nothing, so a typo like `"visable"` cannot pass through as a non-error
+/// row by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expected {
+    Visible,
+    Opaque,
+    Benign,
+    Error,
+}
+
+fn parse_expected(raw: &str) -> Expected {
+    match raw {
+        "visible" => Expected::Visible,
+        "opaque" => Expected::Opaque,
+        "benign" => Expected::Benign,
+        "error" => Expected::Error,
+        other => panic!("unknown expected verdict in battery.json: {other}"),
+    }
+}
+
 /// Asserts every `(binary, position)` pair the row names is present in
 /// `scan`'s invocations *with at least the multiplicity the row names it*.
 /// A plain per-pair `.any()` check would let a row like `process-substitution`
@@ -135,11 +158,11 @@ fn battery_rows_run_and_report_parse_errors() {
     for row in &rows {
         let id = row["id"].as_str().expect("id must be a string");
         let cmd = row["cmd"].as_str().expect("cmd must be a string");
-        let expected = row["expected"].as_str().expect("expected must be a string");
+        let expected = parse_expected(row["expected"].as_str().expect("expected must be a string"));
 
         let result = legion_cmd::scan(cmd);
 
-        if expected == "error" {
+        if expected == Expected::Error {
             assert!(
                 result.is_err(),
                 "{id}: expected a ScanError, got {result:?}"
@@ -176,22 +199,23 @@ fn battery_rows_run_and_report_parse_errors() {
     // The battery deliberately carries exactly one malformed-input row
     // (`unterminated-quote`, `expected: "error"`), so the 0.1% kill
     // condition is not asserted against this fixed, curated set -- it is a
-    // property of the 47,151-command research corpus. This count is
-    // reported so a *regression* (an `expected != "error"` row starting to
-    // return `ScanError`) is visible in the test output, matching the
-    // battery's own accounting above.
+    // property of the 47,151-command research corpus. A row not marked
+    // `"expected": "error"` that unexpectedly returns `ScanError` already
+    // fails above, at the `unwrap_or_else` that turns that `Err` into a
+    // panic, and an `error` row that does not return `ScanError` already
+    // fails at the `assert!` above that. This block only reports the
+    // parse-error rate so the kill condition stays visible in the output.
     let expected_errors = rows
         .iter()
-        .filter(|row| row["expected"].as_str() == Some("error"))
+        .filter(|row| {
+            parse_expected(row["expected"].as_str().expect("expected must be a string"))
+                == Expected::Error
+        })
         .count();
     println!(
         "battery parse-error rate: {parse_errors}/{} ({:.4}%); {expected_errors} row(s) expect ScanError by design",
         rows.len(),
         parse_errors as f64 / rows.len() as f64 * 100.0
-    );
-    assert_eq!(
-        parse_errors, expected_errors,
-        "a row not marked \"expected\": \"error\" returned ScanError, or an error row did not"
     );
 }
 
