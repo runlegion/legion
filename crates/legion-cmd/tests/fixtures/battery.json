@@ -1,0 +1,728 @@
+[
+  {
+    "id": "commit-msg-heredoc-in-subst",
+    "source": "mined:parse-errors(107)",
+    "cmd": "git add src/a.rs && git commit -m \"$(cat <<'EOF'\nfix: don't trust the agent's \"quotes\" (it's a body)\nEOF\n)\" && git push origin HEAD",
+    "note": "the most common commit idiom; an apostrophe in the body must not open a quote",
+    "expected": "visible",
+    "managed": [["git", "first"], ["git", "after-operator"], ["git", "after-operator"], ["cat", "substitution"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "FP-no-gh-for-loop-word",
+    "source": "today:no-gh",
+    "cmd": "for src in legion gh curl; do n=$(jq -r --arg s \"$src\" 'select(test($s))' c.jsonl | wc -l); echo \"$src $n\"; done",
+    "note": "no-gh refused this: gh is a loop word, never a command",
+    "expected": "benign",
+    "managed": [["jq", "substitution"], ["wc", "substitution"], ["echo", "after-operator"]],
+    "absent": ["gh"]
+  },
+  {
+    "id": "FP-gh-word-in-reflection",
+    "source": "mined:heuristic-only",
+    "cmd": "legion reflect --repo legion --text \"use gh via legion issue; find the spec with grep\"",
+    "expected": "benign",
+    "managed": [["legion", "first"]],
+    "absent": ["gh", "grep", "find"]
+  },
+  {
+    "id": "plain-grep",
+    "source": "synthetic",
+    "cmd": "grep -rn foo src",
+    "expected": "visible",
+    "managed": [["grep", "first"]]
+  },
+  {
+    "id": "cd-and-gh",
+    "source": "mined:gh-after-operator",
+    "cmd": "cd /Volumes/store/projects/runlegion/legion && gh pr view 1142 --json title",
+    "expected": "visible",
+    "managed": [["cd", "first"], ["gh", "after-operator"]]
+  },
+  {
+    "id": "git-status-then-push",
+    "source": "#886",
+    "cmd": "git status && git push origin main",
+    "expected": "visible",
+    "managed": [["git", "first"], ["git", "after-operator"]]
+  },
+  {
+    "id": "xargs-grep",
+    "source": "mined:xargs",
+    "cmd": "git ls-files '*.rs' | xargs grep -l claim_inbox",
+    "note": "flip: xargs's payload is an ordinary argument to xargs, not a separately resolved invocation -- the splitter holds no wrapper table, so grep is never claimed here (#1227's job once the policy names xargs)",
+    "expected": "visible",
+    "managed": [["git", "first"], ["xargs", "after-operator"]]
+  },
+  {
+    "id": "xargs-nice-rg",
+    "source": "synthetic",
+    "cmd": "git ls-files | xargs -n 50 nice -n 10 rg -l RouteTable",
+    "note": "flip: same as xargs-grep -- rg is xargs's payload text, not a resolved invocation",
+    "expected": "visible",
+    "managed": [["git", "first"], ["xargs", "after-operator"]]
+  },
+  {
+    "id": "find-exec-grep",
+    "source": "mined:find-exec",
+    "cmd": "find src -name '*.rs' -exec grep -l 'fn route' {} \\;",
+    "note": "flip: -exec's payload is find's own argument list; grep is not a separate invocation without knowing -exec's meaning",
+    "expected": "visible",
+    "managed": [["find", "first"]]
+  },
+  {
+    "id": "find-exec-plus",
+    "source": "synthetic",
+    "cmd": "find . -type f -execdir rg -n TODO {} +",
+    "note": "flip: same as find-exec-grep",
+    "expected": "visible",
+    "managed": [["find", "first"]]
+  },
+  {
+    "id": "timeout-gh",
+    "source": "mined:wrapper",
+    "cmd": "timeout 30 gh run watch 123456",
+    "note": "flip: timeout is a name, not grammar -- gh is timeout's argument, not a resolved invocation",
+    "expected": "visible",
+    "managed": [["timeout", "first"]]
+  },
+  {
+    "id": "env-assign-rg",
+    "source": "synthetic",
+    "cmd": "env -u PAGER LC_ALL=C rg -n foo",
+    "note": "flip: same as timeout-gh -- rg is env's argument text",
+    "expected": "visible",
+    "managed": [["env", "first"]]
+  },
+  {
+    "id": "sudo-find",
+    "source": "synthetic",
+    "cmd": "sudo -u root find / -name core",
+    "note": "flip: find is sudo's argument text",
+    "expected": "visible",
+    "managed": [["sudo", "first"]]
+  },
+  {
+    "id": "command-grep",
+    "source": "mined:escaped",
+    "cmd": "command grep -c x file",
+    "note": "flip: grep is command's argument text",
+    "expected": "visible",
+    "managed": [["command", "first"]]
+  },
+  {
+    "id": "command-v-is-lookup",
+    "source": "synthetic",
+    "cmd": "command -v gh >/dev/null && echo yes",
+    "expected": "benign",
+    "managed": [["command", "first"], ["echo", "after-operator"]],
+    "absent": ["gh"]
+  },
+  {
+    "id": "which-gh-is-lookup",
+    "source": "mined:lookup",
+    "cmd": "which gh rg fd",
+    "expected": "benign",
+    "managed": [["which", "first"]],
+    "absent": ["gh", "rg", "fd"]
+  },
+  {
+    "id": "abs-grep",
+    "source": "mined:escaped",
+    "cmd": "/usr/bin/grep -n foo bar.txt",
+    "expected": "visible",
+    "managed": [["grep", "first"]]
+  },
+  {
+    "id": "backslash-grep",
+    "source": "mined:escaped",
+    "cmd": "\\grep -n foo bar.txt",
+    "expected": "visible",
+    "managed": [["grep", "first"]]
+  },
+  {
+    "id": "quoted-binary",
+    "source": "synthetic",
+    "cmd": "\"grep\" -n foo bar.txt",
+    "expected": "visible",
+    "managed": [["grep", "first"]]
+  },
+  {
+    "id": "assignment-prefix",
+    "source": "synthetic",
+    "cmd": "GH_PAGER= gh issue list --limit 5",
+    "expected": "visible",
+    "managed": [["gh", "after-assignment"]]
+  },
+  {
+    "id": "subst-find-awk",
+    "source": "mined:subst",
+    "cmd": "wc -l $(find src -name '*.rs' | awk '{print $1}')",
+    "expected": "visible",
+    "managed": [["wc", "first"], ["find", "substitution"], ["awk", "substitution"]]
+  },
+  {
+    "id": "subst-pipeline-grep",
+    "source": "mined:subst",
+    "cmd": "COUNT=$(legion recall --repo legion --latest | grep -c checkpoint); echo $COUNT",
+    "expected": "visible",
+    "managed": [["legion", "substitution"], ["grep", "substitution"], ["echo", "after-operator"]]
+  },
+  {
+    "id": "subst-in-double-quotes",
+    "source": "synthetic",
+    "cmd": "echo \"branch is $(git branch --show-current), grep says $(grep -c x f)\"",
+    "expected": "visible",
+    "managed": [["echo", "first"], ["git", "substitution"], ["grep", "substitution"]]
+  },
+  {
+    "id": "backtick-subst",
+    "source": "synthetic",
+    "cmd": "for f in `ls src`; do echo $f; done",
+    "expected": "visible",
+    "managed": [["ls", "substitution"], ["echo", "first"]]
+  },
+  {
+    "id": "git-grep-in-subst",
+    "source": "synthetic",
+    "cmd": "vim $(git grep -l RouteTable)",
+    "expected": "visible",
+    "managed": [["vim", "first"], ["git", "substitution"]]
+  },
+  {
+    "id": "for-loop-find",
+    "source": "mined:for",
+    "cmd": "for f in $(find . -name '*.toml'); do wc -l \"$f\"; done",
+    "expected": "visible",
+    "managed": [["find", "substitution"], ["wc", "first"]]
+  },
+  {
+    "id": "sh-c-curl-grep",
+    "source": "mined:sh-c",
+    "cmd": "sh -c 'curl -s localhost:8080/health | grep -q ok && echo up'",
+    "note": "flip: sh -c's single-quoted payload is an ordinary argument string, not walked -- grep is the router's job once the policy names sh (#1227)",
+    "expected": "visible",
+    "managed": [["sh", "first"]]
+  },
+  {
+    "id": "bash-o-pipefail-c",
+    "source": "synthetic",
+    "cmd": "bash -o pipefail -c \"gh pr checks 12 | tail -5\"",
+    "note": "flip: same as sh-c-curl-grep",
+    "expected": "visible",
+    "managed": [["bash", "first"]]
+  },
+  {
+    "id": "find-xargs-sh-c-awk",
+    "source": "mined:xargs-sh-c",
+    "cmd": "find . -name '*.rs' -print0 | xargs -0 -I{} sh -c 'grep -c unwrap {} | awk \"{print \\$1}\"'",
+    "note": "flip: xargs's -I{} sh -c payload is xargs's own argument text, wrapper-in-wrapper, unwalked",
+    "expected": "visible",
+    "managed": [["find", "first"], ["xargs", "after-operator"]]
+  },
+  {
+    "id": "find-exec-sh-c-grep",
+    "source": "synthetic",
+    "cmd": "find . -name '*.md' -exec sh -c 'grep -l TODO \"$1\"' _ {} \\;",
+    "note": "needs find -exec and sh -c; the class names the most advanced feature -- flip: find -exec's sh -c payload is find's own argument list -- needs find and sh -c to both be wrapper names to walk, which the splitter never holds",
+    "expected": "visible",
+    "managed": [["find", "first"]]
+  },
+  {
+    "id": "bash-heredoc-search",
+    "source": "mined:heredoc",
+    "cmd": "bash <<'EOF'\ncd src\nrg -n 'fn main' .\nEOF",
+    "note": "flip: a heredoc body is opaque wholesale, whatever command it is attached to -- knowing bash executes it as shell text is name knowledge the splitter does not hold, so rg is never claimed",
+    "expected": "opaque",
+    "managed": [["bash", "first"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "cat-heredoc-then-gh",
+    "source": "synthetic",
+    "cmd": "cat <<EOF > /tmp/body.md\nuse grep and find freely here\nEOF\ngh issue create --body-file /tmp/body.md",
+    "expected": "visible",
+    "managed": [["cat", "first"], ["gh", "after-operator"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "python-heredoc-str-find",
+    "source": "mined:interpreter",
+    "cmd": "python3 <<'PY'\ns = open('x').read()\nprint(s.find('grep'))\nPY",
+    "expected": "opaque",
+    "managed": [["python3", "first"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "python-subprocess-git-grep",
+    "source": "mined:interpreter",
+    "cmd": "python3 -c \"import subprocess; print(subprocess.check_output(['git','grep','-n','RouteTable']).decode())\"",
+    "note": "flip: -c's payload has no heredoc grammar and no $ or backtick for the splitter to walk, so it is neither a resolved invocation nor an Unreduced region -- it is simply an ordinary argument the splitter says nothing about",
+    "expected": "visible",
+    "managed": [["python3", "first"]],
+    "unreduced": []
+  },
+  {
+    "id": "python-rglob-structs",
+    "source": "mined:walks-files",
+    "cmd": "python3 - <<'PY'\nimport pathlib, re\nfor p in pathlib.Path('src').rglob('*.rs'):\n    for m in re.finditer(r'^pub struct (\\w+)', p.read_text(), re.M):\n        print(p, m.group(1))\nPY",
+    "expected": "opaque",
+    "managed": [["python3", "first"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "STRUCTS-python-heredoc-shell-pipe-grep",
+    "source": "user:batshit",
+    "cmd": "cd /Volumes/store/projects/runlegion/legion && python3 <<'PY' | grep -E '^(pub )?struct' | sort | uniq -c\nimport os, subprocess\nout = subprocess.run(\"find src -name '*.rs' | xargs cat | grep -n 'struct '\", shell=True, capture_output=True, text=True).stdout\nfor line in out.splitlines():\n    print(line.split(':', 1)[1].strip())\nPY",
+    "note": "the outer grep is visible; the find|xargs|grep inside the python string is opaque by design",
+    "expected": "visible",
+    "managed": [["cd", "first"], ["python3", "after-operator"], ["grep", "after-operator"], ["sort", "after-operator"], ["uniq", "after-operator"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "STRUCTS-script-file-then-python",
+    "source": "user:batshit",
+    "cmd": "cat > /tmp/structs.py <<'PY'\nimport subprocess\nprint(subprocess.getoutput(\"rg -n '^pub struct' src\"))\nPY\npython3 /tmp/structs.py | grep -v test | head -50",
+    "note": "flip: python3's script-file argument needs a name/extension lookup to flag as ScriptFile (#1227); the splitter resolves python3, grep, and head as ordinary invocations",
+    "expected": "visible",
+    "managed": [["cat", "first"], ["python3", "after-operator"], ["grep", "after-operator"], ["head", "after-operator"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "STRUCTS-bash-c-python-os-system",
+    "source": "user:batshit",
+    "cmd": "bash -c \"python3 -c 'import os; os.system(\\\"grep -rn struct src | wc -l\\\")' | tee /tmp/n\"",
+    "note": "bash -c is walked; python -c inside it is opaque -- flip: 'walked' here means the splitter resolves the outer bash only; the nested payload is inert argument text with no $ or backtick for the splitter to see, so it is neither an invocation nor an Unreduced region",
+    "expected": "visible",
+    "managed": [["bash", "first"]],
+    "unreduced": []
+  },
+  {
+    "id": "script-written-then-run",
+    "source": "mined:script-then-run",
+    "cmd": "cat > run2.sh <<'EOF'\n#!/bin/bash\ngrep -rn foo .\nEOF\nchmod +x run2.sh && bash run2.sh",
+    "note": "flip: cat/chmod/bash all resolve as ordinary invocations; the heredoc body is InterpreterBody, and bash's run2.sh argument needs a name/extension lookup to flag as ScriptFile (#1227), which the splitter does not hold",
+    "expected": "visible",
+    "managed": [["cat", "first"], ["chmod", "after-operator"], ["bash", "after-operator"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "dot-slash-script",
+    "source": "synthetic",
+    "cmd": "./scripts/release.sh --dry-run",
+    "note": "flip: naming a script file needs a name/extension lookup (#1227); the splitter resolves the basename like any other command",
+    "expected": "visible",
+    "managed": [["release.sh", "first"]]
+  },
+  {
+    "id": "eval-word-in-quoted-query",
+    "source": "mined:eval",
+    "cmd": "legion recall --repo legion --context \"eval harness scoring\" --limit 3",
+    "expected": "benign",
+    "managed": [["legion", "first"]],
+    "absent": ["eval"]
+  },
+  {
+    "id": "eval-real",
+    "source": "synthetic",
+    "cmd": "eval \"$(ssh-agent -s)\"",
+    "note": "flip: eval's own body-building is out of scope (a name fact), but the $(...) it is built from is grammar and is re-entered regardless",
+    "expected": "visible",
+    "managed": [["eval", "first"], ["ssh-agent", "substitution"]]
+  },
+  {
+    "id": "dynamic-command-var",
+    "source": "synthetic",
+    "cmd": "$SEARCH -rn foo src",
+    "expected": "opaque",
+    "managed": [],
+    "unreduced": ["dynamic-name"]
+  },
+  {
+    "id": "dynamic-command-subst",
+    "source": "synthetic",
+    "cmd": "$(which rg) -n foo",
+    "note": "the command word itself is DynamicName, but the substitution inside it is grammar the splitter re-enters, so which still resolves",
+    "expected": "opaque",
+    "managed": [["which", "substitution"]],
+    "unreduced": ["dynamic-name"]
+  },
+  {
+    "id": "sqlite3-legion-db",
+    "source": "mined:db",
+    "cmd": "sqlite3 ~/Library/Application\\ Support/legion/legion.db 'select count(*) from reflections'",
+    "expected": "visible",
+    "managed": [["sqlite3", "first"]]
+  },
+  {
+    "id": "db-path-in-variable",
+    "source": "mined:db",
+    "cmd": "DB=~/.local/share/legion/legion.db; ls -la \"$DB\"",
+    "note": "the name sits in an assignment; the ls reads a variable",
+    "expected": "visible",
+    "managed": [["ls", "after-operator"]]
+  },
+  {
+    "id": "find-name-db",
+    "source": "mined:db",
+    "cmd": "find ~ -name legion.db -maxdepth 4 2>/dev/null",
+    "expected": "visible",
+    "managed": [["find", "first"]]
+  },
+  {
+    "id": "FP-jq-regex-names-db",
+    "source": "today:no-direct-db",
+    "cmd": "jq -s 'map(select(test(\"legion\\\\.db\"))) | length' corpus/agent-commands.jsonl",
+    "note": "a regex that spells the name with an escaped dot is not the file",
+    "expected": "benign",
+    "managed": [["jq", "first"]]
+  },
+  {
+    "id": "FP-jq-heredoc-rglob",
+    "source": "today:pre-script-search",
+    "cmd": "jq -s -f /dev/stdin corpus/agent-commands.jsonl <<'JQ'\nmap(select(test(\"rglob|walkdir|grep\"))) | length\nJQ",
+    "expected": "benign",
+    "managed": [["jq", "first"]],
+    "unreduced": ["interpreter-body"],
+    "absent": ["grep"]
+  },
+  {
+    "id": "grep-word-in-string",
+    "source": "synthetic",
+    "cmd": "echo \"use grep or find\" && git commit -m 'drop find usage'",
+    "expected": "benign",
+    "managed": [["echo", "first"], ["git", "after-operator"]],
+    "absent": ["grep", "find"]
+  },
+  {
+    "id": "git-global-opts-push",
+    "source": "synthetic",
+    "cmd": "git -C ../other -c push.default=current push",
+    "expected": "visible",
+    "managed": [["git", "first"]]
+  },
+  {
+    "id": "git-log-S",
+    "source": "synthetic",
+    "cmd": "git log -S RouteTable --oneline",
+    "expected": "visible",
+    "managed": [["git", "first"]]
+  },
+  {
+    "id": "git-log-plain",
+    "source": "synthetic",
+    "cmd": "git log --oneline -5",
+    "expected": "visible",
+    "managed": [["git", "first"]]
+  },
+  {
+    "id": "pnpm-wrangler",
+    "source": "synthetic",
+    "cmd": "pnpm wrangler deploy --env prod",
+    "note": "flip: wrangler is pnpm's argument text -- resolving it needs pnpm in the wrapper table (#1227)",
+    "expected": "visible",
+    "managed": [["pnpm", "first"]]
+  },
+  {
+    "id": "pnpm-exec-wrangler",
+    "source": "synthetic",
+    "cmd": "pnpm exec wrangler tail",
+    "note": "flip: same as pnpm-wrangler",
+    "expected": "visible",
+    "managed": [["pnpm", "first"]]
+  },
+  {
+    "id": "comment-hides-nothing",
+    "source": "synthetic",
+    "cmd": "# grep -rn secret .\ngh auth status",
+    "expected": "visible",
+    "managed": [["gh", "first"]],
+    "absent": ["grep"]
+  },
+  {
+    "id": "subshell-parens",
+    "source": "synthetic",
+    "cmd": "(cd src && rg -n foo)",
+    "expected": "visible",
+    "managed": [["cd", "first"], ["rg", "after-operator"]]
+  },
+  {
+    "id": "if-then-grep",
+    "source": "synthetic",
+    "cmd": "if grep -q foo bar; then echo hit; fi",
+    "note": "flip: the closed Position set has no if/then tag, so the condition's own list and the then-body's own list each resolve their own first command as First -- see the splitter module docs",
+    "expected": "visible",
+    "managed": [["grep", "first"], ["echo", "first"]]
+  },
+  {
+    "id": "while-read-gh",
+    "source": "synthetic",
+    "cmd": "cat ids.txt | while read id; do gh issue close \"$id\"; done",
+    "note": "flip: same relative-First rule as if-then-grep applies to the while-condition and the do-body",
+    "expected": "visible",
+    "managed": [["cat", "first"], ["read", "first"], ["gh", "first"]]
+  },
+  {
+    "id": "time-keyword",
+    "source": "synthetic",
+    "cmd": "time rg -n foo",
+    "note": "flip: time is bash grammar (Pipeline::timed), not a wrapper name -- rg resolves at First without the splitter ever seeing the word time",
+    "expected": "visible",
+    "managed": [["rg", "first"]]
+  },
+  {
+    "id": "time-before-keyword",
+    "source": "next_step: time as a wrapper before keyword",
+    "cmd": "time if rg -q foo f; then grep -n bar f; fi",
+    "note": "time before a compound keyword is grammar (Pipeline::timed), not a wrapper name: both commands inside the if resolve, and the splitter never reads the word time",
+    "expected": "visible",
+    "managed": [["rg", "first"], ["grep", "first"]]
+  },
+  {
+    "id": "herestring-grep",
+    "source": "synthetic",
+    "cmd": "grep -c x <<< \"$(cat file)\"",
+    "note": "flip: a here-string's word is scanned like any other word -- cat is recovered inside it",
+    "expected": "visible",
+    "managed": [["grep", "first"], ["cat", "substitution"]]
+  },
+  {
+    "id": "line-continuation",
+    "source": "synthetic",
+    "cmd": "gh pr create \\\n  --title x \\\n  --body y",
+    "expected": "visible",
+    "managed": [["gh", "first"]]
+  },
+  {
+    "id": "stderr-redirect-pipe",
+    "source": "synthetic",
+    "cmd": "cargo test 2>&1 | grep -E 'FAILED|panicked'",
+    "expected": "visible",
+    "managed": [["cargo", "first"], ["grep", "after-operator"]]
+  },
+  {
+    "id": "process-substitution",
+    "source": "synthetic",
+    "cmd": "diff <(ls a) <(ls b)",
+    "expected": "visible",
+    "managed": [["diff", "first"], ["ls", "substitution"], ["ls", "substitution"]]
+  },
+  {
+    "id": "too-deep",
+    "source": "synthetic",
+    "cmd": "echo $(echo $(echo $(grep -c x f)))",
+    "note": "this is depth 3, and MAX_DEPTH is 25 -- grep resolves at Substitution, not TooDeep; see shallow_nesting_is_not_too_deep in splitter.rs for the boundary test",
+    "expected": "visible",
+    "managed": [["echo", "first"], ["echo", "substitution"], ["echo", "substitution"], ["grep", "substitution"]]
+  },
+  {
+    "id": "unterminated-quote",
+    "source": "synthetic",
+    "cmd": "grep -n 'oops src",
+    "note": "flip: scan never returns a partial Scan -- a malformed command is ScanError, so no managed list is asserted",
+    "expected": "error"
+  },
+  {
+    "id": "arithmetic-not-subst",
+    "source": "synthetic",
+    "cmd": "echo $((1 + 2)) && ls",
+    "expected": "visible",
+    "managed": [["echo", "first"], ["ls", "after-operator"]]
+  },
+  {
+    "id": "case-pattern",
+    "source": "synthetic",
+    "cmd": "case \"$x\" in a) rg foo ;; *) fd bar ;; esac",
+    "note": "each case arm's body is its own nested list, so rg and fd both resolve as First relative to their own arm, not after-operator, contrary to the research's hand-written-scanner label",
+    "expected": "visible",
+    "managed": [["rg", "first"], ["fd", "first"]]
+  },
+  {
+    "id": "npx-grep-nonsense",
+    "source": "synthetic",
+    "cmd": "npx -y rg --version",
+    "note": "flip: rg is npx's argument text -- resolving it needs npx in the wrapper table (#1227)",
+    "expected": "visible",
+    "managed": [["npx", "first"]]
+  },
+  {
+    "id": "perl-ne",
+    "source": "synthetic",
+    "cmd": "perl -ne 'print if /struct/' src/lib.rs",
+    "note": "flip: -ne's single-quoted program has no heredoc grammar and no $ or backtick, so it is neither a resolved invocation nor an Unreduced region",
+    "expected": "visible",
+    "managed": [["perl", "first"]],
+    "unreduced": []
+  },
+  {
+    "id": "node-script-file",
+    "source": "synthetic",
+    "cmd": "node scripts/scan.mjs --grep foo",
+    "note": "flip: naming a script file needs a name/extension lookup (#1227); node resolves as an ordinary invocation",
+    "expected": "visible",
+    "managed": [["node", "first"]]
+  },
+  {
+    "id": "dynamic-name-command-substitution",
+    "source": "caveat: a command name built at runtime",
+    "cmd": "\"$(echo grep)\" -rn foo src",
+    "note": "the command word is entirely a command substitution; the shell builds it at runtime and the splitter cannot know it will be grep",
+    "expected": "opaque",
+    "managed": [],
+    "unreduced": ["dynamic-name"]
+  },
+  {
+    "id": "dynamic-name-positional-params",
+    "source": "caveat: \"$@\"",
+    "cmd": "set -- grep -rn foo src; \"$@\"",
+    "note": "set itself resolves normally; \"$@\" as a command word is a parameter expansion, resolved only at runtime",
+    "expected": "opaque",
+    "managed": [["set", "first"]],
+    "unreduced": ["dynamic-name"]
+  },
+  {
+    "id": "source-fed-by-process-substitution",
+    "source": "caveat: source <(...)",
+    "cmd": "source <(echo \"grep -rn foo src\")",
+    "note": "echo is recovered as the process substitution's command; the string it prints, which source will later execute, is echo's inert argument text and stays a genuine silent miss even under this mechanism",
+    "expected": "visible",
+    "managed": [["source", "first"], ["echo", "substitution"]]
+  },
+  {
+    "id": "git-alias-bang",
+    "source": "caveat: aliases",
+    "cmd": "git -c alias.s='!grep -rn foo src' s",
+    "note": "the alias body is inert argument text to -c; git resolves normally and the aliased grep is a genuine silent miss, not a false claim",
+    "expected": "visible",
+    "managed": [["git", "first"]]
+  },
+  {
+    "id": "globbed-binary-name",
+    "source": "caveat: globbed or shell-expanded binary names",
+    "cmd": "gr?p -rn foo src",
+    "note": "the splitter has no glob table -- it reports the literal word as the binary and leaves matching it to the policy",
+    "expected": "visible",
+    "managed": [["gr?p", "first"]]
+  },
+  {
+    "id": "system-call-inside-interpreter",
+    "source": "caveat: system() inside another program",
+    "cmd": "awk 'BEGIN{system(\"grep -rn foo src\")}'",
+    "note": "awk's single-quoted program is inert argument text; the embedded grep is a genuine silent miss",
+    "expected": "visible",
+    "managed": [["awk", "first"]]
+  },
+  {
+    "id": "search-tool-outside-managed-table",
+    "source": "caveat: search tools outside the managed table",
+    "cmd": "zgrep -l pat file.gz",
+    "note": "the splitter holds no table of search tools at all -- zgrep resolves exactly like grep or any other ordinary command",
+    "expected": "visible",
+    "managed": [["zgrep", "first"]]
+  },
+  {
+    "id": "function-keyword-body",
+    "source": "next_step: function-keyword bodies",
+    "cmd": "function g { grep -rn \"$@\"; }; g foo src",
+    "note": "the function definition itself is not a call; grep inside its body is tagged FunctionBody, and the later call to g is an ordinary after-operator invocation",
+    "expected": "visible",
+    "managed": [["grep", "function-body"], ["g", "after-operator"]]
+  },
+  {
+    "id": "posix-name-paren-definition",
+    "source": "next_step: NAME() as a definition rather than a call",
+    "cmd": "g() { grep -rn \"$@\"; }; g foo src",
+    "note": "the grammar distinguishes a NAME() definition from a call natively -- no risk of counting g() itself as an invocation of g",
+    "expected": "visible",
+    "managed": [["grep", "function-body"], ["g", "after-operator"]]
+  },
+  {
+    "id": "env-dash-s-wrapper-option",
+    "source": "next_step: add env -S to the wrapper table",
+    "cmd": "env -S \"grep -rn foo\" src",
+    "note": "env resolves normally; -S's payload string is env's own argument, not a separate invocation without the wrapper table (#1227)",
+    "expected": "visible",
+    "managed": [["env", "first"]]
+  },
+  {
+    "id": "ssh-remote-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (ssh)",
+    "cmd": "ssh host \"grep -rn foo src\"",
+    "note": "ssh's remote command string is an ordinary argument the splitter does not walk, needing ssh in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["ssh", "first"]]
+  },
+  {
+    "id": "watch-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (watch)",
+    "cmd": "watch -n 5 'grep -rn foo src'",
+    "note": "watch's repeated command is an ordinary argument the splitter does not walk, needing watch in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["watch", "first"]]
+  },
+  {
+    "id": "parallel-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (parallel)",
+    "cmd": "parallel 'grep -rn foo {}' ::: src/a.rs src/b.rs",
+    "note": "parallel's job template is an ordinary argument the splitter does not walk, needing parallel in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["parallel", "first"]]
+  },
+  {
+    "id": "setsid-command-string",
+    "source": "next_step: add ssh, watch, parallel, setsid to the wrapper table (setsid)",
+    "cmd": "setsid grep -rn foo src",
+    "note": "setsid's argv is an ordinary argument the splitter does not walk, needing setsid in the wrapper table (#1227) to be resolved",
+    "expected": "visible",
+    "managed": [["setsid", "first"]]
+  },
+  {
+    "id": "docker-exec-wrapper",
+    "source": "next_step: add docker exec to the wrapper table",
+    "cmd": "docker exec c grep -rn foo src",
+    "note": "docker's own subcommand-plus-arguments shape has no operator between docker and grep -- one SimpleCommand, one invocation",
+    "expected": "visible",
+    "managed": [["docker", "first"]]
+  },
+  {
+    "id": "zgrep-family-content-search",
+    "source": "next_step: classify the zgrep family, sed -n and awk as content searches (the zgrep family)",
+    "cmd": "zegrep -c pat file.gz",
+    "note": "zegrep, like zgrep, zfgrep, bzgrep and xzgrep, resolves as an ordinary invocation -- the splitter holds no table of search tools, compressed-file variants included",
+    "expected": "visible",
+    "managed": [["zegrep", "first"]]
+  },
+  {
+    "id": "sed-as-content-search",
+    "source": "next_step: classify the zgrep family, sed -n and awk as content searches (sed -n /pat/p FILE)",
+    "cmd": "sed -n '/pat/p' FILE",
+    "note": "sed resolves as an ordinary invocation like any other search tool the splitter does not have a table for",
+    "expected": "visible",
+    "managed": [["sed", "first"]]
+  },
+  {
+    "id": "awk-as-content-search",
+    "source": "next_step: classify the zgrep family, sed -n and awk as content searches (awk /pat/ FILE)",
+    "cmd": "awk '/pat/' FILE",
+    "note": "awk resolves as an ordinary invocation like any other search tool the splitter does not have a table for",
+    "expected": "visible",
+    "managed": [["awk", "first"]]
+  },
+  {
+    "id": "benign-git-log-grep-reflog",
+    "source": "issue's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
+    "cmd": "git log --grep-reflog=x",
+    "note": "a flag spelled with grep in it is not a grep invocation",
+    "expected": "benign",
+    "managed": [["git", "first"]],
+    "absent": ["grep"]
+  },
+  {
+    "id": "benign-git-log-dash-capital-s",
+    "source": "issue's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
+    "cmd": "git log -- -Sfoo",
+    "note": "-S is a git log flag, not a separate command",
+    "expected": "benign",
+    "managed": [["git", "first"]]
+  }
+]

@@ -10,8 +10,12 @@
 //! pure data and pure functions over that data.
 
 mod decision;
+mod splitter;
 
 pub use decision::{
     AskDetails, Context, ContractError, Decision, DenyDetails, Facts, Lookup, ManagedTarget,
     NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
+};
+pub use splitter::{
+    Invocation, MAX_DEPTH, Position, Scan, ScanError, Unreduced, UnreducedReason, scan, scan_at,
 };
