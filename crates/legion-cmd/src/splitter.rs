@@ -32,6 +32,9 @@
 //! body, every command found there carries that tag regardless of its
 //! sequence position, and a substitution encountered while already inside a
 //! function body is tagged `Substitution` (the more immediate context wins).
+//! Symmetrically, a function body encountered while already inside a
+//! substitution is tagged `FunctionBody`: whichever of the two encloses a
+//! command more tightly is the tag that command carries.
 //! [`Position::AfterAssignment`] outranks every other tag: a command whose
 //! `SimpleCommand` prefix carries an environment assignment reports
 //! `AfterAssignment` whatever else is true of where it sits (FR-CMD-007).
@@ -176,6 +179,18 @@ pub fn scan(command: &str) -> Result<Scan, ScanError> {
 /// (the router, across a wrapper it recognizes; the splitter itself, across
 /// a command or process substitution).
 pub fn scan_at(command: &str, depth: u8) -> Result<Scan, ScanError> {
+    scan_tagged(command, depth, None)
+}
+
+/// The shared parse-and-walk entry `scan_at` and `rescan_substitution` both
+/// call, so the tag-precedence rule (see the module docs) is written once.
+/// `tag` is the location forced by an enclosing command/process substitution
+/// or function body; `scan_at` enters with no tag, and `rescan_substitution`
+/// enters with `Some(Position::Substitution)` -- from there `walk_command`'s
+/// ordinary precedence (an assignment prefix outranks the tag, a function
+/// body overrides it) applies exactly as it does for an already-parsed
+/// process substitution walked via [`walk_process_substitution`].
+fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
     if depth >= MAX_DEPTH || exceeds_depth_guard(command, depth) {
         return Ok(too_deep(command, depth));
     }
@@ -196,7 +211,7 @@ pub fn scan_at(command: &str, depth: u8) -> Result<Scan, ScanError> {
     let mut seen_first = false;
     for complete_command in &program.complete_commands {
         for item in &complete_command.0 {
-            walk_and_or_list(command, &item.0, depth, None, !seen_first, &mut scan);
+            walk_and_or_list(command, &item.0, depth, tag, !seen_first, &mut scan);
             seen_first = true;
         }
     }
@@ -354,8 +369,7 @@ fn walk_command(
         }
         Command::ExtendedTest(_, redirects) => {
             // Not walked: `[[ ... ]]`'s own words are not among the
-            // word-parse sites this module's docs enumerate. Whether that
-            // scope is correct is a spec-vs-diff question, not decided here.
+            // word-parse sites this module's docs enumerate.
             if let Some(redirects) = redirects {
                 walk_redirect_list(text, redirects, depth, scan);
             }
@@ -394,6 +408,11 @@ fn walk_simple_command(
                 reason: UnreducedReason::DynamicName,
                 depth,
             }),
+            CommandWord::Unparseable(reason) => scan.unreduced.push(Unreduced {
+                text: word.value.clone(),
+                reason,
+                depth,
+            }),
             CommandWord::Literal => {
                 let binary = to_binary(&word.value);
                 let args = simple
@@ -425,6 +444,7 @@ fn walk_simple_command(
 enum CommandWord {
     Literal,
     Dynamic,
+    Unparseable(UnreducedReason),
 }
 
 /// A command word is dynamic (FR-CMD-007's `DynamicName`) when any piece of
@@ -435,17 +455,20 @@ enum CommandWord {
 /// glob-like literal (`gr?p`) has no such piece, so it is left as an
 /// ordinary, if unmatched, binary -- the splitter does not get to decide
 /// what a glob means. A word past the bracket-nesting guard, or one
-/// `word::parse` itself cannot parse, is treated as an ordinary literal: the
-/// command word still resolves via `to_binary`, just without a dynamic-piece
-/// classification.
+/// `word::parse` itself cannot parse, is `Unparseable`: the caller records it
+/// as `Unreduced` with the matching reason, the same as `walk_word` does for
+/// any other word, rather than resolving a binary from text the guard
+/// refused to look at.
 fn classify_command_word(word: &ast::Word, depth: u8) -> CommandWord {
-    let Ok(pieces) = parse_word_pieces(&word.value, depth) else {
-        return CommandWord::Literal;
-    };
-    if pieces.iter().any(|piece| is_dynamic_piece(&piece.piece)) {
-        CommandWord::Dynamic
-    } else {
-        CommandWord::Literal
+    match parse_word_pieces(&word.value, depth) {
+        Ok(pieces) => {
+            if pieces.iter().any(|piece| is_dynamic_piece(&piece.piece)) {
+                CommandWord::Dynamic
+            } else {
+                CommandWord::Literal
+            }
+        }
+        Err(reason) => CommandWord::Unparseable(reason),
     }
 }
 
@@ -586,19 +609,16 @@ fn walk_word_piece(piece: &WordPiece, depth: u8, scan: &mut Scan) {
 
 /// Re-enters a command or process substitution's text (FR-CMD-007): the
 /// splitter re-enters these itself, because they are grammar, unlike a
-/// wrapper payload which needs a name the policy supplies. Every invocation
-/// the inner scan finds is retagged `Substitution` -- the immediate,
-/// innermost context always wins -- except one still carrying
-/// `AfterAssignment`, which outranks every other tag.
+/// wrapper payload which needs a name the policy supplies. The re-parsed
+/// text is walked with `Substitution` as its tag via `scan_tagged`, the same
+/// mechanism `walk_process_substitution` uses for an already-parsed process
+/// substitution: an assignment prefix still outranks it, and a function body
+/// found inside still overrides it, so the two substitution kinds resolve
+/// position by the one shared rule instead of two.
 fn rescan_substitution(inner: &str, depth: u8, scan: &mut Scan) {
     let next_depth = depth.saturating_add(1);
-    match scan_at(inner, next_depth) {
+    match scan_tagged(inner, next_depth, Some(Position::Substitution)) {
         Ok(mut inner_scan) => {
-            for invocation in &mut inner_scan.invocations {
-                if invocation.position != Position::AfterAssignment {
-                    invocation.position = Position::Substitution;
-                }
-            }
             scan.invocations.append(&mut inner_scan.invocations);
             scan.unreduced.append(&mut inner_scan.unreduced);
         }
@@ -665,6 +685,7 @@ fn walk_compound_command_tagged(
             walk_list(text, &for_clause.body.list, depth, tag, scan);
         }
         CompoundCommand::CaseClause(case_clause) => {
+            walk_word(&case_clause.value, depth, scan);
             for item in &case_clause.cases {
                 for pattern in &item.patterns {
                     walk_word(pattern, depth, scan);
@@ -702,8 +723,7 @@ fn walk_compound_command_tagged(
             );
         }
         // Not walked: arithmetic expressions are not among the word-parse
-        // sites this module's docs enumerate. Whether that scope is correct
-        // is a spec-vs-diff question, not decided here.
+        // sites this module's docs enumerate.
         CompoundCommand::Arithmetic(_) | CompoundCommand::ArithmeticForClause(_) => {}
     }
 }
@@ -811,6 +831,36 @@ mod tests {
         let scan = scan("g() { grep -rn \"$@\"; }; g foo src").expect("parses");
         assert_eq!(positions(&scan, "grep"), vec![Position::FunctionBody]);
         assert_eq!(positions(&scan, "g"), vec![Position::AfterOperator]);
+    }
+
+    #[test]
+    fn function_body_inside_a_substitution_outranks_the_substitution_tag() {
+        // A function body found inside a command substitution and one found
+        // inside a process substitution must resolve identically: the
+        // function body is the more immediate context, so it wins over the
+        // Substitution tag either way.
+        let command_sub = scan("echo $( g() { grep x; } )").expect("parses");
+        assert_eq!(
+            positions(&command_sub, "grep"),
+            vec![Position::FunctionBody]
+        );
+
+        let process_sub = scan("diff <( g() { grep x; } )").expect("parses");
+        assert_eq!(
+            positions(&process_sub, "grep"),
+            vec![Position::FunctionBody]
+        );
+    }
+
+    #[test]
+    fn case_subject_word_is_walked_for_substitutions() {
+        // The case subject word (case_clause.value) is a word-parse site
+        // FR-CMD-007's Behavior names alongside the for value list and the
+        // case patterns; a substitution in it must not be lost.
+        let scan = scan("case $(ls src) in a) rg foo ;; *) fd bar ;; esac").expect("parses");
+        assert_eq!(positions(&scan, "ls"), vec![Position::Substitution]);
+        assert_eq!(positions(&scan, "rg"), vec![Position::First]);
+        assert_eq!(positions(&scan, "fd"), vec![Position::First]);
     }
 
     #[test]
@@ -947,10 +997,36 @@ mod tests {
     }
 
     #[test]
+    fn classify_command_word_reports_unparseable_instead_of_a_silent_literal() {
+        // Directly exercised because the TooDeep arm cannot be reached
+        // through `scan`: `scan_at`'s own bracket-nesting guard already
+        // refuses the whole command before a nested command word's text -- a
+        // substring of it at the same budget -- could ever be deep enough to
+        // trip the guard on its own. No `scan()` input reaching the
+        // Unparsed arm was found either, so both are covered directly here.
+        let too_deep = ast::Word {
+            value: "(".repeat(usize::from(MAX_DEPTH) + 1),
+            loc: None,
+        };
+        assert!(matches!(
+            classify_command_word(&too_deep, 0),
+            CommandWord::Unparseable(UnreducedReason::TooDeep)
+        ));
+
+        let unparsed = ast::Word {
+            value: "'unterminated".to_string(),
+            loc: None,
+        };
+        assert!(matches!(
+            classify_command_word(&unparsed, 0),
+            CommandWord::Unparseable(UnreducedReason::Unparsed)
+        ));
+    }
+
+    #[test]
     fn walk_word_records_unparsed_instead_of_dropping_the_word() {
-        // Before parse_word_pieces existed, walk_word's `let Ok(..) else {
-        // return }` dropped a word that failed to parse without recording
-        // anything. It must now surface as an Unreduced with Unparsed.
+        // A word that fails to parse must surface as an Unreduced with
+        // Unparsed, never be dropped silently.
         let word = ast::Word {
             value: "'unterminated".to_string(),
             loc: None,

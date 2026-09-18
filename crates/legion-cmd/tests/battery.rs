@@ -154,6 +154,7 @@ fn battery_ids_are_unique() {
 fn battery_rows_run_and_report_parse_errors() {
     let rows = load_rows();
     let mut parse_errors = 0usize;
+    let mut expected_error_rows = 0usize;
 
     for row in &rows {
         let id = row["id"].as_str().expect("id must be a string");
@@ -161,13 +162,16 @@ fn battery_rows_run_and_report_parse_errors() {
         let expected = parse_expected(row["expected"].as_str().expect("expected must be a string"));
 
         let result = legion_cmd::scan(cmd);
+        if result.is_err() {
+            parse_errors += 1;
+        }
 
         if expected == Expected::Error {
+            expected_error_rows += 1;
             assert!(
                 result.is_err(),
                 "{id}: expected a ScanError, got {result:?}"
             );
-            parse_errors += 1;
             assert!(
                 row.get("managed").is_none(),
                 "{id}: an error row must carry no managed list (never a partial Scan)"
@@ -205,15 +209,8 @@ fn battery_rows_run_and_report_parse_errors() {
     // panic, and an `error` row that does not return `ScanError` already
     // fails at the `assert!` above that. This block only reports the
     // parse-error rate so the kill condition stays visible in the output.
-    let expected_errors = rows
-        .iter()
-        .filter(|row| {
-            parse_expected(row["expected"].as_str().expect("expected must be a string"))
-                == Expected::Error
-        })
-        .count();
     println!(
-        "battery parse-error rate: {parse_errors}/{} ({:.4}%); {expected_errors} row(s) expect ScanError by design",
+        "battery parse-error rate: {parse_errors}/{} ({:.4}%); {expected_error_rows} row(s) expect ScanError by design",
         rows.len(),
         parse_errors as f64 / rows.len() as f64 * 100.0
     );

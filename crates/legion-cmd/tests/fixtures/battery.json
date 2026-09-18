@@ -530,10 +530,10 @@
   {
     "id": "case-pattern",
     "source": "synthetic",
-    "cmd": "case \"$x\" in a) rg foo ;; *) fd bar ;; esac",
-    "note": "flip: each case arm's body is its own nested list, so rg and fd both resolve as First relative to their own arm, not after-operator",
+    "cmd": "case $(ls src) in a) rg foo ;; *) fd bar ;; esac",
+    "note": "flip: each case arm's body is its own nested list, so rg and fd both resolve as First relative to their own arm, not after-operator; the case subject word is also word-parsed, recovering the substitution it carries",
     "expected": "visible",
-    "managed": [["rg", "first"], ["fd", "first"]]
+    "managed": [["ls", "substitution"], ["rg", "first"], ["fd", "first"]]
   },
   {
     "id": "npx-grep-nonsense",
