@@ -1,0 +1,20 @@
+[
+  {
+    "id": "FP-git-stash-push",
+    "source": "mined:heuristic-only",
+    "cmd": "git stash push -- src/a.rs\ngit status --short",
+    "note": "any-token sees git + push. Moved here from the splitter's battery (#1226) per FR-CMD-007 revision 10: whether the subcommand word matters is a rule about the git family, which is what a resolved command MEANS, not whether a word is a command at all -- the router's (#1227) call, not the splitter's.",
+    "expected": "benign",
+    "managed": [["git", "first"], ["git", "after-operator"]],
+    "absent": ["push"]
+  },
+  {
+    "id": "benign-pnpm-grep",
+    "source": "issue #1226's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
+    "cmd": "pnpm grep",
+    "note": "pnpm's own argument happens to be the word grep; it is not a grep invocation. Moved here from the splitter's battery (#1226) per FR-CMD-007 revision 10: whether a bare `pnpm <name>` is a runner or an ordinary invocation is a naming decision, and names live in the policy (FR-CMD-011) -- the router's (#1227) call, not the splitter's.",
+    "expected": "benign",
+    "managed": [["pnpm", "first"]],
+    "absent": ["grep"]
+  }
+]

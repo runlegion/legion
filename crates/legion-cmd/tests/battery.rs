@@ -1,28 +1,29 @@
-//! Runs the adversarial battery against `legion_cmd::scan` (#1226, FR-CMD-007's
-//! acceptance text). 72 rows are RESEARCH-CMD-bounded-tokenizer's
-//! hand-labelled fixtures (from the precog-toy worktree's
+//! Runs the adversarial battery against `legion_cmd::scan` (#1226, FR-CMD-007
+//! revision 10's acceptance text). The battery has no fixed total: honest
+//! provenance sets the count. It carries RESEARCH-CMD-bounded-tokenizer's 72
+//! hand-labelled fixtures verbatim (from the precog-toy worktree's
 //! `toy/tokenizer/fixtures.json`), re-derived for the grammar-parser
 //! mechanism rather than the hand-written scanner they were labelled
-//! against; the remaining rows are derived from that research's adversarial
-//! review (its `caveats` and `next_step`), each row's `source` naming the
-//! item it comes from, plus the known-false-positive commands the issue asks
-//! for separately.
+//! against; one row for each candidate class that research's adversarial
+//! review names in its `caveats` and `next_step` (the research document does
+//! not list them row by row, so a row that folds more than one named item
+//! behind a single tested example is dishonest -- split it); and a row for
+//! each false positive the splitter itself must not produce. Every row
+//! names in `source` the item it comes from, and no row is added that names
+//! none.
 //!
-//! The battery carries 93 rows, not FR-CMD-007's stated 88 (72 + 16): a 2026-09-18
-//! verify pass found three of the "16 derived" rows padded with a `source`
-//! that named neither `caveats` nor `next_step` (they named the issue's
-//! separate known-false-positives bullet instead), and two other rows each
-//! folded multiple `next_step` items behind one tested example (`ssh` stood
-//! for `ssh`/`watch`/`parallel`/`setsid`; `sed -n` stood for the zgrep
-//! family, `sed -n`, and `awk` as well). Honoring "each row names the item
-//! it comes from" for those two foldings alone yields 18 caveat/next_step-derived
-//! rows, and the 3 known-false-positive commands the issue also asks for
-//! (`git log --grep-reflog=x`, `git log -- -Sfoo`, `pnpm grep`) trace to
-//! neither `caveats` nor `next_step` and have no slot in a fixed 72+16 count
-//! that excludes them. 72 + 18 + 3 = 93. This is a spec undercount in
-//! FR-CMD-007's acceptance text and the issue's row-count arithmetic, not a
-//! grouping choice available to the implementer -- see the escalation on
-//! issue #1226 rather than re-folding rows to force 88.
+//! A false positive that turns on what a resolved command MEANS, rather than
+//! on whether a word is a command at all, is not the splitter's to fixture:
+//! `git stash push` (does the subcommand word matter -- a rule about the git
+//! family) and `pnpm grep` (is a bare `pnpm <name>` a runner or an ordinary
+//! invocation -- a naming decision, FR-CMD-011) both moved out of this
+//! battery to `tests/fixtures/router-candidate-false-positives.json` for
+//! #1227's evaluator to pick up; they are not splitter defects, so they do
+//! not belong in a splitter-only battery, but the cases themselves are real
+//! and kept, not deleted. `git log --grep-reflog=x`, `git log -- -Sfoo`, `gh`
+//! as a for-loop word, and `gh` inside a quoted argument stay here: each
+//! guards against the splitter fabricating a command that plain grammar
+//! does not support, which is a splitter defect if it ever resolves.
 //!
 //! Row shape (`tests/fixtures/battery.json`): `id`, `source`, `cmd`, an
 //! optional `note`, and `expected` in `visible` / `opaque` / `benign` /
@@ -171,19 +172,22 @@ fn assert_absent(id: &str, scan: &Scan, absent: &[Value]) {
 }
 
 #[test]
-fn battery_has_ninety_three_rows() {
-    // See the module doc comment: FR-CMD-007 states 72 + 16 = 88, but an
-    // honest split of the folded next_step rows plus the required
-    // known-false-positive rows the issue asks for separately lands at
-    // 72 + 18 + 3 = 93. Escalated on issue #1226 rather than re-folded to
-    // force the stated count.
+fn battery_rows_all_name_a_source() {
+    // FR-CMD-007 revision 10: "the battery has no fixed total: honest
+    // provenance sets the count" and "every row names in a source field the
+    // item it comes from, and no row is added that names none." There is no
+    // row-count assertion to match -- this is the mechanical check the
+    // acceptance text actually names: `source` is required and non-empty on
+    // every row.
     let rows = load_rows();
-    assert_eq!(
-        rows.len(),
-        93,
-        "battery count drifted from 72 research + 18 derived + 3 known-false-positive rows -- \
-         see the module doc comment and issue #1226's escalation before changing this number"
-    );
+    for row in &rows {
+        let id = row["id"].as_str().expect("id must be a string");
+        let source = row
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{id}: every battery row must name a source"));
+        assert!(!source.trim().is_empty(), "{id}: source must not be empty");
+    }
 }
 
 #[test]

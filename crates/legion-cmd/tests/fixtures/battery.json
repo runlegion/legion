@@ -9,15 +9,6 @@
     "unreduced": ["interpreter-body"]
   },
   {
-    "id": "FP-git-stash-push",
-    "source": "mined:heuristic-only",
-    "cmd": "git stash push -- src/a.rs\ngit status --short",
-    "note": "any-token sees git + push",
-    "expected": "benign",
-    "managed": [["git", "first"], ["git", "after-operator"]],
-    "absent": ["push"]
-  },
-  {
     "id": "FP-no-gh-for-loop-word",
     "source": "today:no-gh",
     "cmd": "for src in legion gh curl; do n=$(jq -r --arg s \"$src\" 'select(test($s))' c.jsonl | wc -l); echo \"$src $n\"; done",
@@ -725,14 +716,5 @@
     "note": "-S is a git log flag, not a separate command",
     "expected": "benign",
     "managed": [["git", "first"]]
-  },
-  {
-    "id": "benign-pnpm-grep",
-    "source": "issue's Fixture battery bullet 'Include the known false positives as benign rows'; the list itself lives in the toy's FINDINGS.md and in RESEARCH-CMD-bounded-tokenizer's finding field, not in its caveats or next_step arrays",
-    "cmd": "pnpm grep",
-    "note": "pnpm's own argument happens to be the word grep; it is not a grep invocation",
-    "expected": "benign",
-    "managed": [["pnpm", "first"]],
-    "absent": ["grep"]
   }
 ]
