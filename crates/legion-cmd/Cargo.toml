@@ -16,3 +16,10 @@ thiserror = "2"
 # #1144) making the crate's spans byte offsets instead of mixed char/byte
 # offsets. Drop this pin once that fix ships on crates.io.
 brush-parser = { git = "https://github.com/runlegion/brush.git", rev = "f660bcd35c57f9c1e03fa5b0b2154389b417187f" }
+
+[dev-dependencies]
+# The property test FR-CMD-007's Error Handling asks for: an arbitrary-string
+# fuzzer with shrinking, replacing a hand-rolled generator that could not
+# reach `scan`'s command-word paths at all (its alphabet held no
+# alphanumerics).
+proptest = "1"

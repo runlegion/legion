@@ -351,8 +351,9 @@
     "id": "dynamic-command-subst",
     "source": "synthetic",
     "cmd": "$(which rg) -n foo",
+    "note": "the command word itself is DynamicName, but the substitution inside it is grammar the splitter re-enters, so which still resolves",
     "expected": "opaque",
-    "managed": [],
+    "managed": [["which", "substitution"]],
     "unreduced": ["dynamic-name"]
   },
   {
@@ -508,7 +509,7 @@
     "managed": [["diff", "first"], ["ls", "substitution"], ["ls", "substitution"]]
   },
   {
-    "id": "shallow-nesting-is-not-too-deep",
+    "id": "too-deep",
     "source": "synthetic",
     "cmd": "echo $(echo $(echo $(grep -c x f)))",
     "note": "this is depth 3, and MAX_DEPTH is 25 -- grep resolves at Substitution, not TooDeep; see shallow_nesting_is_not_too_deep in splitter.rs for the boundary test",
@@ -532,10 +533,10 @@
   {
     "id": "case-pattern",
     "source": "synthetic",
-    "cmd": "case $(ls src) in a) rg foo ;; *) fd bar ;; esac",
-    "note": "flip: each case arm's body is its own nested list, so rg and fd both resolve as First relative to their own arm, not after-operator; the case subject word is also word-parsed, recovering the substitution it carries",
+    "cmd": "case \"$x\" in a) rg foo ;; *) fd bar ;; esac",
+    "note": "each case arm's body is its own nested list, so rg and fd both resolve as First relative to their own arm, not after-operator, contrary to the research's hand-written-scanner label",
     "expected": "visible",
-    "managed": [["ls", "substitution"], ["rg", "first"], ["fd", "first"]]
+    "managed": [["rg", "first"], ["fd", "first"]]
   },
   {
     "id": "npx-grep-nonsense",

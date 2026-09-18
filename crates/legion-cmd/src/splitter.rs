@@ -211,7 +211,15 @@ fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
     let mut seen_first = false;
     for complete_command in &program.complete_commands {
         for item in &complete_command.0 {
-            walk_and_or_list(command, &item.0, depth, tag, !seen_first, &mut scan);
+            walk_and_or_list(
+                command,
+                &item.0,
+                depth,
+                tag,
+                !seen_first,
+                Position::First,
+                &mut scan,
+            );
             seen_first = true;
         }
     }
@@ -310,10 +318,24 @@ fn slice_bytes(text: &str, start: usize, end: usize) -> String {
 /// position (see the module docs).
 type Tag = Option<Position>;
 
-fn walk_list(text: &str, list: &CompoundList, depth: u8, tag: Tag, scan: &mut Scan) {
+/// `entry` is the `Position` the list's own very first command carries when
+/// nothing overrides it: ordinarily `Position::First` (a fresh body reset,
+/// per the module's documented relative-First rule), but a `BraceGroup` or
+/// `Subshell` walked from `walk_command`'s `Compound` arm passes that arm's
+/// own `seq_position` through instead, so a subshell or brace group sitting
+/// after a pipe or list operator does not silently report its first command
+/// as `First`.
+fn walk_list(
+    text: &str,
+    list: &CompoundList,
+    depth: u8,
+    tag: Tag,
+    entry: Position,
+    scan: &mut Scan,
+) {
     for (index, item) in list.0.iter().enumerate() {
         let item_is_first = index == 0;
-        walk_and_or_list(text, &item.0, depth, tag, item_is_first, scan);
+        walk_and_or_list(text, &item.0, depth, tag, item_is_first, entry, scan);
     }
 }
 
@@ -323,11 +345,12 @@ fn walk_and_or_list(
     depth: u8,
     tag: Tag,
     item_is_first: bool,
+    entry: Position,
     scan: &mut Scan,
 ) {
     for (index, pipeline) in and_or.iter().enumerate() {
         let pipeline_is_first = item_is_first && index == 0;
-        walk_pipeline(text, pipeline.1, depth, tag, pipeline_is_first, scan);
+        walk_pipeline(text, pipeline.1, depth, tag, pipeline_is_first, entry, scan);
     }
 }
 
@@ -337,12 +360,13 @@ fn walk_pipeline(
     depth: u8,
     tag: Tag,
     pipeline_is_first: bool,
+    entry: Position,
     scan: &mut Scan,
 ) {
     for (index, command) in pipeline.seq.iter().enumerate() {
         let stage_is_first = pipeline_is_first && index == 0;
         let seq_position = if stage_is_first {
-            Position::First
+            entry
         } else {
             Position::AfterOperator
         };
@@ -363,7 +387,7 @@ fn walk_command(
             walk_simple_command(text, simple, depth, tag, seq_position, scan)
         }
         Command::Compound(compound, redirects) => {
-            walk_compound_command_tagged(text, compound, depth, tag, scan);
+            walk_compound_command_tagged(text, compound, depth, tag, seq_position, scan);
             if let Some(redirects) = redirects {
                 walk_redirect_list(text, redirects, depth, scan);
             }
@@ -427,13 +451,27 @@ fn walk_simple_command(
 
     if let Some(word) = &simple.word_or_name {
         match classify_command_word(word, depth) {
-            CommandWord::Unreduced(reason) => scan.unreduced.push(Unreduced {
-                text: word.value.clone(),
-                reason,
-                depth,
-            }),
-            CommandWord::Literal => {
-                let binary = to_binary(&word.value);
+            CommandWord::Unreduced(reason) => {
+                scan.unreduced.push(Unreduced {
+                    text: word.value.clone(),
+                    reason,
+                    depth,
+                });
+                // A dynamic command word (`$(...)`, a backquoted
+                // substitution, an expansion used as the command name
+                // itself) still carries a nested command position the
+                // grammar shows: re-enter its pieces the same way an
+                // ordinary word's substitution is walked, so the region is
+                // reported opaque *and* its inner commands are not
+                // silently dropped. `TooDeep` and `Unparsed` need no such
+                // re-entry: the word already failed to parse (or was
+                // refused before parsing), so there are no pieces to walk.
+                if reason == UnreducedReason::DynamicName {
+                    walk_word(word, depth, scan);
+                }
+            }
+            CommandWord::Literal(literal) => {
+                let binary = to_binary(&literal);
                 let args = simple
                     .suffix
                     .iter()
@@ -461,7 +499,10 @@ fn walk_simple_command(
 }
 
 enum CommandWord {
-    Literal,
+    /// The command word's literal text, built piece-by-piece
+    /// (`word_literal_text`) rather than re-unquoted from the word's raw
+    /// source.
+    Literal(String),
     Unreduced(UnreducedReason),
 }
 
@@ -483,7 +524,7 @@ fn classify_command_word(word: &ast::Word, depth: u8) -> CommandWord {
             if pieces.iter().any(|piece| is_dynamic_piece(&piece.piece)) {
                 CommandWord::Unreduced(UnreducedReason::DynamicName)
             } else {
-                CommandWord::Literal
+                CommandWord::Literal(word_literal_text(&pieces))
             }
         }
         Err(reason) => CommandWord::Unreduced(reason),
@@ -497,25 +538,72 @@ fn is_dynamic_piece(piece: &WordPiece) -> bool {
         | WordPiece::BackquotedCommandSubstitution(_)
         | WordPiece::ArithmeticExpression(_)
         | WordPiece::TildeExpansion(_) => true,
+        // The crate hands back an ANSI-C quoted piece's inner text raw,
+        // without decoding its escapes (`$'\x67rep'` carries the literal
+        // four characters `\x67rep`, not a decoded `g`): a piece with no
+        // backslash is exact as literal text, but one that does carry a
+        // backslash names a value the shell computes at runtime the same
+        // way a parameter expansion does, and treating it as literal would
+        // hand `to_binary` un-decoded escape syntax as if it were a real
+        // basename. This is a grammar fact about what the crate does and
+        // does not decode, not a table of tool names.
+        WordPiece::AnsiCQuotedText(text) => text.contains('\\'),
         WordPiece::DoubleQuotedSequence(pieces)
         | WordPiece::GettextDoubleQuotedSequence(pieces) => {
             pieces.iter().any(|p| is_dynamic_piece(&p.piece))
         }
-        WordPiece::Text(_)
-        | WordPiece::SingleQuotedText(_)
-        | WordPiece::AnsiCQuotedText(_)
-        | WordPiece::EscapeSequence(_) => false,
+        WordPiece::Text(_) | WordPiece::SingleQuotedText(_) | WordPiece::EscapeSequence(_) => false,
     }
 }
 
-/// Basename of the command word: unquote, then strip a leading backslash,
-/// then take the text after the last `/` (FR-CMD-007's `Invocation::binary`).
+/// Assembles a word's literal text directly from its already-parsed pieces,
+/// rather than re-unquoting the word's raw source: `classify_command_word`
+/// only reaches this once every piece has already been confirmed
+/// non-dynamic by `is_dynamic_piece`, so every piece here is one of the
+/// literal-text kinds `piece_literal_text` handles.
+fn word_literal_text(pieces: &[word::WordPieceWithSource]) -> String {
+    pieces
+        .iter()
+        .map(|p| piece_literal_text(&p.piece))
+        .collect()
+}
+
+/// A piece's own literal text. Only reached for a piece `is_dynamic_piece`
+/// judged non-dynamic, so the five dynamic-only variants never arrive here;
+/// they are listed rather than covered by a wildcard so a new `WordPiece`
+/// variant added upstream fails to compile here instead of silently
+/// resolving to an empty string.
+fn piece_literal_text(piece: &WordPiece) -> String {
+    match piece {
+        WordPiece::Text(text)
+        | WordPiece::SingleQuotedText(text)
+        | WordPiece::AnsiCQuotedText(text) => text.clone(),
+        WordPiece::DoubleQuotedSequence(pieces)
+        | WordPiece::GettextDoubleQuotedSequence(pieces) => pieces
+            .iter()
+            .map(|p| piece_literal_text(&p.piece))
+            .collect(),
+        // `\g` parses as an EscapeSequence carrying the raw two-byte source
+        // `\g`; its literal value is the escaped character alone.
+        WordPiece::EscapeSequence(text) => text.strip_prefix('\\').unwrap_or(text).to_string(),
+        WordPiece::TildeExpansion(_)
+        | WordPiece::ParameterExpansion(_)
+        | WordPiece::CommandSubstitution(_)
+        | WordPiece::BackquotedCommandSubstitution(_)
+        | WordPiece::ArithmeticExpression(_) => String::new(),
+    }
+}
+
+/// Basename of the command word: the text after the last `/`
+/// (FR-CMD-007's `Invocation::binary`). `raw` is already a word's literal
+/// text (`word_literal_text`), assembled piece-by-piece with quotes and
+/// escapes already resolved -- a leading backslash escape is stripped there
+/// (`piece_literal_text`'s `EscapeSequence` arm), so there is no unresolved
+/// backslash left for this function to strip.
 fn to_binary(raw: &str) -> String {
-    let unquoted = brush_parser::unquote_str(raw);
-    let unescaped = unquoted.strip_prefix('\\').unwrap_or(&unquoted);
-    match unescaped.rfind('/') {
-        Some(index) => unescaped[index + 1..].to_string(),
-        None => unescaped.to_string(),
+    match raw.rfind('/') {
+        Some(index) => raw[index + 1..].to_string(),
+        None => raw.to_string(),
     }
 }
 
@@ -678,14 +766,30 @@ fn walk_parameter_expr(expr: &word::ParameterExpr, depth: u8, scan: &mut Scan) {
             walk_embedded_text(pattern, depth, scan);
             walk_embedded_text_opt(replacement, depth, scan);
         }
-        // No embedded shell text: a bare parameter reference, its length, a
-        // transform (none of whose operations carry raw text), or a literal
-        // variable-name prefix.
-        PE::Parameter { .. }
-        | PE::ParameterLength { .. }
-        | PE::Transform { .. }
-        | PE::VariableNames { .. }
-        | PE::MemberKeys { .. } => {}
+        // A bare parameter reference or its length carries no expansion
+        // text of its own beyond a possible array subscript, which the
+        // parser leaves as raw text on the `Parameter` itself
+        // (`Parameter::NamedWithIndex`'s `index` field) the same way an
+        // arithmetic expression's text is raw: `${x[$(grep a)]}` and
+        // `${#x[$(grep a)]}` must not lose `grep` any more than
+        // `${x[1]:-$(grep a)}` loses it from `default_value`.
+        PE::Parameter { parameter, .. } | PE::ParameterLength { parameter, .. } => {
+            walk_parameter_subscript(parameter, depth, scan);
+        }
+        // No embedded shell text: a transform (none of whose operations
+        // carry raw text), or a literal variable-name prefix.
+        PE::Transform { .. } | PE::VariableNames { .. } | PE::MemberKeys { .. } => {}
+    }
+}
+
+/// Walks a `Parameter`'s own array subscript, when it has one
+/// (`Parameter::NamedWithIndex`'s `index` field): raw shell text the parser
+/// has not broken down, so a substitution inside it is not lost. Every
+/// other `Parameter` variant (a positional, special, or bare named
+/// parameter, or an all-indices reference) carries no such text.
+fn walk_parameter_subscript(parameter: &word::Parameter, depth: u8, scan: &mut Scan) {
+    if let word::Parameter::NamedWithIndex { index, .. } = parameter {
+        walk_embedded_text(index, depth, scan);
     }
 }
 
@@ -756,36 +860,69 @@ fn walk_process_substitution(text: &str, subshell: &SubshellCommand, depth: u8, 
         &subshell.list,
         next_depth,
         Some(Position::Substitution),
+        Position::First,
         scan,
     );
 }
 
 fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mut Scan) {
-    walk_compound_command_tagged(text, &body.0, depth, Some(Position::FunctionBody), scan);
+    walk_compound_command_tagged(
+        text,
+        &body.0,
+        depth,
+        Some(Position::FunctionBody),
+        Position::First,
+        scan,
+    );
     if let Some(redirects) = &body.1 {
         walk_redirect_list(text, redirects, depth, scan);
     }
 }
 
+/// `outer_position` is the `Position` `walk_command`'s `Compound` arm
+/// resolved for this compound command as a whole (`First`, `AfterOperator`,
+/// or `AfterAssignment`): the position it would have reported had it been a
+/// simple command instead. A `BraceGroup` or `Subshell` is a single
+/// sequence with no independent entry point of its own, so its first
+/// command inherits `outer_position` rather than resetting to `First` --
+/// `cat x | (grep a)` and `cat x | { grep a; }` report `grep` at
+/// `AfterOperator`, matching the pipe it actually sits behind. Every other
+/// variant keeps today's documented rule instead: `if`/`while`/`until`
+/// conditions, `for`/`case`/coprocess bodies, and `then`/`else` branches
+/// each get their own fresh `Position::First`, because each is a distinct
+/// body the module's docs already describe as independently walked "the
+/// same way the top-level program is walked" -- narrowing this fix to the
+/// two verified constructs rather than re-deriving that rule for every
+/// variant.
 fn walk_compound_command_tagged(
     text: &str,
     compound: &CompoundCommand,
     depth: u8,
     tag: Tag,
+    outer_position: Position,
     scan: &mut Scan,
 ) {
     match compound {
         CompoundCommand::BraceGroup(brace_group) => {
-            walk_list(text, &brace_group.list, depth, tag, scan)
+            walk_list(text, &brace_group.list, depth, tag, outer_position, scan)
         }
-        CompoundCommand::Subshell(subshell) => walk_list(text, &subshell.list, depth, tag, scan),
+        CompoundCommand::Subshell(subshell) => {
+            walk_list(text, &subshell.list, depth, tag, outer_position, scan)
+        }
         CompoundCommand::ForClause(for_clause) => {
             if let Some(values) = &for_clause.values {
                 for value in values {
                     walk_word(value, depth, scan);
                 }
             }
-            walk_list(text, &for_clause.body.list, depth, tag, scan);
+            walk_list(
+                text,
+                &for_clause.body.list,
+                depth,
+                tag,
+                Position::First,
+                scan,
+            );
         }
         CompoundCommand::CaseClause(case_clause) => {
             walk_word(&case_clause.value, depth, scan);
@@ -794,26 +931,40 @@ fn walk_compound_command_tagged(
                     walk_word(pattern, depth, scan);
                 }
                 if let Some(body) = &item.cmd {
-                    walk_list(text, body, depth, tag, scan);
+                    walk_list(text, body, depth, tag, Position::First, scan);
                 }
             }
         }
         CompoundCommand::IfClause(if_clause) => {
-            walk_list(text, &if_clause.condition, depth, tag, scan);
-            walk_list(text, &if_clause.then, depth, tag, scan);
+            walk_list(
+                text,
+                &if_clause.condition,
+                depth,
+                tag,
+                Position::First,
+                scan,
+            );
+            walk_list(text, &if_clause.then, depth, tag, Position::First, scan);
             if let Some(elses) = &if_clause.elses {
                 for else_clause in elses {
                     if let Some(condition) = &else_clause.condition {
-                        walk_list(text, condition, depth, tag, scan);
+                        walk_list(text, condition, depth, tag, Position::First, scan);
                     }
-                    walk_list(text, &else_clause.body, depth, tag, scan);
+                    walk_list(text, &else_clause.body, depth, tag, Position::First, scan);
                 }
             }
         }
         CompoundCommand::WhileClause(while_or_until)
         | CompoundCommand::UntilClause(while_or_until) => {
-            walk_list(text, &while_or_until.0, depth, tag, scan);
-            walk_list(text, &while_or_until.1.list, depth, tag, scan);
+            walk_list(text, &while_or_until.0, depth, tag, Position::First, scan);
+            walk_list(
+                text,
+                &while_or_until.1.list,
+                depth,
+                tag,
+                Position::First,
+                scan,
+            );
         }
         CompoundCommand::Coprocess(coprocess) => {
             walk_command(
@@ -826,17 +977,34 @@ fn walk_compound_command_tagged(
             );
         }
         CompoundCommand::ArithmeticForClause(arithmetic_for_clause) => {
-            walk_list(text, &arithmetic_for_clause.body.list, depth, tag, scan);
+            if let Some(initializer) = &arithmetic_for_clause.initializer {
+                walk_embedded_text(&initializer.value, depth, scan);
+            }
+            if let Some(condition) = &arithmetic_for_clause.condition {
+                walk_embedded_text(&condition.value, depth, scan);
+            }
+            if let Some(updater) = &arithmetic_for_clause.updater {
+                walk_embedded_text(&updater.value, depth, scan);
+            }
+            walk_list(
+                text,
+                &arithmetic_for_clause.body.list,
+                depth,
+                tag,
+                Position::First,
+                scan,
+            );
         }
-        // Not walked: an arithmetic evaluation carries no command position --
-        // it names variables and operators, never a command word.
-        CompoundCommand::Arithmetic(_) => {}
+        CompoundCommand::Arithmetic(arithmetic) => {
+            walk_embedded_text(&arithmetic.expr.value, depth, scan);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn positions(scan: &Scan, binary: &str) -> Vec<Position> {
         scan.invocations
@@ -996,6 +1164,94 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_command_expression_is_walked_for_substitutions() {
+        // `CompoundCommand::Arithmetic` carries the same raw
+        // `UnexpandedArithmeticExpr` text as the `ArithmeticExpression` word
+        // piece above; a substitution in it must not be silently dropped.
+        let scan = scan("(( n = $(ls | wc -l) ))").expect("parses");
+        assert_eq!(positions(&scan, "ls"), vec![Position::Substitution]);
+        assert_eq!(positions(&scan, "wc"), vec![Position::Substitution]);
+    }
+
+    #[test]
+    fn arithmetic_for_clause_header_is_walked_for_substitutions() {
+        // The initializer, condition, and updater expressions of a `for
+        // ((...))` header are raw arithmetic text, the same as the body of
+        // an ordinary `((...))` command; only the body list was walked
+        // before this test.
+        let scan = scan("for (( i=$(wc -l < f); i>0; i-- )); do rg x; done").expect("parses");
+        assert_eq!(positions(&scan, "wc"), vec![Position::Substitution]);
+        assert_eq!(positions(&scan, "rg"), vec![Position::First]);
+    }
+
+    #[test]
+    fn subshell_after_a_pipe_reports_after_operator() {
+        // The compound command's own sequence position (from the pipe or
+        // list operator it sits behind) is threaded into the subshell's
+        // first command instead of always resetting to First.
+        let scan = scan("cat x | (grep a)").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::AfterOperator]);
+    }
+
+    #[test]
+    fn brace_group_after_a_pipe_reports_after_operator() {
+        let scan = scan("cat x | { grep a; }").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::AfterOperator]);
+    }
+
+    #[test]
+    fn subshell_after_a_list_operator_reports_after_operator() {
+        let scan = scan("a && (grep b)").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::AfterOperator]);
+    }
+
+    #[test]
+    fn subshell_in_first_position_still_reports_first() {
+        let scan = scan("(grep a)").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::First]);
+    }
+
+    #[test]
+    fn ansi_c_quoted_command_word_resolves_the_real_basename() {
+        // `$'grep'` carries no backslash escape, so its inner text is exact
+        // literal text: the basename is built from the parsed pieces
+        // instead of re-unquoting the raw source, so no leading `$`
+        // survives into `binary`.
+        let scan = scan("$'grep' -rn foo").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::First]);
+    }
+
+    #[test]
+    fn gettext_quoted_command_word_resolves_the_real_basename() {
+        let scan = scan("$\"grep\" -rn foo").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::First]);
+    }
+
+    #[test]
+    fn ansi_c_quoted_command_word_with_an_escape_is_dynamic_not_a_wrong_literal() {
+        // The crate hands back an ANSI-C quoted piece's inner text without
+        // decoding its escapes, so `$'\x67rep'` cannot be reduced to a real
+        // basename here; it must come back as an opaque DynamicName region
+        // rather than a confidently-wrong literal like `\x67rep` or `$x67rep`.
+        let scan = scan("$'\\x67rep' -rn foo").expect("parses");
+        assert!(scan.invocations.is_empty());
+        assert_eq!(scan.unreduced.len(), 1);
+        assert_eq!(scan.unreduced[0].reason, UnreducedReason::DynamicName);
+    }
+
+    #[test]
+    fn parameter_array_subscript_is_walked_for_substitutions() {
+        let scan = scan("echo ${x[$(grep a)]}").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::Substitution]);
+    }
+
+    #[test]
+    fn parameter_length_array_subscript_is_walked_for_substitutions() {
+        let scan = scan("echo ${#x[$(grep a)]}").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::Substitution]);
+    }
+
+    #[test]
     fn case_subject_word_is_walked_for_substitutions() {
         // The case subject word (case_clause.value) is a word-parse site
         // FR-CMD-007's Behavior names alongside the for value list and the
@@ -1034,10 +1290,20 @@ mod tests {
 
     #[test]
     fn dynamic_command_word_from_substitution() {
+        // The command word itself is DynamicName (the shell builds it at
+        // runtime), but the substitution inside it is still grammar the
+        // splitter re-enters: `echo` must not be silently lost just because
+        // it happens to sit in command-word position.
         let scan = scan("\"$(echo grep)\" -rn foo src").expect("parses");
-        assert!(scan.invocations.is_empty());
         assert_eq!(scan.unreduced.len(), 1);
         assert_eq!(scan.unreduced[0].reason, UnreducedReason::DynamicName);
+        assert_eq!(positions(&scan, "echo"), vec![Position::Substitution]);
+        let echo = scan
+            .invocations
+            .iter()
+            .find(|inv| inv.binary == "echo")
+            .expect("echo invocation");
+        assert_eq!(echo.depth, 1);
     }
 
     #[test]
@@ -1206,15 +1472,52 @@ mod tests {
         assert!(sliced.contains('\u{1F600}'));
     }
 
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+
+        /// The property test FR-CMD-007's Error Handling asks for: `scan`
+        /// must never panic over arbitrary strings, checked with a real
+        /// shrinking fuzzer rather than a hand-rolled one. Unlike
+        /// `seeded_alphabet_fuzz_never_panics` below (metacharacters only),
+        /// this strategy's alphabet includes letters, digits, and path
+        /// characters, so a generated string can actually contain a
+        /// command word and exercise `classify_command_word`, `to_binary`,
+        /// the `Literal` arm of `walk_simple_command`, and real
+        /// `Invocation` construction -- not only the parse-failure and
+        /// depth-guard paths.
+        #[test]
+        fn scan_never_panics_over_arbitrary_shell_like_strings(input in shell_like_string()) {
+            let _ = scan(&input);
+        }
+    }
+
+    /// A proptest strategy mixing shell metacharacters with alphanumerics
+    /// and common path characters, so proptest's shrinking-capable
+    /// generator can produce both well-formed-looking commands and
+    /// adversarial nesting from the same alphabet.
+    fn shell_like_string() -> impl Strategy<Value = String> {
+        let alphabet: &'static [char] = &[
+            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'r', 'p', 'x', '0', '1', '2', '9', '_', '-', '.',
+            '/', '(', ')', '[', ']', '{', '}', '`', '$', '"', '\'', '\\', '|', '&', ';', '<', '>',
+            '*', ' ', '\t', '\n',
+        ];
+        prop::collection::vec(prop::sample::select(alphabet), 0..200)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
     /// A small seeded generator over a byte alphabet that includes quotes,
     /// `$(`, backticks, braces, newlines, and high-UTF-8 bytes, plus
     /// deliberately deep nesting -- `scan` must never panic or abort on any
     /// of it. Reaching depth 25 here is probabilistic, not guaranteed by
     /// this generator; `too_deep_is_reported_not_walked` and
     /// `never_panics_on_deeply_nested_raw_input` cover the depth guard
-    /// deterministically.
+    /// deterministically. Kept alongside the proptest above rather than
+    /// replaced by it: this alphabet holds no alphanumerics by design, so it
+    /// probes the parse-failure and guard paths harder than a realistic
+    /// command string would, and it also injects raw non-UTF-8 bytes the
+    /// proptest strategy above does not.
     #[test]
-    fn proptest_never_panics_over_seeded_alphabet() {
+    fn seeded_alphabet_fuzz_never_panics() {
         let alphabet: &[u8] = b"()[]{}`$\"'\\|&;<>* \t\n";
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
