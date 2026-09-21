@@ -335,12 +335,30 @@ pub struct Facts {
     pub keywords: Vec<String>,
 }
 
-/// `route`'s return value: exactly one [`Decision`] plus the [`Facts`] it
-/// extracted (FR-CMD-001).
+/// What decided a command: the policy entry `route` matched, an unparsable
+/// command, or an FR-CMD-016 default. The adapter (#1229) reads the operator
+/// mark; the ledger (#1231, #1237) records the entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Deciding {
+    /// A policy rule (or sym job) matched and produced the decision. `id` is
+    /// its policy-unique id. `needs_operator` is the matched rule's operator
+    /// mark (FR-CMD-006); route never copies it into an ask's own behavior in
+    /// this issue -- #1237 adds the path that acts on it.
+    Rule { id: String, needs_operator: bool },
+    /// The command did not parse, so `route` returned ask (FR-CMD-006).
+    ParseError,
+    /// No rule matched, so an FR-CMD-016 default (allow, deny, or the
+    /// empty-policy deny) produced the decision.
+    Default,
+}
+
+/// `route`'s return value: exactly one [`Decision`], the [`Facts`] it
+/// extracted (FR-CMD-001, FR-CMD-003), and the entry that decided the command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routed {
     pub decision: Decision,
     pub facts: Facts,
+    pub deciding: Deciding,
 }
 
 #[cfg(test)]
@@ -605,8 +623,10 @@ mod tests {
                 verb: Some("view".to_string()),
                 ..Facts::default()
             },
+            deciding: Deciding::Default,
         };
         assert_eq!(routed.decision, Decision::Allow { note: None });
         assert_eq!(routed.facts.verb.as_deref(), Some("view"));
+        assert_eq!(routed.deciding, Deciding::Default);
     }
 }

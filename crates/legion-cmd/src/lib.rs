@@ -10,12 +10,20 @@
 //! pure data and pure functions over that data.
 
 mod decision;
+mod evaluate;
+mod policy;
+mod route;
 mod splitter;
 
 pub use decision::{
-    AskDetails, Context, ContractError, Decision, DenyDetails, Facts, Lookup, ManagedTarget,
-    NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
+    AskDetails, Context, ContractError, Deciding, Decision, DenyDetails, Facts, Lookup,
+    ManagedTarget, NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };
+pub use policy::{
+    BodyLanguage, Family, Interpreter, Policy, PolicyError, Predicate, Rule, RuleOutcome,
+    ScriptCarrier, SymJob, ToolKind, ToolRules, Wrapper, parse_policy,
+};
+pub use route::route;
 pub use splitter::{
     Invocation, MAX_DEPTH, Position, Scan, ScanError, Unreduced, UnreducedReason, scan, scan_at,
 };
