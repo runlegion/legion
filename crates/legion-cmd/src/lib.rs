@@ -1,13 +1,16 @@
-//! The legion-cmd Decision contract.
+//! legion-cmd: route a tool call to one Decision from a declarative policy.
 //!
-//! This crate holds the types `route` will return once it is built
-//! (policy-and-evaluator issue, tracked separately): the closed five-arm
-//! `Decision` set, the closed seven-reason `ProxyReason` set, the facts
-//! `route` extracts from a command, and the context a caller supplies to it.
+//! [`route`] is the entry point: it splits a Bash command with the [`scan`]
+//! splitter, re-enters the wrapper and shell-interpreter payloads the policy
+//! names, evaluates every invocation and unreduced region through the one
+//! evaluator, and folds them into a single [`Decision`] (the closed five-arm
+//! set) plus the [`Facts`] it extracted. The policy is data: [`parse_policy`]
+//! reads it, and no routing decision turns on a binary name in Rust code
+//! (FR-CMD-011).
 //!
-//! `route` itself is not implemented here. This crate has no filesystem,
-//! network, database, or process dependency (NFR-CMD-001, FR-CMD-014): it is
-//! pure data and pure functions over that data.
+//! This crate has no filesystem, network, database, or process dependency
+//! (NFR-CMD-001, FR-CMD-014): it is pure data and pure functions over that
+//! data.
 
 mod decision;
 mod evaluate;

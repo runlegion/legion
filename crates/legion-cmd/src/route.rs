@@ -142,19 +142,19 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
 
     if let Some(wrapper) = policy.matching_wrapper(&invocation.binary, &invocation.args) {
         let skip = usize::from(wrapper.required_subcommand.is_some());
-        let payload = invocation
-            .args
-            .iter()
-            .skip(skip)
-            .cloned()
-            .collect::<Vec<_>>();
-        reenter_or_record(
-            policy,
-            &payload,
-            next_depth,
-            UnreducedReason::WrapperPayload,
-            out,
-        );
+        let payload: Vec<&String> = invocation.args.iter().skip(skip).collect();
+        // A wrapper with no payload words (a bare `env`, `pnpm exec` with
+        // nothing after it) wraps no command: there is nothing to route, so it
+        // contributes no part and reaches the allow default -- not an opaque
+        // proxy, which is reserved for a command route genuinely cannot read.
+        if !payload.is_empty() {
+            let text = payload
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            reenter_text(policy, &text, next_depth, out);
+        }
         return;
     }
 
@@ -169,7 +169,7 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
         // between those quotes. Strip one matched outer pair so a shell body
         // re-enters as the command it is, not as one quoted word named after
         // the whole line.
-        let body = dequote_outer(body);
+        let body = evaluate::dequote_outer(body);
         match interpreter.body {
             BodyLanguage::Shell => {
                 reenter_text(policy, body, next_depth, out);
@@ -199,28 +199,10 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
     out.invocations.push(invocation);
 }
 
-/// Re-enters `payload` as a shell command, or records why it could not be
-/// reduced. An empty payload is a wrapper whose command route cannot see (it is
-/// built from an expansion); a payload the splitter rejects is `Unparsed` and
-/// proxies opaque -- a malformed wrapper payload is not an ask (FR-CMD-007).
-fn reenter_or_record(
-    policy: &Policy,
-    payload: &[String],
-    depth: u8,
-    empty_reason: UnreducedReason,
-    out: &mut Expanded,
-) {
-    if payload.is_empty() {
-        out.regions.push(Unreduced {
-            text: String::new(),
-            reason: empty_reason,
-            depth,
-        });
-        return;
-    }
-    reenter_text(policy, &payload.join(" "), depth, out);
-}
-
+/// Re-enters `text` as a shell command. A payload the splitter rejects is
+/// recorded `Unparsed` and proxies opaque -- a malformed wrapper payload is not
+/// an ask (FR-CMD-007): re-entering it changes who called `scan_at`, not what
+/// the region is.
 fn reenter_text(policy: &Policy, text: &str, depth: u8, out: &mut Expanded) {
     match splitter::scan_at(text, depth) {
         Ok(scan) => expand(policy, scan.invocations, scan.unreduced, out),
@@ -238,22 +220,6 @@ fn body_after_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
-}
-
-/// Removes one matched outer pair of single or double quotes, if the whole
-/// string is wrapped in it. This is not general shell dequoting -- a body with
-/// mixed or concatenated quoting is left as-is -- but it covers the ordinary
-/// `sh -c '<body>'` and `sh -c "<body>"` forms this issue routes.
-fn dequote_outer(text: &str) -> &str {
-    let bytes = text.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if (first == b'\'' || first == b'"') && first == last {
-            return &text[1..text.len() - 1];
-        }
-    }
-    text
 }
 
 fn collect_strings(value: &Value, out: &mut Vec<String>) {
@@ -274,16 +240,18 @@ fn extract_facts(invocations: &[Invocation], verb: Option<String>) -> Facts {
     let mut issue_numbers = Vec::new();
     let mut keywords = Vec::new();
     for invocation in invocations {
-        for arg in &invocation.args {
+        for raw in &invocation.args {
+            // Compare against the value the shell sees, not the raw quoted text.
+            let arg = evaluate::dequote_outer(raw);
             if arg.starts_with('-') {
                 continue;
             }
             if let Some(number) = issue_number(arg) {
                 issue_numbers.push(number);
             } else if arg.contains('/') {
-                paths.push(arg.clone());
+                paths.push(arg.to_string());
             } else {
-                keywords.push(arg.clone());
+                keywords.push(arg.to_string());
             }
         }
     }
@@ -295,9 +263,11 @@ fn extract_facts(invocations: &[Invocation], verb: Option<String>) -> Facts {
     }
 }
 
-/// Parses `#123` or a bare `123` into an issue number.
+/// Parses a `#123` issue reference. The `#` prefix is required: a bare integer
+/// is an ordinary operand (a `timeout 30` duration, a port number), not an
+/// issue number, so it is not misread as one.
 fn issue_number(arg: &str) -> Option<u64> {
-    arg.strip_prefix('#').unwrap_or(arg).parse::<u64>().ok()
+    arg.strip_prefix('#')?.parse::<u64>().ok()
 }
 
 fn empty_policy_deny() -> Routed {
@@ -319,12 +289,21 @@ fn allow_routed() -> Routed {
     }
 }
 
+// The literals passed at every call site are non-empty, so these constructors
+// never fail today. The fallback is `Proxy { Opaque }`, not `Allow`: if a
+// future edit ever threaded an empty string through, the command would be
+// recorded unreadable rather than silently permitted -- fail closed, matching
+// the same helpers in evaluate.rs and FR-CMD-016's "never a silent allow".
 fn deny(reason: &str, instead: &str) -> Decision {
-    Decision::deny(reason, instead).unwrap_or(Decision::Allow { note: None })
+    Decision::deny(reason, instead).unwrap_or(Decision::Proxy {
+        reason: crate::decision::ProxyReason::Opaque,
+    })
 }
 
 fn ask(question: &str, reason: impl Into<String>) -> Decision {
-    Decision::ask(question, reason).unwrap_or(Decision::Allow { note: None })
+    Decision::ask(question, reason).unwrap_or(Decision::Proxy {
+        reason: crate::decision::ProxyReason::Opaque,
+    })
 }
 
 #[cfg(test)]
@@ -546,6 +525,39 @@ mod tests {
         let routed = decide("git push origin main -- src/a.rs");
         assert_eq!(routed.facts.verb.as_deref(), Some("push"));
         assert!(routed.facts.paths.contains(&"src/a.rs".to_string()));
+    }
+
+    #[test]
+    fn issue_numbers_require_a_hash_prefix() {
+        // A quoted `"#123"` is an issue number (a bare `#123` would be a shell
+        // comment); a bare integer (a timeout, a port) is not misread as one.
+        let hashed = decide("gh issue view \"#123\"");
+        assert_eq!(hashed.facts.issue_numbers, vec![123]);
+        let bare = decide("gh issue view 30");
+        assert!(bare.facts.issue_numbers.is_empty());
+    }
+
+    #[test]
+    fn a_quoted_managed_binary_is_still_routed() {
+        // `git "push"` must reach the ask rule, not slip past a quoted word.
+        assert!(matches!(
+            decide("git \"push\" origin").decision,
+            Decision::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn a_valueless_global_option_before_the_subcommand_is_still_routed() {
+        assert!(matches!(
+            decide("git --no-pager push origin main").decision,
+            Decision::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn a_bare_wrapper_with_no_payload_is_allowed_not_proxied() {
+        // `env` alone wraps no command: nothing to route -> allow, not opaque.
+        assert_eq!(decide("env").decision, Decision::Allow { note: None });
     }
 
     #[test]

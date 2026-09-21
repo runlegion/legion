@@ -113,11 +113,16 @@ pub fn decide_region(policy: &Policy, region: &Unreduced) -> PartOutcome {
 /// Folds every part into the one Decision route returns (FR-CMD-001,
 /// FR-CMD-007).
 ///
-/// A sym part wins outright, in command order, so a sym-served command is
-/// never allowed or proxied by a sibling part. Otherwise the strictest
-/// Decision wins, in the order deny, ask, proxy, rewrite, allow, with ties
-/// broken by command order. An empty part list is the allow default (nothing
-/// to route).
+/// A sym part wins outright, so a sym-served command is never allowed or
+/// proxied by a sibling part. Otherwise the strictest Decision wins, in the
+/// order deny, ask, proxy, rewrite, allow. The strictest RANK is
+/// order-independent; a tie at the same rank resolves to the first part in
+/// evaluation order (route evaluates all invocations, then all unreduced
+/// regions -- not strict command order), which fixes the Decision payload and
+/// the `deciding`/`verb` attribution. Nothing here depends on which same-rank
+/// part wins, so this is not made command-faithful; #1237 must not assume it is
+/// when it keys confirmations off `deciding.id`. An empty part list is the
+/// allow default (nothing to route).
 pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
     if let Some(sym) = parts.iter().find(|p| p.is_sym) {
         return sym.clone();
@@ -252,20 +257,31 @@ fn allow_default() -> PartOutcome {
     }
 }
 
-/// The most specific family whose binary and leading operands match, with the
+/// The most specific family whose binary and operand words match, with the
 /// verb it names. A family key is whitespace-separated: the first token is the
-/// binary, any further tokens are leading operands (subcommand words) the
-/// invocation must carry in order. The verb is those subcommand words, or the
+/// binary, any further tokens are subcommand words the invocation must carry as
+/// its leading operands in order. The verb is those subcommand words, or the
 /// binary when the key names none.
+///
+/// Operands are the non-option arguments, with option tokens (those starting
+/// with `-`) removed rather than stopped at, so a global option before the
+/// subcommand (`git --no-pager push`, `git --git-dir=x show`) does not hide it.
+/// Each argument is dequoted first, so a quoted subcommand (`git "push"`) still
+/// matches. KNOWN LIMITATION (FR-CMD-007 residual, flagged for the hook-parity
+/// issue): a global option that takes a SEPARATE value (`git -C /tmp push`)
+/// leaves its value (`/tmp`) in the operand run, because deciding it is a value
+/// rather than a subcommand needs per-binary option metadata the policy does
+/// not yet carry. Such a command misses its family and reaches the allow
+/// default.
 fn most_specific_family<'a>(
     families: &'a std::collections::BTreeMap<String, Family>,
     binary: &str,
     args: &[String],
 ) -> Option<(String, &'a Family)> {
-    let leading: Vec<&str> = args
+    let operands: Vec<&str> = args
         .iter()
-        .map(String::as_str)
-        .take_while(|a| !a.starts_with('-'))
+        .map(|a| dequote_outer(a))
+        .filter(|a| !a.starts_with('-'))
         .collect();
 
     let mut best: Option<(usize, String, &Family)> = None;
@@ -278,12 +294,12 @@ fn most_specific_family<'a>(
             continue;
         }
         let subcommands: Vec<&str> = tokens.collect();
-        if subcommands.len() > leading.len() {
+        if subcommands.len() > operands.len() {
             continue;
         }
         if subcommands
             .iter()
-            .zip(leading.iter())
+            .zip(operands.iter())
             .all(|(want, have)| want == have)
         {
             let verb = if subcommands.is_empty() {
@@ -300,10 +316,27 @@ fn most_specific_family<'a>(
     best.map(|(_, verb, family)| (verb, family))
 }
 
+/// Removes one matched outer pair of single or double quotes if the whole
+/// string is wrapped in it, so matching compares against the value the shell
+/// sees, not the raw source text the splitter preserves (`"push"` -> `push`).
+/// Not general shell dequoting -- a string with mixed or concatenated quoting
+/// is left as-is -- but it covers the ordinary fully-quoted word.
+pub(crate) fn dequote_outer(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'\'' || first == b'"') && first == last {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
+}
+
 fn predicates_hold(predicates: &[Predicate], args: &[String]) -> bool {
     predicates.iter().all(|predicate| match predicate {
-        Predicate::ArgPresent(word) => args.iter().any(|a| a == word),
-        Predicate::ArgAbsent(word) => !args.iter().any(|a| a == word),
+        Predicate::ArgPresent(word) => args.iter().any(|a| dequote_outer(a) == word),
+        Predicate::ArgAbsent(word) => !args.iter().any(|a| dequote_outer(a) == word),
     })
 }
 
@@ -392,6 +425,90 @@ mod tests {
                 needs_operator: false
             }
         );
+    }
+
+    #[test]
+    fn missing_required_consult_denies_and_a_fetched_consult_lets_it_through() {
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
+            {"id": "r", "requires_consult": true, "outcome": {"kind": "allow"}}
+        ]}}}}}"#,
+        );
+        // NotFetched -> deny (FR-CMD-016).
+        assert!(matches!(
+            decide_bash_invocation(&p, "gh", &args(&[]), &Context::default()).decision,
+            Decision::Deny(_)
+        ));
+        // Fetched (even Empty) -> the rule's own outcome.
+        let ctx = Context {
+            consult: Lookup::Empty,
+            ..Context::default()
+        };
+        assert_eq!(
+            decide_bash_invocation(&p, "gh", &args(&[]), &ctx).decision,
+            Decision::Allow { note: None }
+        );
+    }
+
+    #[test]
+    fn a_quoted_subcommand_still_matches_its_family() {
+        // The splitter keeps the raw quotes on args; matching must dequote, or
+        // a quoted subcommand word evades a deny/ask rule (a policy bypass).
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
+            {"id": "r", "outcome": {"kind": "deny", "reason": "no push", "instead": "x"}}
+        ]}}}}}"#,
+        );
+        assert!(matches!(
+            decide_bash_invocation(&p, "git", &args(&["\"push\""]), &Context::default()).decision,
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn a_quoted_flag_still_satisfies_a_predicate() {
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
+            {"id": "r", "predicates": [{"kind": "arg-present", "arg": "--force"}],
+             "outcome": {"kind": "deny", "reason": "no force", "instead": "x"}}
+        ]}}}}}"#,
+        );
+        assert!(matches!(
+            decide_bash_invocation(
+                &p,
+                "git",
+                &args(&["push", "\"--force\""]),
+                &Context::default()
+            )
+            .decision,
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn a_valueless_global_option_before_the_subcommand_does_not_hide_it() {
+        // `git --no-pager push` and `git --git-dir=x push` must still match the
+        // `git push` family (the H2 unambiguous half). A separated option value
+        // (`git -C /tmp push`) is a documented residual, not covered here.
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
+            {"id": "r", "outcome": {"kind": "deny", "reason": "no push", "instead": "x"}}
+        ]}}}}}"#,
+        );
+        for args_list in [
+            vec!["--no-pager", "push"],
+            vec!["--git-dir=x", "push"],
+            vec!["--no-pager", "push", "origin", "main"],
+        ] {
+            assert!(
+                matches!(
+                    decide_bash_invocation(&p, "git", &args(&args_list), &Context::default())
+                        .decision,
+                    Decision::Deny(_)
+                ),
+                "args {args_list:?} should match git push",
+            );
+        }
     }
 
     #[test]

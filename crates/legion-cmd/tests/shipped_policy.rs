@@ -1,19 +1,58 @@
-//! Exercises the shipped default policy (`plugin/legion-cmd/policy.json`), not
-//! just inline test policies: the artifact adapters load must parse, be
-//! non-empty, and route real commands to the arms it declares. It holds only
-//! enough rules to exercise the arms; the hook-parity issue fills it.
+//! Two concerns, kept apart so NFR-CMD-001 holds:
+//!
+//! 1. The shipped artifact (`plugin/legion-cmd/policy.json`) parses, is
+//!    non-empty, and declares the names the splitter refuses to hold. This test
+//!    reads the file but never calls `route` -- NFR-CMD-001's "no test of route
+//!    requires a filesystem" is about route, and this validates only the
+//!    artifact.
+//! 2. route reaches every arm over a policy that mirrors the shipped rules,
+//!    built from an inline JSON literal (the Behavior section's "tests build
+//!    policies from inline JSON strings"), so no test of route touches disk.
 
 use std::fs;
 
 use legion_cmd::{Context, Decision, Policy, ProxyReason, ToolCall, parse_policy, route};
 
-fn shipped_policy() -> Policy {
+fn shipped_policy_text() -> String {
     let path = format!(
         "{}/../../plugin/legion-cmd/policy.json",
         env!("CARGO_MANIFEST_DIR")
     );
-    let text = fs::read_to_string(&path).expect("shipped policy is readable");
-    parse_policy(&text).expect("shipped policy parses")
+    fs::read_to_string(&path).expect("shipped policy is readable")
+}
+
+/// Mirrors the shipped rules, inline, so the route assertions below never touch
+/// the filesystem. Kept structurally in step with `plugin/legion-cmd/policy.json`.
+fn mirror_policy() -> Policy {
+    parse_policy(
+        r#"{
+        "sym_jobs": [
+            {"id": "find-content", "sym_command": "legion sym etc find-content",
+             "interpreter_patterns": ["rglob", "read_text"]}
+        ],
+        "wrappers": [
+            {"binary": "env"},
+            {"binary": "npx"},
+            {"binary": "pnpm", "required_subcommand": "exec"}
+        ],
+        "interpreters": [
+            {"binary": "sh", "flag": "-c", "body": "shell"},
+            {"binary": "python3", "flag": "-c", "body": "foreign"}
+        ],
+        "script_carriers": [{"binary": "bash"}],
+        "tools": {"Bash": {"families": {
+            "grep": {"rules": [{"id": "grep-to-sym", "outcome": {"kind": "sym", "job": "find-content"}}]},
+            "rm": {"rules": [
+                {"id": "rm-recursive-force", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
+                 "outcome": {"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}},
+                {"id": "rm-other", "outcome": {"kind": "allow"}}
+            ]},
+            "curl": {"rules": [{"id": "curl-network", "outcome": {"kind": "ask", "question": "fetch?", "reason": "network", "needs_operator": true}}]},
+            "xxd": {"rules": [{"id": "xxd-verbatim", "outcome": {"kind": "proxy", "reason": "binary"}}]}
+        }}}
+    }"#,
+    )
+    .expect("mirror policy parses")
 }
 
 fn bash(command: &str) -> ToolCall {
@@ -27,78 +66,89 @@ fn decide(policy: &Policy, command: &str) -> Decision {
     route(policy, &bash(command), &Context::default()).decision
 }
 
-#[test]
-fn shipped_policy_parses_and_is_not_empty() {
-    assert!(!shipped_policy().is_empty());
-}
+// -- artifact validation (touches disk, never calls route) --------------------
 
 #[test]
-fn shipped_policy_routes_the_arms_it_declares() {
-    let policy = shipped_policy();
+fn shipped_policy_parses_is_non_empty_and_declares_its_names() {
+    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    assert!(!policy.is_empty());
+    // The names the splitter refuses to hold live here as data.
+    assert!(policy.matching_wrapper("env", &[]).is_some());
+    assert!(
+        policy
+            .matching_wrapper("pnpm", &["exec".to_string(), "eslint".to_string()])
+            .is_some()
+    );
+    assert!(policy.matching_interpreter("sh").is_some());
+    assert!(policy.matching_interpreter("python3").is_some());
+    assert!(policy.matching_script_carrier("bash").is_some());
+    assert!(policy.sym_job("find-content").is_some());
+}
+
+// -- route behavior (inline policy, never touches disk) -----------------------
+
+#[test]
+fn mirror_policy_routes_every_arm() {
+    let policy = mirror_policy();
 
     // allow default: no managed binary.
     assert_eq!(
         decide(&policy, "echo hello"),
         Decision::Allow { note: None }
     );
+    // allow within a family: rm without the -rf form.
+    assert_eq!(
+        decide(&policy, "rm notes.txt"),
+        Decision::Allow { note: None }
+    );
 
     // sym: grep routes to the find-content sym command.
     match decide(&policy, "grep -rn foo src") {
-        Decision::Deny(details) => assert_eq!(details.instead(), "legion sym etc find-content"),
+        Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
         other => panic!("grep should route to sym, got {other:?}"),
     }
 
-    // ask: a bare git push.
+    // deny: a combined recursive force delete.
+    assert!(matches!(decide(&policy, "rm -rf build"), Decision::Deny(_)));
+    // ask: a network fetch.
     assert!(matches!(
-        decide(&policy, "git push origin main"),
+        decide(&policy, "curl example.com"),
         Decision::Ask(_)
     ));
-
-    // deny: a force push.
-    assert!(matches!(
-        decide(&policy, "git push --force origin main"),
-        Decision::Deny(_)
-    ));
-
-    // proxy: git show must stay verbatim.
+    // proxy: binary output stays verbatim.
     assert_eq!(
-        decide(&policy, "git show HEAD"),
+        decide(&policy, "xxd payload.bin"),
         Decision::Proxy {
-            reason: ProxyReason::FullPatch
+            reason: ProxyReason::Binary
         }
     );
 }
 
 #[test]
-fn shipped_policy_re_enters_a_js_runner_and_a_shell_interpreter() {
-    let policy = shipped_policy();
-    // npx grep -> grep re-entered -> sym.
-    match decide(&policy, "npx grep -rn foo .") {
-        Decision::Deny(details) => assert_eq!(details.instead(), "legion sym etc find-content"),
-        other => panic!("npx grep should route to sym, got {other:?}"),
-    }
-    // sh -c 'grep ...' -> grep re-entered -> sym.
-    match decide(&policy, "sh -c 'grep -rn foo src'") {
-        Decision::Deny(details) => assert_eq!(details.instead(), "legion sym etc find-content"),
-        other => panic!("sh -c grep should route to sym, got {other:?}"),
+fn mirror_policy_re_enters_a_js_runner_and_a_shell_interpreter() {
+    let policy = mirror_policy();
+    for command in ["npx grep -rn foo .", "sh -c 'grep -rn foo src'"] {
+        match decide(&policy, command) {
+            Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
+            other => panic!("`{command}` should route to sym, got {other:?}"),
+        }
     }
 }
 
 #[test]
-fn shipped_policy_routes_a_python_search_one_liner_to_sym() {
-    let policy = shipped_policy();
+fn mirror_policy_routes_a_python_search_one_liner_to_sym() {
+    let policy = mirror_policy();
     let command = "python3 -c \"import pathlib; [print(f) for f in pathlib.Path('.').rglob('*.rs') if 'foo' in f.read_text()]\"";
     match decide(&policy, command) {
-        Decision::Deny(details) => assert_eq!(details.instead(), "legion sym etc find-content"),
+        Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
         other => panic!("python search should route to sym, got {other:?}"),
     }
 }
 
 #[test]
-fn shipped_policy_proxies_an_opaque_script_file() {
-    let policy = shipped_policy();
+fn mirror_policy_proxies_an_opaque_script_file() {
     assert_eq!(
-        decide(&policy, "bash deploy.sh"),
+        decide(&mirror_policy(), "bash deploy.sh"),
         Decision::Proxy {
             reason: ProxyReason::Opaque
         }

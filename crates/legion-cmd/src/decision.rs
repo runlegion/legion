@@ -1,10 +1,10 @@
 //! The Decision contract: route's closed return type (FR-CMD-001).
 //!
-//! `route` itself lives in a later slice. This module fixes what it will
-//! return: exactly one [`Decision`] from a closed set of five arms, plus the
-//! [`Facts`] it extracted while deciding, packaged as [`Routed`]. The input
-//! side -- [`ToolCall`] and [`Context`] -- is fixed here too, so the later
-//! `route` slice has a stable signature to implement against.
+//! This module fixes what [`crate::route`] returns: exactly one [`Decision`]
+//! from a closed set of five arms, the [`Facts`] it extracted while deciding,
+//! and the [`Deciding`] entry that produced the decision, packaged as
+//! [`Routed`]. The input side -- [`ToolCall`] and [`Context`] -- is fixed here
+//! too. `route` (in `crate::route`) consumes exactly this signature.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

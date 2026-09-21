@@ -280,6 +280,9 @@ pub enum PolicyError {
     #[error("{pointer}: unknown decision arm '{arm}'")]
     UnknownDecision { pointer: String, arm: String },
 
+    #[error("{pointer}: unknown predicate kind '{kind}'")]
+    UnknownPredicateKind { pointer: String, kind: String },
+
     #[error("{pointer}: unknown proxy reason '{reason}'")]
     UnknownProxyReason { pointer: String, reason: String },
 
@@ -303,6 +306,9 @@ pub enum PolicyError {
 
     #[error("{pointer}: rule id '{id}' is empty")]
     EmptyRuleId { pointer: String, id: String },
+
+    #[error("{pointer}: sym job id is empty")]
+    EmptySymJobId { pointer: String },
 
     #[error("{pointer}: duplicate rule id '{id}', first defined at {first}")]
     DuplicateRuleId {
@@ -335,9 +341,14 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         ],
     )?;
 
+    // Ids are unique across the whole policy -- rule ids and sym-job ids share
+    // one namespace, because the ledger records the id and #1237 keys
+    // confirmations by it, and `Deciding::Rule.id` carries either kind.
+    let mut seen_ids: HashMap<String, String> = HashMap::new();
+
     // Sym jobs first, so an action's sym-job reference can be validated.
     let sym_jobs = match root.get("sym_jobs") {
-        Some(value) => parse_sym_jobs(value, "/sym_jobs")?,
+        Some(value) => parse_sym_jobs(value, "/sym_jobs", &mut seen_ids)?,
         None => Vec::new(),
     };
     let sym_job_ids: Vec<&str> = sym_jobs.iter().map(|j| j.id.as_str()).collect();
@@ -355,7 +366,6 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         None => Vec::new(),
     };
 
-    let mut seen_ids: HashMap<String, String> = HashMap::new();
     let tools = match root.get("tools") {
         Some(value) => parse_tools(value, "/tools", &sym_job_ids, &mut seen_ids)?,
         None => BTreeMap::new(),
@@ -602,14 +612,7 @@ fn parse_rule(
             id,
         });
     }
-    if let Some(first) = seen_ids.get(&id) {
-        return Err(PolicyError::DuplicateRuleId {
-            pointer: child_pointer(pointer, "id"),
-            id,
-            first: first.clone(),
-        });
-    }
-    seen_ids.insert(id.clone(), child_pointer(pointer, "id"));
+    register_id(seen_ids, &id, &child_pointer(pointer, "id"))?;
 
     let predicates = match map.get("predicates") {
         Some(preds) => parse_predicates(preds, &child_pointer(pointer, "predicates"))?,
@@ -632,6 +635,24 @@ fn parse_rule(
     })
 }
 
+/// Registers an id in the policy-wide id set, rejecting a duplicate. Rule ids
+/// and sym-job ids share this one namespace.
+fn register_id(
+    seen_ids: &mut HashMap<String, String>,
+    id: &str,
+    pointer: &str,
+) -> Result<(), PolicyError> {
+    if let Some(first) = seen_ids.get(id) {
+        return Err(PolicyError::DuplicateRuleId {
+            pointer: pointer.to_string(),
+            id: id.to_string(),
+            first: first.clone(),
+        });
+    }
+    seen_ids.insert(id.to_string(), pointer.to_string());
+    Ok(())
+}
+
 fn parse_predicates(value: &Value, pointer: &str) -> Result<Vec<Predicate>, PolicyError> {
     let array = as_array(value, pointer)?;
     let mut predicates = Vec::with_capacity(array.len());
@@ -645,9 +666,9 @@ fn parse_predicates(value: &Value, pointer: &str) -> Result<Vec<Predicate>, Poli
             "arg-present" => Predicate::ArgPresent(arg),
             "arg-absent" => Predicate::ArgAbsent(arg),
             other => {
-                return Err(PolicyError::UnknownField {
+                return Err(PolicyError::UnknownPredicateKind {
                     pointer: child_pointer(&predicate_pointer, "kind"),
-                    field: other.to_string(),
+                    kind: other.to_string(),
                 });
             }
         };
@@ -745,7 +766,11 @@ fn parse_outcome(
 
 // -- sym jobs, wrappers, interpreters, script carriers ------------------------
 
-fn parse_sym_jobs(value: &Value, pointer: &str) -> Result<Vec<SymJob>, PolicyError> {
+fn parse_sym_jobs(
+    value: &Value,
+    pointer: &str,
+    seen_ids: &mut HashMap<String, String>,
+) -> Result<Vec<SymJob>, PolicyError> {
     let array = as_array(value, pointer)?;
     let mut jobs = Vec::with_capacity(array.len());
     for (index, job_value) in array.iter().enumerate() {
@@ -757,6 +782,12 @@ fn parse_sym_jobs(value: &Value, pointer: &str) -> Result<Vec<SymJob>, PolicyErr
             &["id", "sym_command", "interpreter_patterns"],
         )?;
         let id = require_string(map, "id", &job_pointer)?;
+        if id.is_empty() {
+            return Err(PolicyError::EmptySymJobId {
+                pointer: child_pointer(&job_pointer, "id"),
+            });
+        }
+        register_id(seen_ids, &id, &child_pointer(&job_pointer, "id"))?;
         let sym_command = require_string(map, "sym_command", &job_pointer)?;
         if sym_command.is_empty() {
             return Err(PolicyError::SymJobMissingCommand {
@@ -1073,6 +1104,54 @@ mod tests {
                 job: "nope".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn unknown_predicate_kind_is_rejected_with_a_dedicated_error() {
+        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
+            {"id": "x", "predicates": [{"kind": "arg-matches", "arg": "y"}],
+             "outcome": {"kind": "allow"}}
+        ]}}}}}"#;
+        let err = parse_policy(text).expect_err("bad predicate kind");
+        assert_eq!(
+            err,
+            PolicyError::UnknownPredicateKind {
+                pointer: "/tools/Bash/families/gh/rules/0/predicates/0/kind".to_string(),
+                kind: "arg-matches".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_sym_job_id_is_rejected() {
+        let text = r#"{"sym_jobs": [{"id": "", "sym_command": "legion sym x"}]}"#;
+        let err = parse_policy(text).expect_err("empty sym job id");
+        assert_eq!(
+            err,
+            PolicyError::EmptySymJobId {
+                pointer: "/sym_jobs/0/id".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_id_shared_between_a_rule_and_a_sym_job_is_rejected() {
+        // Rule ids and sym-job ids share one namespace (Deciding.id carries
+        // either), so a collision is ambiguous and must be rejected.
+        let text = r#"{
+            "sym_jobs": [{"id": "dup", "sym_command": "legion sym x", "interpreter_patterns": ["p"]}],
+            "tools": {"Bash": {"families": {"gh": {"rules": [
+                {"id": "dup", "outcome": {"kind": "allow"}}
+            ]}}}}
+        }"#;
+        let err = parse_policy(text).expect_err("cross-namespace duplicate id");
+        match err {
+            PolicyError::DuplicateRuleId { id, first, .. } => {
+                assert_eq!(id, "dup");
+                assert_eq!(first, "/sym_jobs/0/id");
+            }
+            other => panic!("expected DuplicateRuleId, got {other:?}"),
+        }
     }
 
     #[test]

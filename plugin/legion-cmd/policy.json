@@ -56,33 +56,41 @@
             { "id": "rg-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }
           ]
         },
-        "git push": {
+        "rm": {
           "rules": [
             {
-              "id": "git-push-force",
-              "predicates": [{ "kind": "arg-present", "arg": "--force" }],
+              "id": "rm-recursive-force",
+              "predicates": [{ "kind": "arg-present", "arg": "-rf" }],
               "outcome": {
                 "kind": "deny",
-                "reason": "a force push can overwrite remote history",
-                "instead": "git push --force-with-lease"
+                "reason": "a combined recursive force delete is unrecoverable",
+                "instead": "remove the specific paths, or use trash"
               }
             },
             {
-              "id": "git-push",
+              "id": "rm-other",
+              "outcome": { "kind": "allow" }
+            }
+          ]
+        },
+        "curl": {
+          "rules": [
+            {
+              "id": "curl-network",
               "outcome": {
                 "kind": "ask",
-                "question": "push these commits to the remote?",
-                "reason": "a push publishes commits and can trigger CI",
+                "question": "make this network request?",
+                "reason": "curl reaches the network, which the agent should confirm",
                 "needs_operator": true
               }
             }
           ]
         },
-        "git show": {
+        "xxd": {
           "rules": [
             {
-              "id": "git-show-verbatim",
-              "outcome": { "kind": "proxy", "reason": "full-patch" }
+              "id": "xxd-verbatim",
+              "outcome": { "kind": "proxy", "reason": "binary" }
             }
           ]
         }
