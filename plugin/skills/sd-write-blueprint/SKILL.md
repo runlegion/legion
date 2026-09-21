@@ -5,7 +5,7 @@ description: |
   backstage of a service across a sequence of steps, grounded in the journey it supports
   and the intent's real capabilities. Planned machinery is named as planned, never drawn as
   running. Invoke after the journey it backs exists.
-version: 0.1.0
+version: 0.1.1
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -46,11 +46,15 @@ planned are labeled planned, and nothing else appears at all.
      (`emotional_start` to `emotional_end`) and a step carries one score: the step takes
      the phase's `emotional_end` -- the felt state where the phase lands.
    - Backstage and `support` name the real mechanism from `current_state.real`, by its
-     real name. A mechanism from `direction` is included only labeled as planned -- the
-     convention: `(planned)` appended to the step title, and the planned layer text opens
-     with `PLANNED:`. A mechanism in neither does not exist and does not appear. The
-     `evidence` layer is what the actor leaves behind (the typed query, the saved file),
-     not a citation.
+     real name. The line between the two layers is the customer's awareness (the primer's
+     Line of Internal Interaction): `backstage` is work the customer knows happens but
+     cannot see inside -- the query their action triggered being processed; `support` is
+     infrastructure the customer has no awareness of at all -- the Worker, database, or
+     index that processing runs on. A mechanism from `direction` is included only labeled
+     as planned -- the convention: `(planned)` appended to the step title, and the planned
+     layer text opens with `PLANNED:`. A mechanism in neither does not exist and does not
+     appear. The `evidence` layer is what the actor leaves behind (the typed query, the
+     saved file), not a citation.
    - Frictions per step cite Discovery insights; the blueprint is where a supported insight
      meets the seam that causes it.
    - Failure modes live at the seams -- where frontstage expectation and backstage

@@ -8,7 +8,7 @@ description: |
   them from its own design reasoning and the Discovery, asks real people through eavesdrop
   what neither can settle, and brings the operator only strategy and values choices, each
   with a recommendation. Invoke after sd-discover lands the Discovery.
-version: 0.2.0
+version: 0.2.1
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -96,14 +96,25 @@ Every question goes to whoever can answer it, in this order:
 
 The answers must say how things happen. "Users sync their data" is not an answer; say who
 starts the sync, through what, under whose credentials, what they see while it runs, and
-what they see when it fails.
+what they see when it fails. This is the service's how, not the engine's: name the actor,
+the channel, the authority, and what they see -- never the algorithm, the wire format, or
+the data structure a spec fixes later. If an answer explains how the mechanism works, it
+has dropped from service design into spec (the third diamond); pull back up to who acts and
+what they experience.
 
 ## Union, weight, land
 
 - Union the five passes' questions and answers and dedup. An answer three or more passes
   reached independently is CORE -- convergence is the confidence weighting, free; no
-  separate ranking step. An answer one pass reached is the diversity payoff; keep it,
-  marked single-lens.
+  separate ranking step. But convergence is confidence only when the answer is grounded,
+  not merely shared: five passes reading one intent that omits its mechanism can invent the
+  same missing machinery, and convergence then makes the wrong answer look most certain (in
+  a live run all five lenses posited an external sync-state store that the real stateless
+  mechanism dissolved). Gate a converged answer against the intent's boundaries and the
+  Discovery -- an answer that no insight or intent field supports, that only the
+  evidence-adversarial pass can speak to, is a shared guess, not a core finding; mark it and
+  route it, never promote it on convergence alone. An answer one pass reached is the
+  diversity payoff; keep it, marked single-lens.
 - Build the Ecosystem payload from the answers: actors, channels, and value exchanges
   carry what was decided, and moments of truth and failure modes carry where it wins and
   breaks. The schema requires `meta` (with `title`
@@ -204,8 +215,12 @@ register. An entry nobody answers orphans, the right fate for a question nobody 
   sending the operator a question the world can answer.
 - Sending the operator a choice without a recommended answer.
 - Answering with what happens but not how it happens.
+- Answering with how the engine works instead of how the service does -- the mechanism is
+  spec, downstream, and the intent omits it on purpose.
 - Running the passes with answers or examples baked into the prompt.
 - Promoting a single-lens answer to core, or dropping it for being single-lens.
+- Promoting a converged answer that no Discovery insight or intent field supports --
+  convergence on a premise the intent omitted is not evidence.
 - Grounding an answer on a contradicted claim, or on evidence not in the Discovery.
 - Witnessing its own register predictions, including on a redraw. The passes stake
   them; the conductor scores them.
