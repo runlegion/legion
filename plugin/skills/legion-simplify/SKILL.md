@@ -52,6 +52,13 @@ point do not appear in your coverage list. The validator uses the same three-dot
 Do NOT flag: style preferences (naming, ordering) unless they violate project conventions;
 pre-existing issues outside the diff; hypothetical future improvements.
 
+Do NOT flag structure the spec or the issue mandates as "unnecessary abstraction." What the
+work should be is settled upstream -- by the spec for design work, or by the issue for a bug
+fix or anything that needed no design. Simplify removes what the CODE added without buying
+anything, never what the spec or the issue required. If mandated structure looks unnecessary
+to you, that is a question for the authority -- halt and escalate it to the operator, do not
+flatten it into a finding.
+
 ## Output: the articulation file
 
 Write a markdown file with one `### <path>` entry per changed file in the diff. Every changed

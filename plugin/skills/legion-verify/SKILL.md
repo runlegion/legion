@@ -91,8 +91,14 @@ never `pass` -- verify never asserts an unprovable claim.
 
 ## Notes
 
-- Verify owns acceptance (does the work meet the stated criteria). Vault owns intent (is this
-  the right work / is the spec serviced). They are separate gates; do not conflate them.
+- Verify owns acceptance: does the work meet the criteria the issue -- or its traced spec --
+  states. Whether this is the right work at all, whether that spec or issue should be
+  different, is a separate question owned upstream (the design process for a spec, the
+  operator for an issue), not by this gate.
+- A criterion the diff satisfies is `pass` even if you would have designed it differently.
+  Verify measures the work against its criteria as written -- the traced spec's when there is
+  one, otherwise the issue's -- never against the design you would have chosen. If you believe
+  the criterion itself is wrong, halt and escalate rather than failing work that conforms.
 - The verdict is keyed on the issue (`legion-verify:issue-<repo>#<n>`), not the commit, so it
   survives the commit `legion issue close` runs on. Re-verify if the work materially changed after
   you recorded a verdict.

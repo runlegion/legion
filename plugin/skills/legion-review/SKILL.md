@@ -122,6 +122,30 @@ attached, because filtering is verify's stage and it cannot weigh what you dropp
 style arguments beyond the repo's own CLAUDE.md and lint gates; no code is written or
 fixed by this skill -- the fix loop belongs to the implementer.
 
+## You review conformance, not design
+
+The work has one authority for what it should be: the spec it traces to when it is design
+work with a spec behind it, or the issue itself when it is a bug fix or anything that needed
+no design. Review against that authority. You do not get to redesign it. Every finding is one
+of exactly two things:
+
+- the diff diverges from the authority -- it does less, more, or other than the spec or the
+  issue requires; or
+- the code has a real defect -- a bug, a silent failure, a security hole, a missing test, a
+  CLAUDE.md violation.
+
+"The design should be different" is not a finding. A better abstraction, an extra field, a
+case the authority does not name, a structure you would have chosen -- none of these is a
+defect, and none belongs in the report. Do not raise it, and never ask the implementer to
+build it. Demanding the diff exceed the spec or the issue is drift wearing a review finding's
+face: it ships requirements nobody specified, which is the failure this pipeline exists to
+stop.
+
+If you believe the authority itself is genuinely wrong -- the spec or the issue, not to your
+taste but wrong -- that is the rare case, call it 1%. Halt and escalate to the operator. A
+spec problem goes back through the design process; an issue problem goes back to the operator.
+Neither goes into this diff.
+
 ## Relationship to the other gates
 
 - `/legion:legion-simplify` reviews the diff's structure before the PR exists; this skill
