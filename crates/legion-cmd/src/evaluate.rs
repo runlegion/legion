@@ -140,33 +140,21 @@ pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
 /// (FR-CMD-016) and the sym action (FR-CMD-007).
 fn resolve_rule(policy: &Policy, rule: &Rule, ctx: &Context, verb: Option<String>) -> PartOutcome {
-    if rule.requires_recall && ctx.recall == Lookup::NotFetched {
-        return PartOutcome {
-            decision: deny(
-                "this command needs a recall result that was not fetched",
-                "fetch the recall result, then retry",
-            ),
-            deciding: Deciding::Rule {
-                id: rule.id.clone(),
-                needs_operator: false,
-            },
-            is_sym: false,
-            verb,
-        };
-    }
-    if rule.requires_consult && ctx.consult == Lookup::NotFetched {
-        return PartOutcome {
-            decision: deny(
-                "this command needs a consult result that was not fetched",
-                "fetch the consult result, then retry",
-            ),
-            deciding: Deciding::Rule {
-                id: rule.id.clone(),
-                needs_operator: false,
-            },
-            is_sym: false,
-            verb,
-        };
+    for (required, lookup, name) in [
+        (rule.requires_recall, &ctx.recall, "recall"),
+        (rule.requires_consult, &ctx.consult, "consult"),
+    ] {
+        if required && *lookup == Lookup::NotFetched {
+            return rule_outcome(
+                rule,
+                deny(
+                    format!("this command needs a {name} result that was not fetched"),
+                    format!("fetch the {name} result, then retry"),
+                ),
+                false,
+                verb,
+            );
+        }
     }
 
     let (decision, is_sym) = match &rule.outcome {
@@ -200,6 +188,17 @@ fn resolve_rule(policy: &Policy, rule: &Rule, ctx: &Context, verb: Option<String
         }
     };
 
+    rule_outcome(rule, decision, is_sym, verb)
+}
+
+/// A [`PartOutcome`] naming `rule` as the deciding entry, with the operator
+/// mark unset (FR-CMD-006 -- route never copies the rule's mark here).
+fn rule_outcome(
+    rule: &Rule,
+    decision: Decision,
+    is_sym: bool,
+    verb: Option<String>,
+) -> PartOutcome {
     PartOutcome {
         decision,
         deciding: Deciding::Rule {
