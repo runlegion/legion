@@ -22,13 +22,14 @@ most likely to park, because corpora take hours to build and people take days to
 
 **What this step may and may not decide.** It scores exactly the agenda sd-intent-review
 handed it -- the intent's genuinely-open claims -- and nothing else. It does NOT relitigate
-the operator's committed direction: a `settled` proposal and the `what_it_is` framing are
-givens, and Discovery grounds HOW they are designed, never returns a verdict on WHETHER they
-are needed. So an agenda with no need-claims (a fully-committed intent) yields a Discovery
-that grounds design and contradicts nothing -- correct, not empty work. Emergent insights
-still surface (discourse the intent never claimed), and they inform how; but an emergent that
-challenges a COMMITTED item or boundary is surfaced to the operator as a note, never scored
-as a contradiction of need. Contradiction is reserved for the open claims the agenda names.
+the operator's committed direction: a `settled` proposal, a `boundary`, and the `what_it_is`
+framing are givens, and Discovery grounds HOW they are designed, never returns a verdict on
+WHETHER they are needed. So an agenda with no need-claims (a fully-committed intent) yields a
+Discovery that grounds design and contradicts nothing -- correct, not empty work. Emergent
+insights still surface (discourse the intent never claimed), and they inform how; but an
+emergent that challenges a committed item (a settled proposal, a boundary, or the
+`what_it_is` framing) is surfaced to the operator as a note, never scored as a contradiction
+of need. Contradiction is reserved for the open claims the agenda names.
 
 ## Probe the corpus first
 
@@ -174,15 +175,21 @@ legion document create --doc-type discovery --owner <agent> --surface <surface> 
 product name, not a git repo). The store refuses a schema violation on every path, so a
 refusal here means the payload is wrong, not that the gate is optional. Contradicted claims
 appear in the document as contradicted insights with the rows that argue against them --
-deleting them would erase the finding. A Discovery that carries any contradicted or
-saturated-unevidenced insight lands at `review` and parks for the operator's rulings
-(above); only a Discovery with none of those, past its authoritative pass, lands at `done`.
+deleting them would erase the finding. A Discovery lands at `review` and parks for the
+operator's rulings when it carries any contradicted or saturated-unevidenced insight, OR
+when its report carries a committed-item/boundary challenge note (the emergent exception
+above) -- a note-only Discovery with zero contradicted or saturated-unevidenced insights
+still lands at `review` and parks, exactly like the contradicted case, because the operator
+still owes a ruling. Only a Discovery with none of those, and no challenge note, past its
+authoritative pass, lands at `done`.
 
 **Then emit and witness** (Instrumentation below), once the create returns an id: one
 prediction per insight that carries a verdict, at the authoritative pass only, and a
 witness on each intent-review claim prediction this pass scored. Report the Discovery
-id, every prediction id beside its insight with the claimed confidence, and each claim
-prediction witnessed or left unwitnessed, with why.
+id, every prediction id beside its insight with the claimed confidence, each claim
+prediction witnessed or left unwitnessed, with why, and any committed-item/boundary
+challenge note for the operator (these carry no prediction -- they are decisions the
+operator owes, not verdicts this step stakes).
 
 ## Instrumentation
 

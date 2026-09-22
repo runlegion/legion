@@ -30,11 +30,19 @@ proposals carrying `needs_pressure_test`, unresolved `open_questions`, and
 `current_state.cut_or_broken` whys that no settled proposal already commits to fixing. A
 `cut_or_broken` why that is the rationale for a settled proposal is committed alongside that
 proposal -- testing it relitigates the committed fix through the `cut_or_broken` door, so it
-gets no test. Never derive a test from a settled proposal, a `boundary`, or `what_it_is`. An
-intent whose direction is fully committed yields an EMPTY agenda -- that is correct, not a
-failure, and sd-discover then only grounds how. Manufacturing claims against a committed
-direction is over-producing in its most damaging form: it hands the operator's bet to
-outside discourse to relitigate.
+gets no test. Never derive a test from a `boundary`, from `what_it_is`, or from a `settled`
+proposal that carries no `needs_pressure_test` flag.
+
+A proposal has two independent fields (`status: proposed|settled` and a `needs_pressure_test`
+boolean); classify by both, so no combination falls through. `needs_pressure_test: true`
+marks it a hypothesis to test whatever its status -- the operator asked for the test, so this
+wins even on a `settled` proposal. Otherwise a `settled` proposal is committed and gets no
+test, and a `proposed` proposal carrying no flag is UNDECIDED -- neither committed nor a
+stated bet -- so escalate it to the operator as an open direction to resolve, never silently
+test it or treat it as committed. An intent whose direction is fully committed yields an
+EMPTY agenda -- that is correct, not a failure, and sd-discover then only grounds how.
+Manufacturing claims against a committed direction is over-producing in its most damaging
+form: it hands the operator's bet to outside discourse to relitigate.
 
 ## Gate: distill the intent first
 
@@ -152,9 +160,12 @@ exists to prevent. The discover report names each claim left unwitnessed and why
 - Stamping build status: real versus planned is build state and belongs to later steps.
 - Inventing claims the intent neither states nor implies -- an emergent insight is
   sd-discover's to discover from evidence, not this step's to guess.
-- Deriving a service or claim to test from a settled proposal, a `boundary`, `what_it_is`, or
-  a `cut_or_broken` why that a settled proposal already commits to fixing: a committed
-  direction is designed, not relitigated. An all-settled intent's agenda is empty.
+- Deriving a service or claim to test from a `boundary`, from `what_it_is`, from a `settled`
+  proposal that carries no `needs_pressure_test` flag, or from a `cut_or_broken` why that a
+  settled proposal already commits to fixing: a committed direction is designed, not
+  relitigated. An all-settled intent's agenda is empty.
+- Silently dropping a `proposed` proposal that carries no `needs_pressure_test` flag: it is
+  undecided, so escalate it to the operator, never guess it committed or open.
 - Reviewing an intent that does not exist, does not validate, or does not pass the distill
   gate (above): stop and emit the gaps.
 - Witnessing its own predictions. The review stakes them; sd-discover's verdicts score
