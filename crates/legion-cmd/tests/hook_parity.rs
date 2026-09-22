@@ -338,13 +338,11 @@ fn every_hook_case_matches_routes_actual_decision() {
                     instead_contains: Some(want),
                     ..
                 },
-            ) => {
-                if !details.instead().contains(want.as_str()) {
-                    failures.push(format!(
-                        "{id}: deny instead must contain {want:?}, got {:?}",
-                        details.instead()
-                    ));
-                }
+            ) if !details.instead().contains(want.as_str()) => {
+                failures.push(format!(
+                    "{id}: deny instead must contain {want:?}, got {:?}",
+                    details.instead()
+                ));
             }
             _ => {}
         }
