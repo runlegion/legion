@@ -7,7 +7,7 @@ description: |
   one schema-valid Discovery document. Never cuts a claim: a contradicted or unevidenced
   claim is a finding the operator rules on. Parks on a missing corpus or an open question
   rather than guessing. Invoke after sd-intent-review.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -19,6 +19,16 @@ a claim the intent asserted gets CONTRADICTED here when the discourse does not s
 stays contradicted downstream. Losing a claim is not cutting it: this step reports what the
 world says, and the operator decides what the product does about it. It is also the step
 most likely to park, because corpora take hours to build and people take days to answer.
+
+**What this step may and may not decide.** It scores exactly the agenda sd-intent-review
+handed it -- the intent's genuinely-open claims -- and nothing else. It does NOT relitigate
+the operator's committed direction: a `settled` proposal and the `what_it_is` framing are
+givens, and Discovery grounds HOW they are designed, never returns a verdict on WHETHER they
+are needed. So an agenda with no need-claims (a fully-committed intent) yields a Discovery
+that grounds design and contradicts nothing -- correct, not empty work. Emergent insights
+still surface (discourse the intent never claimed), and they inform how; but an emergent that
+challenges a COMMITTED item or boundary is surfaced to the operator as a note, never scored
+as a contradiction of need. Contradiction is reserved for the open claims the agenda names.
 
 ## Probe the corpus first
 
@@ -243,6 +253,9 @@ for no stated reason has skipped a step; say so in the report.
 ## Refuses
 
 - Treating an empty query result as disconfirmation.
+- Returning a verdict on a committed item -- a `settled` proposal or a `what_it_is` framing.
+  Discovery grounds how a committed direction is designed; it never decides whether it is
+  needed, and an emergent challenge to a committed item goes to the operator as a note.
 - Landing a FINAL Discovery whose supported insights never faced a counter-probe -- the inverse
   pass is a step, not a suggestion. (An orientation draft parks without it; its supported
   insights are provisional.)
