@@ -449,6 +449,16 @@
     "agrees": false,
     "note": "coverage gate: the hook does not enforce in a repo legion does not cover; route denies. DISAGREEMENT: hook allow, route deny."
   },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-memory-segment-before-claude-projects",
+    "tool": "Write",
+    "input": { "file_path": "/repo/memory/.claude/projects/notes.md", "content": "x" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook's regex `\\.claude/projects/.*/memory/` needs `.claude/projects/` BEFORE `/memory/`; route's two field-contains predicates on file_path are order-free and both hold here. DISAGREEMENT: hook allow, route deny. Route is the stricter side; no real auto-memory path has this shape."
+  },
 
   {
     "hook": "pre-script-search.sh",
@@ -515,7 +525,18 @@
     "route": "allow",
     "agrees": true,
     "note_contains": "find-content",
-    "note": "a grep shelled out from a script is the content shape; the hook's `*subprocess*grep*` glob is route's two-substring conjunction."
+    "note": "a grep shelled out from a script is the content shape. The hook's `*subprocess*grep*` glob requires `subprocess` BEFORE `grep`; route's two field-contains predicates are order-free, so route matches a superset of the hook (see write-script-grep-before-subprocess)."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-grep-before-subprocess",
+    "tool": "Write",
+    "input": { "file_path": "/repo/search.py", "content": "GREP_BIN = \"grep\"\nimport subprocess\nsubprocess.run([GREP_BIN, \"-rn\", \"foo\", \".\"])" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": false,
+    "note_contains": "find-content",
+    "note": "`grep` appears only before `subprocess`, so the hook's ordered `*subprocess*grep*` glob does not match and it stays silent; route's order-free conjunction holds and it allows with the find-content note. DISAGREEMENT of note content on the same arm: route nudges where the hook does not. Both allow; the hook is inject-only."
   },
   {
     "hook": "pre-script-search.sh",
