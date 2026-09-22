@@ -52,6 +52,33 @@ fn hook_output(data_dir: &std::path::Path, policy: &std::path::Path, input: &[u8
 }
 
 #[test]
+fn the_shipped_policy_rewrites_an_explore_spawn_to_the_legion_explorer() {
+    // #1233: the no-harness-explore.sh case end to end -- route's rewrite
+    // from the shipped policy, and the adapter's patched tool_input with
+    // only subagent_type changed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = serde_json::json!({
+        "tool_name": "Agent",
+        "tool_input": {"subagent_type": "Explore", "prompt": "map the router", "description": "map"},
+        "session_id": "s1",
+        "cwd": "/tmp/legion-test",
+        "tool_use_id": "t1"
+    })
+    .to_string()
+    .into_bytes();
+    let out = hook_output(dir.path(), &shipped_policy_path(), &input);
+    assert_eq!(out["permissionDecision"], "allow");
+    assert_eq!(
+        out["updatedInput"],
+        serde_json::json!({
+            "subagent_type": "legion:legion-explore",
+            "prompt": "map the router",
+            "description": "map"
+        })
+    );
+}
+
+#[test]
 fn the_shipped_policy_denies_a_managed_command_and_passes_an_unmanaged_one() {
     let dir = tempfile::tempdir().expect("tempdir");
     let policy = shipped_policy_path();

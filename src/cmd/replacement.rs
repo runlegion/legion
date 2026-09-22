@@ -14,6 +14,11 @@
 //! number, so when route's facts carry either, the rewrite would drop an
 //! operand the agent named; that is refused here and becomes a deny at the
 //! adapter, never a silently narrower command.
+//!
+//! Which field the target replaces depends on the tool (#1233): a Bash call's
+//! `command`, or an Agent/Task spawn's `subagent_type` (the Explore rewrite
+//! `plugin/hooks/no-harness-explore.sh` performs today). [`rewritable_field`]
+//! is the one place that choice is made.
 
 use legion_cmd::{Facts, ManagedTarget};
 use serde_json::{Map, Value};
@@ -36,17 +41,30 @@ pub(crate) enum ReplacementError {
     #[error("the rewrite would drop {0} issue number(s) the target does not carry")]
     IssueNumbersNotCarried(usize),
 
-    /// The original `tool_input` is not an object carrying a `command` field
-    /// (an Agent, Edit, or Write call, or a malformed input). Inserting one
-    /// would leave the fields the tool actually runs on untouched, and the
+    /// The original `tool_input` is not an object carrying a field a rewrite
+    /// can replace (an Edit or Write call, or a malformed input). Inserting
+    /// one would leave the fields the tool actually runs on untouched, and the
     /// adapter's `allow` would then grant the original call outright.
-    #[error("the tool input has no command field to replace")]
-    NoCommandField,
+    #[error("the tool input has no command or subagent_type field to replace")]
+    NoRewritableField,
 }
 
-/// Builds the replacement `tool_input` for a rewrite: the target's command
-/// patched into `original`, so the sibling Bash fields (`description`,
-/// `timeout`, `run_in_background`) survive. `updatedInput` replaces the whole
+/// The `tool_input` field a rewrite target replaces: `command` for a Bash
+/// call, `subagent_type` for an Agent or Task spawn. `None` for any other
+/// shape, which the rewrite refuses rather than inventing a field.
+pub(crate) fn rewritable_field(original: &Value) -> Option<&'static str> {
+    let Value::Object(map) = original else {
+        return None;
+    };
+    ["command", "subagent_type"]
+        .into_iter()
+        .find(|field| map.contains_key(*field))
+}
+
+/// Builds the replacement `tool_input` for a rewrite: the target patched into
+/// `original`'s [`rewritable_field`], so every sibling field survives -- a Bash
+/// call's `description`, `timeout`, `run_in_background`; a spawn's `prompt`
+/// and `description`. `updatedInput` replaces the whole
 /// `tool_input`, so rebuilding it from the command alone would turn a
 /// background command into a foreground one and drop a raised timeout (the
 /// bug `emit.sh`'s `emit_rewrite` already paid for). Refuses when the facts
@@ -68,12 +86,12 @@ pub(crate) fn build_replacement(
         ));
     }
 
-    let mut patched: Map<String, Value> = match original {
-        Value::Object(map) if map.contains_key("command") => map.clone(),
-        _ => return Err(ReplacementError::NoCommandField),
+    let (Some(field), Value::Object(map)) = (rewritable_field(original), original) else {
+        return Err(ReplacementError::NoRewritableField);
     };
+    let mut patched: Map<String, Value> = map.clone();
     patched.insert(
-        "command".to_string(),
+        field.to_string(),
         Value::String(target.as_str().to_string()),
     );
     Ok(Value::Object(patched))
@@ -167,15 +185,36 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_input_without_a_command_is_refused() {
-        let original = serde_json::json!({"subagent_type": "Explore", "prompt": "map it"});
-        let err = build_replacement(
+    fn an_agent_spawn_has_its_subagent_type_patched_and_keeps_its_prompt() {
+        // The Explore rewrite (#1233): only subagent_type changes; prompt and
+        // description ride through, as no-harness-explore.sh does today.
+        let original = serde_json::json!({
+            "subagent_type": "Explore",
+            "prompt": "map it",
+            "description": "explore"
+        });
+        let replaced = build_replacement(
             &target("legion:legion-explore"),
             &Facts::default(),
             &original,
         )
-        .expect_err("a rewrite must not invent a command field");
-        assert_eq!(err, ReplacementError::NoCommandField);
+        .expect("builds");
+        assert_eq!(
+            replaced,
+            serde_json::json!({
+                "subagent_type": "legion:legion-explore",
+                "prompt": "map it",
+                "description": "explore"
+            })
+        );
+    }
+
+    #[test]
+    fn a_tool_input_with_no_rewritable_field_is_refused() {
+        let original = serde_json::json!({"file_path": ".env", "old_string": "KEY"});
+        let err = build_replacement(&target("legion issue list"), &Facts::default(), &original)
+            .expect_err("a rewrite must not invent a field the tool ignores");
+        assert_eq!(err, ReplacementError::NoRewritableField);
     }
 
     #[test]
@@ -187,7 +226,7 @@ mod tests {
         ] {
             let err = build_replacement(&target("legion issue list"), &Facts::default(), &original)
                 .expect_err("a malformed tool_input must not be given a command");
-            assert_eq!(err, ReplacementError::NoCommandField);
+            assert_eq!(err, ReplacementError::NoRewritableField);
         }
     }
 }
