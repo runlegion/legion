@@ -14,6 +14,7 @@
 
 mod decision;
 mod evaluate;
+mod lookups;
 mod policy;
 mod route;
 mod splitter;
@@ -22,6 +23,7 @@ pub use decision::{
     AskDetails, Context, ContractError, Deciding, Decision, DenyDetails, Facts, Lookup,
     ManagedTarget, NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };
+pub use lookups::{RequiredLookups, required_lookups};
 pub use policy::{
     BodyLanguage, Family, Interpreter, Policy, PolicyError, Predicate, Rule, RuleOutcome,
     ScriptCarrier, SymJob, ToolKind, ToolRules, Wrapper, parse_policy,

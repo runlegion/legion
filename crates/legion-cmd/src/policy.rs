@@ -387,6 +387,11 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         detail: e.to_string(),
     })?;
     let root = as_object(&root, "")?;
+    // `route` holds the adapter's own settings (FR-CMD-009's decision
+    // deadline, read from the same file so the policy stays one document).
+    // It is not routing data: this crate accepts the key and never reads it.
+    // The adapter (`src/cmd/config.rs`) parses and validates it, strictly, so
+    // a typo inside it is still an error and never a silent default.
     check_known_keys(
         root,
         "",
@@ -396,6 +401,7 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
             "wrappers",
             "interpreters",
             "script_carriers",
+            "route",
         ],
     )?;
 
@@ -1114,6 +1120,23 @@ mod tests {
                 pointer: "/toolz".to_string(),
                 field: "toolz".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn the_route_settings_key_is_accepted_and_not_interpreted() {
+        // `route` carries the adapter's settings (#1229); the policy parser
+        // accepts the key so one file holds both, and reads nothing from it.
+        let text = r#"{"route": {"deadline_ms": 250},
+            "tools": {"Bash": {"families": {"gh": {"rules": [
+                {"id": "x", "outcome": {"kind": "allow"}}
+            ]}}}}}"#;
+        let policy = parse_policy(text).expect("route key is a known root key");
+        assert!(!policy.is_empty());
+        assert_eq!(
+            policy,
+            parse_policy(&text.replacen(r#""route": {"deadline_ms": 250},"#, "", 1))
+                .expect("valid")
         );
     }
 

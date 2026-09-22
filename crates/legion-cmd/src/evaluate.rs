@@ -45,30 +45,80 @@ pub fn decide_bash_invocation(
     args: &[String],
     ctx: &Context,
 ) -> PartOutcome {
-    let Some(ToolRules::Bash { families }) = policy.tools.get(&ToolKind::Bash) else {
+    let Some((verb, rule)) = select_bash_rule(policy, binary, args) else {
         return allow_default();
     };
 
-    let Some((verb, family)) = most_specific_family(families, binary, args) else {
-        return allow_default();
-    };
+    match rule {
+        Some(rule) => resolve_rule(policy, rule, ctx, Some(verb)),
+        // The family is managed, but no rule resolves these arguments.
+        None => PartOutcome {
+            decision: deny(
+                "this managed command matches no policy rule",
+                "run it manually, or add a rule that covers it",
+            ),
+            deciding: Deciding::Default,
+            is_sym: false,
+            verb: Some(verb),
+        },
+    }
+}
 
-    for rule in &family.rules {
-        if predicates_hold(&rule.predicates, args) {
-            return resolve_rule(policy, rule, ctx, Some(verb));
+/// The rule that governs one Bash invocation, with the verb its family names.
+/// `None` when no family matches the binary (an unmanaged command);
+/// `Some((verb, None))` when a family matches but no rule in it resolves the
+/// arguments. The one rule-selection step for Bash, shared by
+/// [`decide_bash_invocation`] and the lookup pre-pass ([`crate::lookups`]) so
+/// the two cannot disagree about which rule applies.
+pub(crate) fn select_bash_rule<'a>(
+    policy: &'a Policy,
+    binary: &str,
+    args: &[String],
+) -> Option<(String, Option<&'a Rule>)> {
+    let ToolRules::Bash { families } = policy.tools.get(&ToolKind::Bash)? else {
+        return None;
+    };
+    let (verb, family) = most_specific_family(families, binary, args)?;
+    let rule = family
+        .rules
+        .iter()
+        .find(|rule| predicates_hold(&rule.predicates, args));
+    Some((verb, rule))
+}
+
+/// Which rule governs one Fields-tool call, walking the kind's rules in order
+/// against the call's own `tool_input`.
+pub(crate) enum FieldsSelection<'a> {
+    /// A rule's field predicates hold; its outcome decides the call.
+    Rule(&'a Rule),
+    /// A rule reads a field the call does not carry as a usable value. The
+    /// walk stops here: the managed rule cannot resolve (FR-CMD-016).
+    Unresolvable { rule: &'a Rule, field: String },
+    /// No rule under this kind applies to the call.
+    NoMatch,
+}
+
+/// The one rule-selection step for Fields tools, shared by [`decide_fields`]
+/// and the lookup pre-pass ([`crate::lookups`]) so the two cannot disagree
+/// about which rule applies.
+pub(crate) fn select_fields_rule<'a>(
+    policy: &'a Policy,
+    kind: ToolKind,
+    input: &Value,
+) -> FieldsSelection<'a> {
+    let Some(ToolRules::Fields { rules }) = policy.tools.get(&kind) else {
+        return FieldsSelection::NoMatch;
+    };
+    for rule in rules {
+        match field_predicates_hold(&rule.predicates, input) {
+            FieldMatch::Holds => return FieldsSelection::Rule(rule),
+            FieldMatch::Fails => {}
+            FieldMatch::Unresolvable { field } => {
+                return FieldsSelection::Unresolvable { rule, field };
+            }
         }
     }
-
-    // The family is managed, but no rule resolves these arguments.
-    PartOutcome {
-        decision: deny(
-            "this managed command matches no policy rule",
-            "run it manually, or add a rule that covers it",
-        ),
-        deciding: Deciding::Default,
-        is_sym: false,
-        verb: Some(verb),
-    }
+    FieldsSelection::NoMatch
 }
 
 /// Decides one Fields-tool call (every tool kind but Bash), matching each
@@ -81,31 +131,25 @@ pub fn decide_bash_invocation(
 /// closed rather than guessing. A rule matches -> its outcome, through the
 /// same lookup gates as a Bash rule.
 pub fn decide_fields(policy: &Policy, kind: ToolKind, input: &Value, ctx: &Context) -> PartOutcome {
-    let Some(ToolRules::Fields { rules }) = policy.tools.get(&kind) else {
-        return allow_default();
-    };
-    for rule in rules {
-        match field_predicates_hold(&rule.predicates, input) {
-            FieldMatch::Holds => return resolve_rule(policy, rule, ctx, None),
-            FieldMatch::Fails => {}
-            FieldMatch::Unresolvable { field } => {
-                let tool = kind.as_str();
-                return rule_outcome(
-                    rule,
-                    deny(
-                        format!(
-                            "this {tool} call carries no usable '{field}' field, which rule '{}' reads",
-                            rule.id
-                        ),
-                        format!("retry the {tool} call with '{field}' set"),
+    match select_fields_rule(policy, kind, input) {
+        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None),
+        FieldsSelection::Unresolvable { rule, field } => {
+            let tool = kind.as_str();
+            rule_outcome(
+                rule,
+                deny(
+                    format!(
+                        "this {tool} call carries no usable '{field}' field, which rule '{}' reads",
+                        rule.id
                     ),
-                    false,
-                    None,
-                );
-            }
+                    format!("retry the {tool} call with '{field}' set"),
+                ),
+                false,
+                None,
+            )
         }
+        FieldsSelection::NoMatch => allow_default(),
     }
-    allow_default()
 }
 
 /// Decides one unreduced region (FR-CMD-004, FR-CMD-007).
