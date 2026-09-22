@@ -1,0 +1,226 @@
+//! The pure lookup pre-pass (#1229, FR-CMD-016).
+//!
+//! A rule may require a recall or consult result before it matches
+//! ([`crate::Rule::requires_recall`], [`crate::Rule::requires_consult`]), and
+//! route denies when a required result is [`crate::Lookup::NotFetched`]. The
+//! adapter therefore has to know, before it calls route, which lookups the
+//! rules governing this call require and what to query them with. This module
+//! answers by calling the same expansion and the same rule selection route
+//! uses, so it can never name a rule route would not consult. It runs that
+//! expansion itself, before route runs it again; what it shares with route is
+//! the code, not the result. The adapter never scans the command (FR-CMD-003,
+//! FR-CMD-017). Like the rest of the
+//! crate it performs no I/O (NFR-CMD-001): running the lookups is the
+//! adapter's job.
+
+use crate::decision::ToolCall;
+use crate::evaluate::{self, select_bash_rule, select_fields_rule};
+use crate::policy::{Policy, Rule, ToolKind};
+use crate::route::{bash_command, collect_strings, expand_command};
+
+/// The lookups the matched rules require, each with the query text to run it
+/// with. `None` means no matched rule requires that lookup. Mirrors the two
+/// lookup fields of [`crate::Context`], which is where the adapter puts the
+/// results.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequiredLookups {
+    pub recall: Option<String>,
+    pub consult: Option<String>,
+}
+
+impl RequiredLookups {
+    /// True when no matched rule requires any lookup.
+    pub fn is_empty(&self) -> bool {
+        self.recall.is_none() && self.consult.is_none()
+    }
+}
+
+/// The recall and consult lookups the rules governing `call` require.
+///
+/// For a Bash call the query text is the words of every invocation whose rule
+/// requires the lookup -- the binary and its dequoted arguments, as the scan
+/// resolved them, not the raw command string. A command that does not parse
+/// requires nothing: route asks about it without consulting a rule. For a
+/// Fields tool the query text is the tool input's string values, the same
+/// values the rule's predicates were matched against.
+pub fn required_lookups(policy: &Policy, call: &ToolCall) -> RequiredLookups {
+    let mut recall: Vec<String> = Vec::new();
+    let mut consult: Vec<String> = Vec::new();
+
+    for (rule, query) in matched_rules(policy, call) {
+        if rule.requires_recall {
+            recall.push(query.clone());
+        }
+        if rule.requires_consult {
+            consult.push(query);
+        }
+    }
+
+    RequiredLookups {
+        recall: join_queries(recall),
+        consult: join_queries(consult),
+    }
+}
+
+/// Every rule that would govern a part of `call`, paired with the text that
+/// part contributes to a lookup query.
+fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, String)> {
+    if call.tool == "Bash" {
+        let Ok(expanded) = expand_command(policy, bash_command(call)) else {
+            return Vec::new();
+        };
+        return expanded
+            .invocations
+            .iter()
+            .filter_map(|invocation| {
+                let (_, rule) = select_bash_rule(policy, &invocation.binary, &invocation.args)?;
+                let rule = rule?;
+                let mut words: Vec<&str> = vec![invocation.binary.as_str()];
+                words.extend(invocation.args.iter().map(|a| evaluate::dequote_outer(a)));
+                Some((rule, words.join(" ")))
+            })
+            .collect();
+    }
+
+    let Some(kind) = ToolKind::ALL.into_iter().find(|k| k.as_str() == call.tool) else {
+        return Vec::new();
+    };
+    let mut values: Vec<String> = Vec::new();
+    collect_strings(&call.input, &mut values);
+    match select_fields_rule(policy, kind, &values) {
+        Some(rule) => vec![(rule, values.join(" "))],
+        None => Vec::new(),
+    }
+}
+
+fn join_queries(queries: Vec<String>) -> Option<String> {
+    if queries.is_empty() {
+        None
+    } else {
+        Some(queries.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_policy;
+
+    fn policy(text: &str) -> Policy {
+        parse_policy(text).expect("valid policy")
+    }
+
+    fn bash(command: &str) -> ToolCall {
+        ToolCall {
+            tool: "Bash".to_string(),
+            input: serde_json::json!({ "command": command }),
+        }
+    }
+
+    /// `gh issue` needs recall, `gh pr` needs both, `git push` needs nothing;
+    /// `env` is a wrapper.
+    fn sample_policy() -> Policy {
+        policy(
+            r#"{
+            "wrappers": [{"binary": "env"}],
+            "tools": {"Bash": {"families": {
+                "gh issue": {"rules": [
+                    {"id": "gh-issue", "requires_recall": true, "outcome": {"kind": "allow"}}
+                ]},
+                "gh pr": {"rules": [
+                    {"id": "gh-pr-merge", "predicates": [{"kind": "arg-present", "arg": "merge"}],
+                     "requires_recall": true, "requires_consult": true,
+                     "outcome": {"kind": "allow"}}
+                ]},
+                "git push": {"rules": [
+                    {"id": "git-push", "outcome": {"kind": "allow"}}
+                ]}
+            }}}
+        }"#,
+        )
+    }
+
+    #[test]
+    fn an_unmanaged_command_requires_nothing() {
+        let found = required_lookups(&sample_policy(), &bash("echo hi"));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_matched_rule_with_no_requirement_requires_nothing() {
+        let found = required_lookups(&sample_policy(), &bash("git push origin main"));
+        assert_eq!(found, RequiredLookups::default());
+    }
+
+    #[test]
+    fn a_rule_requiring_recall_names_the_invocation_as_its_query() {
+        let found = required_lookups(&sample_policy(), &bash("gh issue view \"#12\""));
+        // The query is the scan's words, dequoted -- not the raw string.
+        assert_eq!(found.recall.as_deref(), Some("gh issue view #12"));
+        assert!(found.consult.is_none());
+    }
+
+    #[test]
+    fn a_rule_requiring_both_lookups_names_both() {
+        let found = required_lookups(&sample_policy(), &bash("gh pr merge 7"));
+        assert_eq!(found.recall.as_deref(), Some("gh pr merge 7"));
+        assert_eq!(found.consult.as_deref(), Some("gh pr merge 7"));
+    }
+
+    #[test]
+    fn a_family_whose_rules_do_not_resolve_requires_nothing() {
+        // `gh pr view` matches the `gh pr` family but not the merge rule:
+        // route denies it as unresolvable, so no lookup is needed.
+        let found = required_lookups(&sample_policy(), &bash("gh pr view 7"));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_wrapped_invocation_is_seen_through_the_wrapper() {
+        // The pre-pass reads route's expansion, so `env gh issue list`
+        // reaches the `gh issue` rule the same way route does.
+        let found = required_lookups(&sample_policy(), &bash("env gh issue list"));
+        assert_eq!(found.recall.as_deref(), Some("gh issue list"));
+    }
+
+    #[test]
+    fn a_compound_command_joins_the_requiring_parts() {
+        let found = required_lookups(&sample_policy(), &bash("gh issue list | gh pr merge 7"));
+        assert_eq!(found.recall.as_deref(), Some("gh issue list gh pr merge 7"));
+        assert_eq!(found.consult.as_deref(), Some("gh pr merge 7"));
+    }
+
+    #[test]
+    fn an_unparsable_command_requires_nothing() {
+        // route asks about a parse error without consulting a rule.
+        let found = required_lookups(&sample_policy(), &bash("gh issue 'unterminated"));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_fields_rule_requiring_a_lookup_uses_the_input_values_as_its_query() {
+        let p = policy(
+            r#"{"tools": {"Edit": {"rules": [
+                {"id": "edit-env", "predicates": [{"kind": "arg-present", "arg": ".env"}],
+                 "requires_consult": true,
+                 "outcome": {"kind": "deny", "reason": "secrets", "instead": "leave it"}}
+            ]}}}"#,
+        );
+        let call = ToolCall {
+            tool: "Edit".to_string(),
+            input: serde_json::json!({ "file_path": ".env", "old_string": "KEY" }),
+        };
+        let found = required_lookups(&p, &call);
+        assert!(found.recall.is_none());
+        assert_eq!(found.consult.as_deref(), Some(".env KEY"));
+    }
+
+    #[test]
+    fn a_tool_the_policy_does_not_model_requires_nothing() {
+        let call = ToolCall {
+            tool: "WebFetch".to_string(),
+            input: serde_json::json!({ "url": "https://example.com" }),
+        };
+        assert!(required_lookups(&sample_policy(), &call).is_empty());
+    }
+}
