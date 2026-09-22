@@ -38,8 +38,12 @@ boolean); classify by both, so no combination falls through. `needs_pressure_tes
 marks it a hypothesis to test whatever its status -- the operator asked for the test, so this
 wins even on a `settled` proposal. Otherwise a `settled` proposal is committed and gets no
 test, and a `proposed` proposal carrying no flag is UNDECIDED -- neither committed nor a
-stated bet -- so escalate it to the operator as an open direction to resolve, never silently
-test it or treat it as committed. An intent whose direction is fully committed yields an
+stated bet -- so escalate it to the operator as an open direction to resolve (report it under
+`escalations`, step 5), never silently test it or treat it as committed. This first step does
+not read the intent's prose to GUESS a proposal's commitment the way the later `sd-write-spec`
+does; with no discovery evidence in hand yet, it escalates rather than judges -- the two steps
+meet the same schema shape with different licenses by design. An intent whose direction is
+fully committed yields an
 EMPTY agenda -- that is correct, not a failure, and sd-discover then only grounds how.
 Manufacturing claims against a committed direction is over-producing in its most damaging
 form: it hands the operator's bet to outside discourse to relitigate.
@@ -99,14 +103,18 @@ goes back to its writer, not forward to a review.
    Write each returned prediction id into its entry as `prediction`; the agenda is the
    handoff, and the witness needs the id.
 
-5. Report the agenda to the caller as structured text (services_to_test and
-   claims_to_test, each item with its intent trace, its key, its prediction id, and the
-   claimed confidence). This step writes no legion document;
-   the agenda is working state, and handing it to the next step as a scratch FILE is fine
-   -- a file is not a document, and the prohibition is on store writes, not on writing the
-   agenda down. If the session must stop here, park per the protocol in the
-   sd-service-design skill (Park and resume) with the agenda, prediction ids included, in
-   the anchor text.
+5. Report the agenda to the caller as structured text: **services_to_test** and
+   **claims_to_test** (each item with its intent trace, its key, its prediction id, and the
+   claimed confidence), and **escalations** -- the UNDECIDED proposals (`proposed` and
+   carrying no `needs_pressure_test` flag), each named with the ruling the operator owes and
+   a recommended answer with its reasoning, so the operator can settle it in one line. This
+   step writes no legion document; the agenda is working state, and handing it to the next
+   step as a scratch FILE is fine -- a file is not a document, and the prohibition is on
+   store writes, not on writing the agenda down. When the agenda carries any escalation the
+   direction is not yet fully classified: park per the protocol in the sd-service-design
+   skill (Park and resume) for the operator's rulings before sd-discover runs. If the session
+   must stop here for any reason, park the same way, with the agenda, prediction ids, and
+   escalations included in the anchor text.
 
 ## Instrumentation
 

@@ -126,9 +126,11 @@ For each claim with evidence available:
   CHALLENGES a committed item (a `settled` proposal, a `boundary`, or the `what_it_is`
   framing) is not added as a scored insight -- the schema has no verdict for "the operator's
   bet may be wrong," and scoring it `contradicted` would relitigate the committed direction.
-  It goes to the operator as a named note in the discover report, and the Discovery lands at
-  `review` for the ruling even when no scored insight is contradicted. The operator, not this
-  step, decides whether a committed bet moves.
+  It goes to the operator as a named note in the discover report, with a recommended ruling
+  and its reasoning (the same "operator gets a recommendation, not a bare question" rule the
+  rest of the pipeline follows), and the Discovery lands at `review` for the ruling even when
+  no scored insight is contradicted. The operator, not this step, decides whether a committed
+  bet moves.
 
 ## The inverse pass (required)
 

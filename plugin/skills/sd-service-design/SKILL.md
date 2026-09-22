@@ -94,8 +94,10 @@ repo's intent document is the root input -- find it with
 stops here: the intent comes first, and writing one is not this pipeline's job).
 
 1. **`sd-intent-review`** -- intent in, research agenda out (services to test, claims to
-   test). No documents written; the agenda is this session's working state and is stored
-   in the park anchor if you stop.
+   test, and any escalations -- UNDECIDED proposals the operator must rule on). No documents
+   written; the agenda is this session's working state and is stored in the park anchor if
+   you stop. When the agenda carries escalations, park for the operator's rulings before
+   sd-discover runs -- the direction is not yet fully classified.
 2. **`sd-discover`** -- agenda in, one schema-valid Discovery document out. This is the
    step that talks to the world (eavesdrop) and the step most likely to park. Expect it to
    take about a day: a fresh corpus supports only an orientation pass, and the
