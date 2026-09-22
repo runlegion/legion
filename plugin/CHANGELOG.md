@@ -1,5 +1,220 @@
 # Legion Changelog
 
+## 0.40.0
+
+The first-diamond release. Service design changes what it produces and where it stops.
+`sd-service-design` now runs discover and define only -- it ends at a defined service and
+never calls `sd-write-spec`, which names itself as the narrowing step of the engineering
+diamond with its own entry point. `sd-ecosystem-imagine` asks the questions that turn an
+intent into a product and answers them itself, sends what it cannot settle to real people
+through eavesdrop and parks, and brings the operator only strategy and values choices, each
+with a recommendation. `sd-discover` drops the 0.40 disconfirm bar that eavesdrop measured
+could never fire (a well-aimed cosine probe never scores below about 0.43) for a same-lens
+control comparison, and it never cuts a claim: contradicted and unevidenced insights park for
+the operator's ruling. The failing example is on the record: the smugglr ecosystem document
+carried 41 `OPEN QUESTION` entries, none answered, and all 83 of that run's predictions were
+witnessed `abandoned`. Alongside it, the three quality gates and the Rust implementer are told
+in so many words that they conform to the spec or the issue and never redesign it, after a
+review-invented field drifted into legion-cmd past a review that only checked the named files.
+
+Minor release rather than a patch, on the pipeline's contract: a run of `sd-service-design`
+that previously ended in a requirement set now ends at the ecosystem, personas, journeys and
+blueprints, and anyone who wants the spec invokes `sd-write-spec` themselves. The repo's build
+shape also changes -- the root `Cargo.toml` becomes a workspace with `crates/legion-cmd` as its
+first member and the repo's first git dependency. No verb, flag or wire-format change in the
+`legion` binary, and no schema migration: the Discovery schema still requires `meta.threshold`
+and the skill now writes `0` there and says the value carries no meaning (see below). The
+legion-cmd crate is present and compiled; nothing in the binary or the hooks calls it.
+
+### Fixed
+
+- **Service design runs the first diamond and answers its own questions** (PR #1243, #1242).
+  Eight `sd-*` skills change together, each against an operator ruling. `sd-service-design`
+  gains a "Where this sits" section placing legion's work in three diamonds -- the problem
+  (discover, then define), the solution design (develop, then deliver design assets and the
+  design system), the engineering (research and toys, then spec, issues, code, review,
+  verify) -- and states that it runs the first and nothing else; its Refuses now forbids
+  calling `sd-write-spec` or any step of the second or third diamond. Two craft rules are new:
+  the world answers what it can and the operator answers only what is theirs, and the
+  customer may be an agent, in which case the agent is the primary actor acting for someone
+  (the intermediary or delegate pattern) and the human behind it carries the risk, sees only
+  outcomes, and can never be asked anything by the product. The writers now wait until the
+  ecosystem's register is empty and the document is at `done`. `sd-ecosystem-imagine`
+  (0.1.0 to 0.2.0) is rewritten around seven question grounds -- choosing, benefit and risk,
+  dependence, value, trust, governance, failure -- with the specific questions drawn from the
+  intent, not a template; the five perspective passes now find and answer questions rather
+  than list edges, and every question routes in order to the step's own design reasoning,
+  the Discovery, eavesdrop via `legion signal` with the step parked as a `draft`, and last the
+  operator, only for strategy and values and only with a recommended answer. Answers must say
+  how things happen: who starts it, through what, under whose credentials, what anyone sees
+  when it runs and when it fails. The register holds only what is genuinely open, the
+  document's status says what kind of open (`draft` with questions out to people, `review`
+  with only operator choices, `done` when empty), and a redraw revises the same document via
+  `legion document revise`, writing each answer into the entry's `recovery` prefixed
+  `ANSWERED:` and never reordering an entry, since its position is its prediction id.
+  `sd-discover` replaces the bar with a method: run the claim's probe and a null-control probe
+  on the same lens, rerank both candidate sets against the claim in one call, and report the
+  separation as G = 2*AUC - 1 with its standard error, recording the null query in
+  `evidence.gaps` -- as evidence, never as a cutoff, because `score` is a cosine similarity and
+  `rerank_score` is an unbounded cross-encoder logit comparable only within one call. Absence
+  comes only from a census (`eavesdrop search <lens> -t "<token>" -n 100000 --json`, a census
+  only when the count comes back below `-n`, listing every spelling counted). A contradicted
+  or `saturated-unevidenced` insight lands the Discovery at `review` with a recommended ruling
+  (keep, revise, or cut) and parks; the step never removes, weakens or rewrites an intent
+  claim. A crawl `blocked on source depth` now signals the eavesdrop agent, who owns the lens,
+  rather than the operator, and the Refuses gain a ban on eavesdrop's NLI stance reader for
+  verdicts, which reads first-hand testimony as no support. The confidence anchors move from
+  distance-from-the-bar to independent voices and separation from the control, and the
+  `sd.discover.insight` prediction payload changes from `rows`/`scores` to `voices`/`null`.
+  `sd-intent-review` states `right_if` as a comparison sd-discover can run, never a score
+  bar. `sd-write-persona` and `sd-write-journey` carry the agent-first rule: agent personas
+  (how it chooses a tool, reads output, guesses, asks, recovers) written separately from the
+  unaware humans behind them, and journeys that follow the agent with the human as a thin
+  line of outcomes. `sd-write-blueprint` loses its interim duty of witnessing the ecosystem's
+  world-routed register edges; that duty now sits with the conductor for both routes, under
+  sd-ecosystem-imagine's "Who witnesses, and when" (confirmed answer `shipped` 1.0, changed in
+  part `scoped-down` 0.5, overturned `abandoned` 0.0). `sd-write-spec` drops "the Deliver-edge
+  writer" and names itself the narrowing step of the engineering diamond, outside this
+  pipeline. The acceptance check is textual: no `0.40` used as a bar, no `Deliver-edge`, and
+  no instruction that sends the operator a question the world or the step can answer.
+
+- **The ecosystem guards its altitude and gates convergence; the blueprint names the
+  backstage/support line** (PR #1250, #1249). Three clarifications from a live audit of the
+  sd skills against prior runs. "Say how things happen" is disambiguated as the service's how
+  -- the actor, the channel, the authority, what they see -- never the engine's algorithm,
+  wire format or data structure, which a spec fixes later; an answer that explains the
+  mechanism has dropped into the third diamond, and a matching refuse is added. Convergence
+  is confidence only when the answer is grounded: five passes reading one intent that omits
+  its mechanism can invent the same missing machinery (in a live run all five lenses posited
+  an external sync-state store that the real stateless mechanism dissolved), so a converged
+  answer no Discovery insight or intent field supports is a shared guess, marked and routed
+  rather than promoted to core, with a matching refuse. `sd-write-blueprint` defines the line
+  between its two internal layers by the customer's awareness (the primer's Line of Internal
+  Interaction): `backstage` is work the customer knows happens but cannot see inside, `support`
+  is infrastructure they have no awareness of at all. Both edited skills patch-bump
+  (`sd-ecosystem-imagine` 0.2.1, `sd-write-blueprint` 0.1.1).
+
+- **The issue-writer's pipeline begins with intent, not the retired thesis** (PR #1223, #1221).
+  `plugin/agents/issue-writer.md:57` still read "The pipeline is thesis -> service design ->
+  spec -> issues -> work -> PR". #1079 retired the noun `thesis` for `intent` and renamed
+  `sd-thesis-review` to `sd-intent-review`; a `legion sym etc find-content thesis` across every
+  registered repo, filtered to agent, skill, command and hook definitions, found this one
+  surviving occurrence in live instruction text, and legion memory records a quality gate
+  catching the spec-writer branch reintroducing the word once already. One word changes. The
+  other matches -- the habit-word list in `elements-of-style.md`, the historical CHANGELOG
+  entries, the arbitrary doc-type strings in test fixtures, and the substring inside
+  `hypothesis` -- are each correct in their own context and were left alone.
+
+### Changed
+
+- **The quality gates conform to the spec or the issue; they never redesign it** (PR #1247).
+  `legion-review`, `legion-simplify` and `legion-verify` could each raise a design opinion as
+  a finding and drive scope nobody specified -- the drift that shipped review-invented fields
+  into legion-cmd. Each gate now names its authority: the spec for design work with a spec
+  behind it, the issue itself for a bug fix or anything that needed no design.
+  `legion-review` gains a "You review conformance, not design" section: a finding is exactly
+  one of two things, the diff diverges from the authority or the code has a real defect; "the
+  design should be different" -- a better abstraction, an extra field, a case the authority
+  does not name -- is not a finding and is never asked of the implementer. `legion-simplify`
+  does not flag structure the spec or the issue mandates as unnecessary abstraction; it removes
+  what the code added without buying anything. `legion-verify` marks a criterion `pass` when
+  the diff satisfies it as written, even if the verifier would have designed it differently.
+  All three route a genuine problem with the authority the same way: halt and escalate -- a
+  spec problem back through the design process, an issue problem to the operator -- rather
+  than fold it into the build.
+
+- **The Rust implementer inherits the orchestrator's model and builds only the interface the
+  issue names** (PR #1248). `.claude/agents/rust.md` drops `model: claude-sonnet-5` and
+  `effort: medium`, a throttle from a session-limit worry that did not materialize, so the
+  agent takes the invoking orchestrator's model and lets the workflow set effort. It gains an
+  interface-exactness guard: implement exactly the types, fields, variants, methods and
+  functions the issue's Interface specifies and add none it does not name, even when one
+  looks necessary to make the code work -- that is how `wrapper_chain` and `reenter_as_shell`
+  drifted into legion-cmd while every file touched was named. A needed-but-omitted piece, or
+  an Interface that contradicts the issue's own Behavior, is the same halt the agent already
+  takes on an underspecified issue: stop, name the gap, signal the orchestrator.
+
+- **The repo becomes a Cargo workspace; `crates/legion-cmd` holds a Decision contract and a
+  splitter, and nothing calls either** (PR #1238, #1225; PR #1245 reverting PR #1239, #1240,
+  #1241; PR #1246, #1226). The root `Cargo.toml` gains `[workspace] members =
+  ["crates/legion-cmd"]` and a path dependency on the crate; `scripts/preflight.sh` and
+  `.github/workflows/ci.yml` add `--workspace` to clippy and nextest/test, verified
+  empirically -- without it neither ran or linted the crate's code, which was only compiled
+  as a dependency. `decision.rs` (#1225) is types only: the closed five-arm `Decision`
+  (`Allow`, `Rewrite`, `Proxy`, `Deny`, `Ask`), the closed seven-member `ProxyReason` with one
+  source for its kebab-case names, `DenyDetails` and `AskDetails` with private fields so an
+  empty reason, replacement or question cannot be constructed, the fixed `NO_GO_INSTEAD`
+  constant ("none: this command never runs"), and `Facts`, `Routed`, `ToolCall`, `Context`
+  and `Lookup`. Between the crate's arrival and this release, three further PRs merged a
+  hand-written bounded tokenizer (#1239), a route evaluator with a shipped `policy.json`
+  (#1240) and a rewrite path (#1241), and #1245 reverted all three -- 7,902 lines -- after a
+  drift audit found the code departed from the issues and the requirements they trace to:
+  the tokenizer carried per-tool knowledge in Rust (wrapper option lists, docker and JS runner
+  globals, awk and `env -S` parsing) that FR-CMD-011 places in one declarative policy read by
+  a single evaluator, and missed commands it must see (a quoted environment prefix, `ssh` and
+  `watch` command strings, unknown wrappers, aliases); route copied the operator mark on every
+  ask, ignored unknown policy fields and left parse errors asking under an empty policy; the
+  rewrite work replaced declared translatable arguments with an exact word match and put the
+  replacement command string in the policy target, so no rewrite was built from route's facts
+  as FR-CMD-003 requires. Only #1226 is re-landed, rebuilt from the issue as written:
+  `splitter.rs` is a pure `scan`/`scan_at` over the `brush-parser` AST that resolves each
+  `Invocation`'s `Position` (`First`, `AfterOperator`, `AfterAssignment`, `Substitution`,
+  `FunctionBody`) from grammar alone, re-enters command and process substitutions itself, and
+  reports what it could not reduce as `Unreduced` regions with one reason each
+  (`InterpreterBody`, `DynamicName`, `TooDeep`, `Unparsed`). It holds no binary, wrapper,
+  interpreter or shell name -- a wrapper's payload (`sh -c`, `xargs`, `find -exec`, `env -S`)
+  is left as an ordinary argument string for a router to re-enter once the policy names it.
+  The depth guard counts raw-byte nesting before any parse call, so deeply nested input never
+  reaches the parser's own PEG recursion, and every offset the crate exposes is a byte offset
+  into the input, which is why `brush-parser` is pinned by `rev` to the legion fork's
+  `word-location-pinned` branch (upstream reubeno/brush#1144) -- the repo's first git
+  dependency, to be dropped once that fix ships on crates.io. `tests/battery.rs` runs a 92-row
+  adversarial battery (`tests/fixtures/battery.json`), every row naming its source, with no
+  fixed total asserted per FR-CMD-007 revision 10; two rows whose verdict turns on what a
+  resolved command means rather than whether a word is a command (`git stash push`, a bare
+  `pnpm <name>`) moved to `tests/fixtures/router-candidate-false-positives.json` for the
+  router's builder. A double-quote tracking fix landed on the way: a real multi-stage commit
+  whose message body held a `"$(cat <<'EOF' ... EOF)"` idiom falsely tripped `TooDeep` and
+  dropped every invocation.
+
+### Before you upgrade: what the sd pipeline hands you changes
+
+- **`sd-service-design` no longer ends in a requirement set.** A conductor that ran the
+  pipeline expecting FR/NFR documents out of it gets a defined service -- ecosystem, personas,
+  journeys, blueprints -- and stops. Invoke `sd-write-spec` separately when the scope is ready
+  to move from discovery to a buildable spec (#1242).
+- **`meta.threshold` on a Discovery is now `0` and means nothing.** The schema still requires
+  the field; the skill writes `0` and says so in its report. Anything reading that value as a
+  disconfirm bar reads a retired rule. The `sd.discover.insight` prediction payload also
+  changes shape, from `{"rows", "scores"}` to `{"voices", "null"}` (#1242).
+- **Ecosystem documents land at `draft` or `review` more often, and park.** A register with
+  questions out to real people lands `draft`; one with only operator choices lands `review`;
+  the writers do not start until it reaches `done`. Answers arrive over days, and the
+  conductor re-arms the timed wake rather than giving up (#1242).
+- **Developers: bare `cargo test` and `cargo clippy` no longer cover the whole tree.** They
+  select the root package only. `scripts/preflight.sh` and CI pass `--workspace`; run the same
+  locally to lint and test `crates/legion-cmd`. A fresh checkout also fetches the
+  `brush-parser` fork from GitHub at build time (#1225, #1226).
+
+### Known gaps, named rather than implied
+
+- **legion-cmd is a crate on main, not a feature.** Nothing under `src/` calls it, no hook
+  invokes it, and no `policy.json` ships: #1245 removed the route evaluator, the tokenizer and
+  the rewrite path, and #1246 re-landed only the splitter. Route (#1227) and rewrite (#1228)
+  are to be rebuilt from the issues as written. No agent's Bash calls pass through any of this
+  code today.
+- **The Discovery schema still carries the retired bar.** Dropping the required
+  `meta.threshold` and adding a question record (question, lens, status, answers) is a schema
+  revision #1242 names out of scope; until it lands, every Discovery writes a meaningless `0`.
+- **The sd runner that parks and wakes on an eavesdrop answer does not exist.** The skills
+  describe the park -- `[SD ANCHOR]` checkpoint, `legion defer`, `legion signal` to eavesdrop
+  -- and the conductor follows it by hand; the agent that does so unattended is out of scope
+  in #1242. eavesdrop's ask-on-a-lens feature is likewise that repo's work, not this one's.
+- **Two sd-ecosystem-imagine passages stayed as they were.** The until-the-crit-exists
+  wording in the writer skills is tied to the open orchestrator-as-agent question, and the
+  lens-count confidence mapping depends on whether the ecosystem lenses become dispatched
+  subagents; #1249 names both out of scope.
+
 ## 0.39.2
 
 The audit release. All four changes come out of the `legion sym` audit of 2026-09-15, run
