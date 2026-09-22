@@ -1,0 +1,100 @@
+{
+  "sym_jobs": [
+    {
+      "id": "find-content",
+      "sym_command": "legion sym etc find-content",
+      "interpreter_patterns": ["rglob", "read_text"]
+    }
+  ],
+  "wrappers": [
+    { "binary": "env" },
+    { "binary": "sudo" },
+    { "binary": "timeout" },
+    { "binary": "nice" },
+    { "binary": "nohup" },
+    { "binary": "stdbuf" },
+    { "binary": "xargs" },
+    { "binary": "command" },
+    { "binary": "exec" },
+    { "binary": "npx" },
+    { "binary": "pnpx" },
+    { "binary": "bunx" },
+    { "binary": "pnpm", "required_subcommand": "exec" },
+    { "binary": "pnpm", "required_subcommand": "dlx" },
+    { "binary": "npm", "required_subcommand": "exec" },
+    { "binary": "yarn", "required_subcommand": "exec" },
+    { "binary": "yarn", "required_subcommand": "dlx" }
+  ],
+  "interpreters": [
+    { "binary": "sh", "flag": "-c", "body": "shell" },
+    { "binary": "bash", "flag": "-c", "body": "shell" },
+    { "binary": "python3", "flag": "-c", "body": "foreign" },
+    { "binary": "python", "flag": "-c", "body": "foreign" },
+    { "binary": "node", "flag": "-e", "body": "foreign" },
+    { "binary": "ruby", "flag": "-e", "body": "foreign" },
+    { "binary": "perl", "flag": "-e", "body": "foreign" }
+  ],
+  "script_carriers": [
+    { "binary": "sh" },
+    { "binary": "bash" },
+    { "binary": "python3" },
+    { "binary": "python" },
+    { "binary": "node" },
+    { "binary": "ruby" },
+    { "binary": "perl" }
+  ],
+  "tools": {
+    "Bash": {
+      "families": {
+        "grep": {
+          "rules": [
+            { "id": "grep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }
+          ]
+        },
+        "rg": {
+          "rules": [
+            { "id": "rg-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }
+          ]
+        },
+        "rm": {
+          "rules": [
+            {
+              "id": "rm-recursive-force",
+              "predicates": [{ "kind": "arg-present", "arg": "-rf" }],
+              "outcome": {
+                "kind": "deny",
+                "reason": "a combined recursive force delete is unrecoverable",
+                "instead": "remove the specific paths, or use trash"
+              }
+            },
+            {
+              "id": "rm-other",
+              "outcome": { "kind": "allow" }
+            }
+          ]
+        },
+        "curl": {
+          "rules": [
+            {
+              "id": "curl-network",
+              "outcome": {
+                "kind": "ask",
+                "question": "make this network request?",
+                "reason": "curl reaches the network, which the agent should confirm",
+                "needs_operator": true
+              }
+            }
+          ]
+        },
+        "xxd": {
+          "rules": [
+            {
+              "id": "xxd-verbatim",
+              "outcome": { "kind": "proxy", "reason": "binary" }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
