@@ -66,6 +66,9 @@ fn the_shipped_policy_denies_a_managed_command_and_passes_an_unmanaged_one() {
     let passed = hook_output(dir.path(), &policy, &payload("echo hi"));
     assert_eq!(passed["hookEventName"], "PreToolUse");
     assert!(passed.get("permissionDecision").is_none());
+    // FR-CMD-016: the default allow reaches the agent through the real binary.
+    let context = passed["additionalContext"].as_str().expect("default note");
+    assert!(context.contains("default allow"), "got: {context}");
 }
 
 #[test]

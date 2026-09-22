@@ -113,10 +113,10 @@ pub(crate) struct Expanded {
 }
 
 /// Splits `command` and re-enters every wrapper and interpreter payload the
-/// policy names. This is the one scan route performs; the lookup pre-pass
-/// ([`crate::lookups`]) reads the same expansion so the rules it consults are
-/// exactly the rules route will evaluate, and no caller splits the command a
-/// second time (FR-CMD-003, FR-CMD-017).
+/// policy names. This is the one scan route performs. The lookup pre-pass
+/// ([`crate::lookups`]) calls this same function, so the rules it consults are
+/// exactly the rules route will evaluate; no caller outside this crate splits
+/// the command (FR-CMD-003, FR-CMD-017).
 pub(crate) fn expand_command(policy: &Policy, command: &str) -> Result<Expanded, ScanError> {
     let scan = splitter::scan(command)?;
     let mut expanded = Expanded::default();

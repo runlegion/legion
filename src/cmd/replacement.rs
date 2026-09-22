@@ -36,10 +36,10 @@ pub(crate) enum ReplacementError {
     #[error("the rewrite would drop {0} issue number(s) the target does not carry")]
     IssueNumbersNotCarried(usize),
 
-    /// The original `tool_input` is an object with no `command` field (an
-    /// Agent, Edit, or Write call). Inserting one would leave the fields the
-    /// tool actually runs on untouched, and the adapter's `allow` would then
-    /// grant the original call outright.
+    /// The original `tool_input` is not an object carrying a `command` field
+    /// (an Agent, Edit, or Write call, or a malformed input). Inserting one
+    /// would leave the fields the tool actually runs on untouched, and the
+    /// adapter's `allow` would then grant the original call outright.
     #[error("the tool input has no command field to replace")]
     NoCommandField,
 }
@@ -69,11 +69,8 @@ pub(crate) fn build_replacement(
     }
 
     let mut patched: Map<String, Value> = match original {
-        Value::Object(map) if !map.contains_key("command") => {
-            return Err(ReplacementError::NoCommandField);
-        }
-        Value::Object(map) => map.clone(),
-        _ => Map::new(),
+        Value::Object(map) if map.contains_key("command") => map.clone(),
+        _ => return Err(ReplacementError::NoCommandField),
     };
     patched.insert(
         "command".to_string(),
@@ -182,16 +179,15 @@ mod tests {
     }
 
     #[test]
-    fn a_non_object_original_still_yields_a_command() {
-        let replaced = build_replacement(
-            &target("legion issue list"),
-            &Facts::default(),
-            &Value::Null,
-        )
-        .expect("builds");
-        assert_eq!(
-            replaced,
-            serde_json::json!({"command": "legion issue list"})
-        );
+    fn a_non_object_original_is_refused() {
+        for original in [
+            Value::Null,
+            serde_json::json!(["gh", "issue", "list"]),
+            serde_json::json!("gh issue list"),
+        ] {
+            let err = build_replacement(&target("legion issue list"), &Facts::default(), &original)
+                .expect_err("a malformed tool_input must not be given a command");
+            assert_eq!(err, ReplacementError::NoCommandField);
+        }
     }
 }

@@ -5,9 +5,11 @@
 //! route denies when a required result is [`crate::Lookup::NotFetched`]. The
 //! adapter therefore has to know, before it calls route, which lookups the
 //! rules governing this call require and what to query them with. This module
-//! answers that from the same expansion and the same rule selection route
-//! uses, so it can never name a rule route would not consult and never splits
-//! the command a second time (FR-CMD-003, FR-CMD-017). Like the rest of the
+//! answers by calling the same expansion and the same rule selection route
+//! uses, so it can never name a rule route would not consult. It runs that
+//! expansion itself, before route runs it again; what it shares with route is
+//! the code, not the result. The adapter never scans the command (FR-CMD-003,
+//! FR-CMD-017). Like the rest of the
 //! crate it performs no I/O (NFR-CMD-001): running the lookups is the
 //! adapter's job.
 
