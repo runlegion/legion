@@ -14,8 +14,7 @@
 use crate::decision::ToolCall;
 use crate::evaluate::{self, select_bash_rule, select_fields_rule};
 use crate::policy::{Policy, Rule, ToolKind};
-use crate::route::{collect_strings, expand_command};
-use serde_json::Value;
+use crate::route::{bash_command, collect_strings, expand_command};
 
 /// The lookups the matched rules require, each with the query text to run it
 /// with. `None` means no matched rule requires that lookup. Mirrors the two
@@ -65,12 +64,7 @@ pub fn required_lookups(policy: &Policy, call: &ToolCall) -> RequiredLookups {
 /// part contributes to a lookup query.
 fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, String)> {
     if call.tool == "Bash" {
-        let command: &str = call
-            .input
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let Ok(expanded) = expand_command(policy, command) else {
+        let Ok(expanded) = expand_command(policy, bash_command(call)) else {
             return Vec::new();
         };
         return expanded

@@ -468,15 +468,7 @@ fn rewrite_response(
         original.unwrap_or("<command>"),
         target.as_str()
     );
-    let mut fields = Map::new();
-    fields.insert(
-        "permissionDecision".to_string(),
-        Value::String("allow".to_string()),
-    );
-    fields.insert(
-        "permissionDecisionReason".to_string(),
-        Value::String(message.clone()),
-    );
+    let mut fields = decision_fields("allow", &message);
     fields.insert("updatedInput".to_string(), updated);
     fields.insert("additionalContext".to_string(), Value::String(message));
     hook_output(fields)
@@ -495,16 +487,7 @@ fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload
             ..
         }
     ) {
-        let mut fields = Map::new();
-        fields.insert(
-            "permissionDecision".to_string(),
-            Value::String("ask".to_string()),
-        );
-        fields.insert(
-            "permissionDecisionReason".to_string(),
-            Value::String(details.reason().to_string()),
-        );
-        return hook_output(fields);
+        return hook_output(decision_fields("ask", details.reason()));
     }
     deny_response(&format!(
         "{} -- {}. To confirm: legion cmd confirm --reason <why> -- {}",
@@ -525,16 +508,21 @@ fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
 }
 
 fn deny_response(reason: &str) -> Value {
+    hook_output(decision_fields("deny", reason))
+}
+
+/// The two fields every explicit permission decision carries.
+fn decision_fields(decision: &str, reason: &str) -> Map<String, Value> {
     let mut fields = Map::new();
     fields.insert(
         "permissionDecision".to_string(),
-        Value::String("deny".to_string()),
+        Value::String(decision.to_string()),
     );
     fields.insert(
         "permissionDecisionReason".to_string(),
         Value::String(reason.to_string()),
     );
-    hook_output(fields)
+    fields
 }
 
 fn hook_output(fields: Map<String, Value>) -> Value {

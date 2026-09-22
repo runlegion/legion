@@ -34,12 +34,18 @@ pub fn route(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     }
 }
 
-fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
-    let command = call
-        .input
+/// The Bash command a tool call carries, or `""` when `input` has no string
+/// `command` field. Shared with the lookup pre-pass so both read the same
+/// field the same way.
+pub(crate) fn bash_command(call: &ToolCall) -> &str {
+    call.input
         .get("command")
         .and_then(Value::as_str)
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
+    let command: &str = bash_command(call);
     if command.trim().is_empty() {
         return allow_routed();
     }
@@ -103,7 +109,7 @@ fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> 
 #[derive(Default)]
 pub(crate) struct Expanded {
     pub(crate) invocations: Vec<Invocation>,
-    pub(crate) regions: Vec<Unreduced>,
+    regions: Vec<Unreduced>,
 }
 
 /// Splits `command` and re-enters every wrapper and interpreter payload the
