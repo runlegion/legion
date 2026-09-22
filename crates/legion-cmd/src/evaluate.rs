@@ -43,30 +43,61 @@ pub fn decide_bash_invocation(
     args: &[String],
     ctx: &Context,
 ) -> PartOutcome {
-    let Some(ToolRules::Bash { families }) = policy.tools.get(&ToolKind::Bash) else {
+    let Some((verb, rule)) = select_bash_rule(policy, binary, args) else {
         return allow_default();
     };
 
-    let Some((verb, family)) = most_specific_family(families, binary, args) else {
-        return allow_default();
+    match rule {
+        Some(rule) => resolve_rule(policy, rule, ctx, Some(verb)),
+        // The family is managed, but no rule resolves these arguments.
+        None => PartOutcome {
+            decision: deny(
+                "this managed command matches no policy rule",
+                "run it manually, or add a rule that covers it",
+            ),
+            deciding: Deciding::Default,
+            is_sym: false,
+            verb: Some(verb),
+        },
+    }
+}
+
+/// The rule that governs one Bash invocation, with the verb its family names.
+/// `None` when no family matches the binary (an unmanaged command);
+/// `Some((verb, None))` when a family matches but no rule in it resolves the
+/// arguments. The one rule-selection step for Bash, shared by
+/// [`decide_bash_invocation`] and the lookup pre-pass ([`crate::lookups`]) so
+/// the two cannot disagree about which rule applies.
+pub(crate) fn select_bash_rule<'a>(
+    policy: &'a Policy,
+    binary: &str,
+    args: &[String],
+) -> Option<(String, Option<&'a Rule>)> {
+    let ToolRules::Bash { families } = policy.tools.get(&ToolKind::Bash)? else {
+        return None;
     };
+    let (verb, family) = most_specific_family(families, binary, args)?;
+    let rule = family
+        .rules
+        .iter()
+        .find(|rule| predicates_hold(&rule.predicates, args));
+    Some((verb, rule))
+}
 
-    for rule in &family.rules {
-        if predicates_hold(&rule.predicates, args) {
-            return resolve_rule(policy, rule, ctx, Some(verb));
-        }
-    }
-
-    // The family is managed, but no rule resolves these arguments.
-    PartOutcome {
-        decision: deny(
-            "this managed command matches no policy rule",
-            "run it manually, or add a rule that covers it",
-        ),
-        deciding: Deciding::Default,
-        is_sym: false,
-        verb: Some(verb),
-    }
+/// The first rule under `kind` whose predicates hold over `values`, if any.
+/// The one rule-selection step for Fields tools, shared by [`decide_fields`]
+/// and the lookup pre-pass.
+pub(crate) fn select_fields_rule<'a>(
+    policy: &'a Policy,
+    kind: ToolKind,
+    values: &[String],
+) -> Option<&'a Rule> {
+    let ToolRules::Fields { rules } = policy.tools.get(&kind)? else {
+        return None;
+    };
+    rules
+        .iter()
+        .find(|rule| predicates_hold(&rule.predicates, values))
 }
 
 /// Decides one Fields-tool invocation (Edit/Write/Read/Grep/Agent), matching
@@ -77,15 +108,10 @@ pub fn decide_fields(
     values: &[String],
     ctx: &Context,
 ) -> PartOutcome {
-    let Some(ToolRules::Fields { rules }) = policy.tools.get(&kind) else {
-        return allow_default();
-    };
-    for rule in rules {
-        if predicates_hold(&rule.predicates, values) {
-            return resolve_rule(policy, rule, ctx, None);
-        }
+    match select_fields_rule(policy, kind, values) {
+        Some(rule) => resolve_rule(policy, rule, ctx, None),
+        None => allow_default(),
     }
-    allow_default()
 }
 
 /// Decides one unreduced region (FR-CMD-004, FR-CMD-007).

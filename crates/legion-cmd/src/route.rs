@@ -13,7 +13,7 @@ use crate::Context;
 use crate::decision::{Deciding, Decision, Facts, Routed, ToolCall};
 use crate::evaluate::{self, PartOutcome};
 use crate::policy::{BodyLanguage, Policy, ToolKind};
-use crate::splitter::{self, Invocation, Unreduced, UnreducedReason};
+use crate::splitter::{self, Invocation, ScanError, Unreduced, UnreducedReason};
 
 /// The one routing entry point. Pure (NFR-CMD-001): no filesystem, network, or
 /// database, and its output depends only on `policy`, `call` and `ctx`.
@@ -44,8 +44,8 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         return allow_routed();
     }
 
-    let scan = match splitter::scan(command) {
-        Ok(scan) => scan,
+    let expanded = match expand_command(policy, command) {
+        Ok(expanded) => expanded,
         // A parse error of the command the agent ran routes ask (FR-CMD-006):
         // the command is refused with a question and a reason to the agent.
         Err(err) => {
@@ -59,9 +59,6 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
             };
         }
     };
-
-    let mut expanded = Expanded::default();
-    expand(policy, scan.invocations, scan.unreduced, &mut expanded);
 
     let mut parts: Vec<PartOutcome> = Vec::new();
     for invocation in &expanded.invocations {
@@ -104,9 +101,21 @@ fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> 
 /// The invocations and unreduced regions a command reduces to, after every
 /// wrapper and shell-interpreter payload the policy names has been re-entered.
 #[derive(Default)]
-struct Expanded {
-    invocations: Vec<Invocation>,
-    regions: Vec<Unreduced>,
+pub(crate) struct Expanded {
+    pub(crate) invocations: Vec<Invocation>,
+    pub(crate) regions: Vec<Unreduced>,
+}
+
+/// Splits `command` and re-enters every wrapper and interpreter payload the
+/// policy names. This is the one scan route performs; the lookup pre-pass
+/// ([`crate::lookups`]) reads the same expansion so the rules it consults are
+/// exactly the rules route will evaluate, and no caller splits the command a
+/// second time (FR-CMD-003, FR-CMD-017).
+pub(crate) fn expand_command(policy: &Policy, command: &str) -> Result<Expanded, ScanError> {
+    let scan = splitter::scan(command)?;
+    let mut expanded = Expanded::default();
+    expand(policy, scan.invocations, scan.unreduced, &mut expanded);
+    Ok(expanded)
 }
 
 /// Re-enters wrapper and interpreter payloads (FR-CMD-007).
@@ -222,7 +231,10 @@ fn body_after_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-fn collect_strings(value: &Value, out: &mut Vec<String>) {
+/// Every string value in a Fields tool's input, depth-first. The values a
+/// Fields rule's predicates are matched against; shared with the lookup
+/// pre-pass so it consults the same rule route will.
+pub(crate) fn collect_strings(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(s) => out.push(s.clone()),
         Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
