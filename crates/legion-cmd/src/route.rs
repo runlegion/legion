@@ -91,9 +91,7 @@ fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> 
         // default: nothing managed applies to it.
         return allow_routed();
     };
-    let mut values = Vec::new();
-    collect_strings(&call.input, &mut values);
-    let outcome = evaluate::decide_fields(policy, kind, &values, ctx);
+    let outcome = evaluate::decide_fields(policy, kind, &call.input, ctx);
     Routed {
         decision: outcome.decision,
         facts: Facts::default(),
@@ -220,15 +218,6 @@ fn body_after_flag<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
-}
-
-fn collect_strings(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::String(s) => out.push(s.clone()),
-        Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
-        Value::Object(map) => map.values().for_each(|v| collect_strings(v, out)),
-        _ => {}
-    }
 }
 
 /// Extracts the facts route returns so no caller parses the command again
@@ -588,7 +577,7 @@ mod tests {
     fn route_is_pure_over_a_non_bash_tool() {
         let p = policy(
             r#"{"tools": {"Grep": {"rules": [
-                {"id": "grep-tool", "predicates": [{"kind": "arg-present", "arg": "secret"}],
+                {"id": "grep-tool", "predicates": [{"kind": "field-equals", "field": "pattern", "any_of": ["secret"]}],
                  "outcome": {"kind": "deny", "reason": "no secrets", "instead": "narrow it"}}
             ]}}}"#,
         );
@@ -600,5 +589,49 @@ mod tests {
             route(&p, &call, &Context::default()).decision,
             Decision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn a_fields_tool_rewrite_names_its_target_and_the_deciding_rule() {
+        // An Agent spawn of the built-in Explore agent is rewritten to the
+        // policy's target; route names the target and the rule, and the facts
+        // stay empty -- a Fields call has no command to extract them from.
+        let p = policy(
+            r#"{"tools": {"Agent": {"rules": [
+                {"id": "explore", "predicates": [{"kind": "field-equals", "field": "subagent_type", "any_of": ["explore"], "ignore_case": true}],
+                 "outcome": {"kind": "rewrite", "target": "legion:legion-explore", "reason": "sym over grep"}}
+            ]}}}"#,
+        );
+        let call = ToolCall {
+            tool: "Agent".to_string(),
+            input: serde_json::json!({ "subagent_type": "Explore", "prompt": "map the FSM" }),
+        };
+        let routed = route(&p, &call, &Context::default());
+        match routed.decision {
+            Decision::Rewrite { target, .. } => {
+                assert_eq!(target.as_str(), "legion:legion-explore")
+            }
+            other => panic!("expected rewrite, got {other:?}"),
+        }
+        assert_eq!(
+            routed.deciding,
+            Deciding::Rule {
+                id: "explore".to_string(),
+                needs_operator: false
+            }
+        );
+        assert_eq!(routed.facts, Facts::default());
+    }
+
+    #[test]
+    fn a_tool_kind_the_policy_does_not_model_is_allowed() {
+        let p = sample_policy();
+        let call = ToolCall {
+            tool: "NotebookEdit".to_string(),
+            input: serde_json::json!({ "notebook_path": "a.ipynb" }),
+        };
+        let routed = route(&p, &call, &Context::default());
+        assert_eq!(routed.decision, Decision::Allow { note: None });
+        assert_eq!(routed.deciding, Deciding::Default);
     }
 }

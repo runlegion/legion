@@ -1,0 +1,795 @@
+[
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-symbol-local-hit-indexed",
+    "tool": "Grep",
+    "input": { "pattern": "Symbol" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym etc find-content",
+    "note": "the hook denies because `legion sym def Symbol` resolves in this repo's index, a lookup route's context does not carry; route routes every Grep call to the find-content sym job, the same job Bash grep routes to, so the deny names find-content rather than sym def."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-word-boundary-wrapped-symbol",
+    "tool": "Grep",
+    "input": { "pattern": "\\bSymbol\\b" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym etc find-content",
+    "note": "the hook strips the \\b wrapper before its symbol probe; route needs no strip because it routes the Grep tool as a content search whatever the pattern's shape."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-cross-repo-hit-only-injects",
+    "tool": "Grep",
+    "input": { "pattern": "commonword" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "note": "#458 relevance gate: a sym hit only in another repo makes the hook inject the hits and allow; route has no sym result and routes the Grep tool to find-content. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-not-indexed-repo-injects",
+    "tool": "Grep",
+    "input": { "pattern": "Symbol" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "note": "with no SCIP index the hook disables its block tier and injects; route's rules carry no index gate (Context.index_exists is not a rule predicate) and deny naming find-content, which an unindexed repo cannot answer. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-bypass-env-refused-for-local-symbol",
+    "tool": "Grep",
+    "input": { "pattern": "Symbol" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "LEGION_BYPASS_GREP=1 is refused by the hook when the pattern resolves locally; route sees no environment at all and denies on the tool kind. Same arm for different reasons."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-bypass-env-allowed-for-free-text",
+    "tool": "Grep",
+    "input": { "pattern": "commonword" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "LEGION_BYPASS_GREP=1 on a non-local pattern is telemetried and allowed by the hook; route has no bypass environment and no telemetry write. DISAGREEMENT: hook allow, route deny. The bypass escape has no route equivalent by design (the confirm path is #1237)."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-regex-heavy-pattern-skips",
+    "tool": "Grep",
+    "input": { "pattern": "\\s+\\w+" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook's recall tier skips a pattern with fewer than two surviving tokens and stays silent; route routes any Grep to find-content, which takes a regex too. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-single-token-pattern-skips",
+    "tool": "Grep",
+    "input": { "pattern": "fn" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "a one-token, non-symbol pattern is below the hook's recall threshold and passes silently; route denies naming find-content. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-multi-token-recall-hits-inject",
+    "tool": "Grep",
+    "input": { "pattern": "hook output format" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook runs recall on the semantic tokens and injects hits scoring 0.3 or above; route does not run recall for a Grep and denies naming find-content. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-recall-hits-below-threshold-skip",
+    "tool": "Grep",
+    "input": { "pattern": "hook output format" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "every recall hit under the 0.3 BM25 threshold: the hook stays silent. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-no-recall-hits-silent",
+    "tool": "Grep",
+    "input": { "pattern": "hook output format" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "no recall hits: the hook emits nothing. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-missing-pattern-silent",
+    "tool": "Grep",
+    "input": {},
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook exits silently on a missing pattern; route's Grep rule reads no field, so a pattern-less Grep is still a content search routed to find-content. DISAGREEMENT: hook allow, route deny (the harness rejects a Grep without a pattern before either runs)."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-uncovered-repo-skips",
+    "tool": "Grep",
+    "input": { "pattern": "find_pending_signals" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the universal coverage gate (#353) makes every hook pass through in a repo legion does not cover; route has no coverage predicate. DISAGREEMENT: hook allow, route deny. Applies to every hook in this file; recorded once per hook."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "grep-skip-env-disables-hook",
+    "tool": "Grep",
+    "input": { "pattern": "Symbol" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "LEGION_SKIP_PRE_GREP=1 (and its SCIP alias) disables the hook; route has no per-rule skip switch. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "glob-pure-wildcard-recursive-skips",
+    "tool": "Glob",
+    "input": { "pattern": "**/*.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-file",
+    "note": "a pure-wildcard glob carries no semantic signal, so the hook skips it silently; route routes every Glob to the find-file sym job (the sanctioned locate-by-name surface the hook's own deny text names). DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "glob-pure-extension-skips",
+    "tool": "Glob",
+    "input": { "pattern": "*.toml" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "same class as the recursive wildcard. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "glob-stars-only-skips",
+    "tool": "Glob",
+    "input": { "pattern": "***" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "same class as the recursive wildcard. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "glob-semantic-segments-inject-recall",
+    "tool": "Glob",
+    "input": { "pattern": "src/**/auth.rs" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "note": "path segments with meaning reach the hook's recall tier and inject hits; route routes the Glob to find-file, which matches a full repo-relative path when the query contains `/`. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-grep.sh",
+    "case": "glob-with-path-field",
+    "tool": "Glob",
+    "input": { "pattern": "*.rs", "path": "src" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "neither the hook nor route reads Glob's `path`: the hook skips the wildcard, route routes to find-file. DISAGREEMENT: hook allow, route deny."
+  },
+
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-non-source-extension-passes",
+    "tool": "Read",
+    "input": { "file_path": "/repo/README.md" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "a prose file is not in the SCIP-indexed extension set; both pass it through."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-small-source-file-no-limit",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/small.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym hover",
+    "note": "the hook counts the file's lines on disk (100 here, under the 500 threshold) and passes; route has no file size in its context and denies every unbounded Read of a source file, naming sym hover and a bounded Read. DISAGREEMENT: hook allow, route deny. The operator may prefer route to allow small files; route cannot tell them apart without a size lookup the issue says not to add."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-large-source-limit-150",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs", "limit": 150 },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "an explicit limit at or under 200 is the targeted read both encourage."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-large-source-limit-200-boundary",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs", "limit": 200 },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "the small-read carveout boundary; both allow."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-large-source-limit-300-under-threshold",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs", "limit": 300 },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "from the script's branches, not its suite: a limit above 200 but at or under the 500 threshold passes the hook; route's oversized rule fires only above 500, so both allow."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-large-source-no-limit",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym hover",
+    "note": "the case the hook exists for: an 800-line source file read whole. Both deny naming sym hover / sym def and a bounded Read."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-large-source-limit-600",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs", "limit": 600 },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "a limit above the 500 threshold is unbounded for the cost argument; both deny."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-offset-without-limit",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs", "offset": 100 },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "an offset alone leaves the read unbounded from that line; the hook reads only `limit`, and so does route's absent-limit rule."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-other-source-extension-no-limit",
+    "tool": "Read",
+    "input": { "file_path": "src/components/App.tsx" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the extension set is the SCIP indexer's dispatch list, not just Rust; a relative path is matched by suffix the same as an absolute one."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-shell-script-is-not-a-c-header",
+    "tool": "Read",
+    "input": { "file_path": "scripts/run.sh" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "`.sh` is not in the source set; the `.h` suffix must not swallow it. Both pass."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-bypass-env-allows-with-telemetry",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "LEGION_BYPASS_READ=1 always allows and writes one bypass row; route sees no environment. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-skip-env-disables-hook",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "LEGION_SKIP_PRE_READ_SYM=1 disables the hook. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-nonexistent-file-passes",
+    "tool": "Read",
+    "input": { "file_path": "/does/not/exist.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook cannot count lines of a file that is not on disk and lets Read surface its own error; route does not touch the filesystem and denies the unbounded source Read. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-not-indexed-repo-passes",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook's block tier needs an index to redirect to; route's rules carry no index gate. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-uncovered-repo-passes",
+    "tool": "Read",
+    "input": { "file_path": "/repo/src/big.rs" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "coverage gate, as for every hook. DISAGREEMENT: hook allow, route deny."
+  },
+
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-auto-memory-file",
+    "tool": "Write",
+    "input": { "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/MEMORY.md", "content": "# notes" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion reflect",
+    "note": "the auto-memory directory is invisible outside one session and agent; both deny and point at legion reflect."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "edit-auto-memory-file",
+    "tool": "Edit",
+    "input": { "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/notes.md", "old_string": "a", "new_string": "b" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion reflect",
+    "note": "same class under the Edit matcher."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "multiedit-auto-memory-file",
+    "tool": "MultiEdit",
+    "input": { "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/MEMORY.md", "edits": [{ "old_string": "a", "new_string": "b" }] },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion reflect",
+    "note": "same class under the MultiEdit matcher."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-ordinary-path",
+    "tool": "Write",
+    "input": { "file_path": "/repo/src/lib.rs", "content": "pub fn add(a: u32, b: u32) -> u32 { a + b }" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "a write anywhere else is not the hook's concern; route reaches the allow default."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "edit-ordinary-path",
+    "tool": "Edit",
+    "input": { "file_path": "/repo/src/lib.rs", "old_string": "a + b", "new_string": "a.saturating_add(b)" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "an ordinary edit; both allow."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "multiedit-ordinary-path",
+    "tool": "MultiEdit",
+    "input": { "file_path": "/repo/src/lib.rs", "edits": [{ "old_string": "a", "new_string": "b" }] },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "an ordinary multi-edit; both allow."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-memory-dir-outside-claude-projects",
+    "tool": "Write",
+    "input": { "file_path": "/repo/src/memory/notes.md", "content": "x" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "a `memory/` directory that is not under `.claude/projects/` is a project file, not auto-memory; the hook's regex and route's two-part conjunction both need both parts."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-claude-projects-outside-memory",
+    "tool": "Write",
+    "input": { "file_path": "/Users/u/.claude/projects/-x/settings.json", "content": "{}" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "`.claude/projects/` without a `memory/` segment is not auto-memory; both allow."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-missing-file-path",
+    "tool": "Write",
+    "input": { "content": "x" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook exits silently when file_path is empty; route's first Write rule reads file_path and cannot resolve, which is the FR-CMD-016 deny for an unresolvable managed rule, not a panic. DISAGREEMENT: hook allow, route deny (the harness rejects a Write without file_path before either runs)."
+  },
+  {
+    "hook": "no-local-memory.sh",
+    "case": "write-auto-memory-uncovered-repo",
+    "tool": "Write",
+    "input": { "file_path": "/Users/u/.claude/projects/-x/memory/MEMORY.md", "content": "# notes" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "coverage gate: the hook does not enforce in a repo legion does not cover; route denies. DISAGREEMENT: hook allow, route deny."
+  },
+
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-os-walk",
+    "tool": "Write",
+    "input": { "file_path": "/repo/tree.py", "content": "import os\nfor root, dirs, files in os.walk(\".\"):\n    print(root)" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "legion sym tree",
+    "note_excludes": "find-content",
+    "note": "the observed rafters case: a script written to walk a tree. Both allow with a nudge at sym tree, and the nudge names one command, not a menu."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-rglob",
+    "tool": "Write",
+    "input": { "file_path": "/repo/find.py", "content": "from pathlib import Path\nfor f in Path(\".\").rglob(\"*.rs\"):\n    print(f)" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "legion sym tree",
+    "note": "rglob is a walk shape; both point at sym tree."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-readdirsync",
+    "tool": "Write",
+    "input": { "file_path": "/repo/list.js", "content": "const fs = require('fs');\nfor (const e of fs.readdirSync(dir)) console.log(e);" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "legion sym tree",
+    "note": "the JS walk shape; both point at sym tree."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-fnmatch",
+    "tool": "Write",
+    "input": { "file_path": "/repo/match.py", "content": "import fnmatch\nprint(fnmatch.filter(names, \"*.rs\"))" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "find-file",
+    "note": "a filename match; both point at sym etc find-file."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-re-search",
+    "tool": "Write",
+    "input": { "file_path": "/repo/search.py", "content": "import re\nif re.search(pat, text):\n    print(text)" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "find-content",
+    "note": "a text search inside files; both point at sym etc find-content."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-subprocess-grep",
+    "tool": "Write",
+    "input": { "file_path": "/repo/search.py", "content": "import subprocess\nsubprocess.run([\"grep\", \"-rn\", \"foo\", \".\"])" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "find-content",
+    "note": "a grep shelled out from a script is the content shape; the hook's `*subprocess*grep*` glob is route's two-substring conjunction."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-ordinary-script-passes",
+    "tool": "Write",
+    "input": { "file_path": "/repo/math.py", "content": "def add(a, b):\n    return a + b" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no search primitive: the hook emits nothing and route reaches the allow default with no note. Does not over-fire."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-structured-json-edit-passes",
+    "tool": "Write",
+    "input": { "file_path": "/repo/fix.py", "content": "import json\nd = json.load(open(\"f.json\"))\njson.dump(d, open(\"f.json\", \"w\"))" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "structured editing mentions a path but searches nothing; neither fires."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "edit-new-string-os-walk",
+    "tool": "Edit",
+    "input": { "file_path": "/repo/tree.py", "old_string": "pass", "new_string": "for root, dirs, files in os.walk(\".\"):\n    print(root)" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "legion sym tree",
+    "note": "the Edit matcher inspects new_string; both nudge at sym tree."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "edit-ordinary-change-passes",
+    "tool": "Edit",
+    "input": { "file_path": "/repo/math.py", "old_string": "a + b", "new_string": "a - b" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no search primitive in the new text; neither fires."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-os-walk-uncovered-repo",
+    "tool": "Write",
+    "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "same arm: the hook withholds its nudge in a repo legion does not cover, while route carries no coverage predicate and still attaches the note. A note the agent may not be able to act on, never a refusal."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-os-walk-not-indexed-repo",
+    "tool": "Write",
+    "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "same arm: the hook refuses to point at sym in a repo with no index (advice the agent cannot take); route has no index gate and still notes. Recorded so the operator can see the note fires unconditionally."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-skip-env",
+    "tool": "Write",
+    "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "LEGION_SKIP_SCRIPT_SEARCH=1 silences the hook; route still notes. Same arm."
+  },
+
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-explore-exact",
+    "tool": "Agent",
+    "input": { "subagent_type": "Explore", "prompt": "map the wake FSM", "description": "map FSM states" },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion:legion-explore",
+    "facts": { "paths": [], "verb": null, "issue_numbers": [], "keywords": [] },
+    "note": "the built-in Explore spawn is rewritten to legion:legion-explore. route names the target; its facts are empty because a Fields call has no command to extract them from. The adapter's build_replacement (#1229) must patch subagent_type to the target in the original tool_input, keeping prompt and description verbatim -- the hook's own lossless requirement."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-explore-lowercase",
+    "tool": "Agent",
+    "input": { "subagent_type": "explore", "prompt": "p" },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion:legion-explore",
+    "note": "case-insensitive exact match."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-explore-uppercase",
+    "tool": "Agent",
+    "input": { "subagent_type": "EXPLORE", "prompt": "p" },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion:legion-explore",
+    "note": "case-insensitive exact match."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-redirect-target-passes",
+    "tool": "Agent",
+    "input": { "subagent_type": "legion-explore", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "exact match, not substring: the redirect target itself is never rewritten."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-namespaced-redirect-target-passes",
+    "tool": "Agent",
+    "input": { "subagent_type": "legion:legion-explore", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "the namespaced target passes too."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-plan-passes",
+    "tool": "Agent",
+    "input": { "subagent_type": "Plan", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "another built-in agent is not Explore; both pass."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-general-purpose-passes",
+    "tool": "Agent",
+    "input": { "subagent_type": "general-purpose", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "the explicit escape the hook names: an agent that wants raw exploration asks for general-purpose by name."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-code-explorer-substring-passes",
+    "tool": "Agent",
+    "input": { "subagent_type": "code-explorer", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "contains `explore` but is not `explore`; both pass."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-missing-subagent-type-passes",
+    "tool": "Agent",
+    "input": { "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "an untyped spawn (the harness default agent) is legitimate; route's field-absent rule is ordered before the rule that reads subagent_type so the missing field is allowed, not the FR-CMD-016 unresolvable deny."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "agent-explore-uncovered-repo",
+    "tool": "Agent",
+    "input": { "subagent_type": "Explore", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion:legion-explore",
+    "note": "coverage gate: the hook leaves Explore alone in a repo legion does not cover; route rewrites regardless. DISAGREEMENT: hook allow, route rewrite."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "task-explore-exact",
+    "tool": "Task",
+    "input": { "subagent_type": "Explore", "prompt": "p", "description": "d" },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion:legion-explore",
+    "facts": { "paths": [], "verb": null, "issue_numbers": [], "keywords": [] },
+    "note": "the same hook is registered under the Task matcher; the Task tool kind carries the same rules."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "task-plan-passes",
+    "tool": "Task",
+    "input": { "subagent_type": "Plan", "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "not Explore; both pass."
+  },
+  {
+    "hook": "no-harness-explore.sh",
+    "case": "task-missing-subagent-type-passes",
+    "tool": "Task",
+    "input": { "prompt": "p" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "untyped Task spawn; both pass."
+  },
+
+  {
+    "hook": "recall-first.sh",
+    "case": "webfetch-recall-hits-inject",
+    "tool": "WebFetch",
+    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
+    "context": { "recall": "found" },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": false,
+    "note_contains": "recall",
+    "note": "the hook runs recall on the prompt and injects the hits as context. route's WebFetch rule requires a recall result (FR-CMD-016) and, with one in Context, allows with a static note to read the hits first -- but the note cannot carry the hits themselves. DISAGREEMENT of note content on the same arm, recorded per the issue: route's note cannot reproduce the hook's injected text; the adapter (#1229) holds the lookup result and is where the hits can be surfaced."
+  },
+  {
+    "hook": "recall-first.sh",
+    "case": "webfetch-no-recall-hits-silent",
+    "tool": "WebFetch",
+    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
+    "context": { "recall": "empty" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "recall ran and found nothing: the hook emits nothing; route allows with its note. Same arm."
+  },
+  {
+    "hook": "recall-first.sh",
+    "case": "webfetch-recall-not-fetched",
+    "tool": "WebFetch",
+    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "when legion is missing or recall fails, the hook exits 0 and the fetch proceeds as if nothing was injected; route's rule requires recall, and a missing required recall result is the FR-CMD-016 deny. DISAGREEMENT: hook allow (fail-open), route deny (fail-closed). The adapter's pre-pass fetches the recall the rule requires, so this is the degraded path only."
+  },
+  {
+    "hook": "recall-first.sh",
+    "case": "webfetch-short-prompt-skips",
+    "tool": "WebFetch",
+    "input": { "url": "https://example.com", "prompt": "abc" },
+    "context": { "recall": "empty" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "a prompt under four characters is skipped by the hook; route has no length predicate and still requires recall, which ran and found nothing here. Same arm."
+  },
+  {
+    "hook": "recall-first.sh",
+    "case": "webfetch-uncovered-repo-passes",
+    "tool": "WebFetch",
+    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
+    "context": { "recall": "found" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "coverage gate: the hook injects nothing outside covered repos; route allows with its note once recall is in Context. Same arm."
+  },
+  {
+    "hook": "recall-first.sh",
+    "case": "websearch-clamped-by-default",
+    "tool": "WebSearch",
+    "input": { "query": "how does the sync engine work" },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "recall-clamp.conf lists WebSearch, so the hook skips recall for it; the policy carries the clamp as an unconditional allow rule with no recall requirement (data the operator can flip)."
+  }
+]

@@ -37,18 +37,28 @@ pub enum ToolKind {
     Read,
     Grep,
     Agent,
+    Glob,
+    MultiEdit,
+    Task,
+    WebFetch,
+    WebSearch,
 }
 
 impl ToolKind {
     /// Every member, so the parser rejects a wire name outside the set the
     /// same way [`ProxyReason`] does.
-    pub const ALL: [ToolKind; 6] = [
+    pub const ALL: [ToolKind; 11] = [
         ToolKind::Bash,
         ToolKind::Edit,
         ToolKind::Write,
         ToolKind::Read,
         ToolKind::Grep,
         ToolKind::Agent,
+        ToolKind::Glob,
+        ToolKind::MultiEdit,
+        ToolKind::Task,
+        ToolKind::WebFetch,
+        ToolKind::WebSearch,
     ];
 
     /// The tool kind's wire name, as it appears as a key under `tools`.
@@ -60,6 +70,11 @@ impl ToolKind {
             ToolKind::Read => "Read",
             ToolKind::Grep => "Grep",
             ToolKind::Agent => "Agent",
+            ToolKind::Glob => "Glob",
+            ToolKind::MultiEdit => "MultiEdit",
+            ToolKind::Task => "Task",
+            ToolKind::WebFetch => "WebFetch",
+            ToolKind::WebSearch => "WebSearch",
         }
     }
 
@@ -76,8 +91,8 @@ pub enum ToolRules {
     /// first whitespace-separated token is the binary; any further tokens are
     /// leading operands (subcommand words) the invocation must carry.
     Bash { families: BTreeMap<String, Family> },
-    /// Edit/Write/Read/Grep/Agent: an ordered rule list matched against the
-    /// tool call's own fields.
+    /// Every other tool kind: an ordered rule list matched against the tool
+    /// call's own input fields (`file_path`, `pattern`, `subagent_type`, ...).
     Fields { rules: Vec<Rule> },
 }
 
@@ -104,15 +119,51 @@ pub struct Rule {
     pub outcome: RuleOutcome,
 }
 
-/// An argument-level predicate. Kept deliberately small: this issue exercises
-/// the arms with presence and absence of a literal argument word; richer
-/// operand shapes are added by the rules that need them.
+/// A rule predicate. The `Arg*` arms read a Bash invocation's arguments; the
+/// `Field*` arms read one top-level key of a Fields tool's `tool_input`. The
+/// parser scopes them: an arg predicate under a Fields tool, or a field
+/// predicate under Bash, is a policy error rather than a rule that silently
+/// never fires -- the same fail-closed posture as an unknown field.
+///
+/// A field predicate that READS a value (`FieldEquals`, `FieldContains`,
+/// `FieldEndsWith`, `FieldGreaterThan`) is unresolvable when the call carries
+/// no such field, or carries it with the wrong JSON type; the evaluator turns
+/// that into the FR-CMD-016 deny. `FieldPresent`/`FieldAbsent` only test
+/// presence and are always resolvable, so a rule that must fire when a field
+/// is legitimately missing (a Read with no `limit`, an Agent with no
+/// `subagent_type`) is written with those and ordered before the reading
+/// rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
     /// Some argument equals this word.
     ArgPresent(String),
     /// No argument equals this word.
     ArgAbsent(String),
+    /// The field exists and is not null.
+    FieldPresent { field: String },
+    /// The field is missing or null.
+    FieldAbsent { field: String },
+    /// The string field equals one of the listed values.
+    FieldEquals {
+        field: String,
+        any_of: Vec<String>,
+        ignore_case: bool,
+    },
+    /// The string field contains one of the listed substrings.
+    FieldContains { field: String, any_of: Vec<String> },
+    /// The string field ends with one of the listed suffixes.
+    FieldEndsWith { field: String, any_of: Vec<String> },
+    /// The integer field is strictly greater than `value`.
+    FieldGreaterThan { field: String, value: i64 },
+}
+
+impl Predicate {
+    /// Whether this predicate reads a Bash invocation's arguments (true) or a
+    /// Fields tool's input (false). The parser uses it to scope predicates to
+    /// the tool kind they can resolve against.
+    pub fn reads_args(&self) -> bool {
+        matches!(self, Predicate::ArgPresent(_) | Predicate::ArgAbsent(_))
+    }
 }
 
 /// What a matched rule yields.
@@ -282,6 +333,13 @@ pub enum PolicyError {
 
     #[error("{pointer}: unknown predicate kind '{kind}'")]
     UnknownPredicateKind { pointer: String, kind: String },
+
+    #[error("{pointer}: predicate kind '{kind}' does not apply to tool kind '{tool}'")]
+    PredicateNotApplicable {
+        pointer: String,
+        kind: String,
+        tool: String,
+    },
 
     #[error("{pointer}: unknown proxy reason '{reason}'")]
     UnknownProxyReason { pointer: String, reason: String },
@@ -530,6 +588,7 @@ fn parse_tool_rules(
                 Some(rules_value) => parse_rules(
                     rules_value,
                     &child_pointer(pointer, "rules"),
+                    kind,
                     sym_job_ids,
                     seen_ids,
                 )?,
@@ -556,6 +615,7 @@ fn parse_families(
             Some(rules_value) => parse_rules(
                 rules_value,
                 &child_pointer(&family_pointer, "rules"),
+                ToolKind::Bash,
                 sym_job_ids,
                 seen_ids,
             )?,
@@ -569,6 +629,7 @@ fn parse_families(
 fn parse_rules(
     value: &Value,
     pointer: &str,
+    kind: ToolKind,
     sym_job_ids: &[&str],
     seen_ids: &mut HashMap<String, String>,
 ) -> Result<Vec<Rule>, PolicyError> {
@@ -579,6 +640,7 @@ fn parse_rules(
         rules.push(parse_rule(
             rule_value,
             &rule_pointer,
+            kind,
             sym_job_ids,
             seen_ids,
         )?);
@@ -589,6 +651,7 @@ fn parse_rules(
 fn parse_rule(
     value: &Value,
     pointer: &str,
+    kind: ToolKind,
     sym_job_ids: &[&str],
     seen_ids: &mut HashMap<String, String>,
 ) -> Result<Rule, PolicyError> {
@@ -615,7 +678,7 @@ fn parse_rule(
     register_id(seen_ids, &id, &child_pointer(pointer, "id"))?;
 
     let predicates = match map.get("predicates") {
-        Some(preds) => parse_predicates(preds, &child_pointer(pointer, "predicates"))?,
+        Some(preds) => parse_predicates(preds, &child_pointer(pointer, "predicates"), kind)?,
         None => Vec::new(),
     };
     let requires_recall = optional_bool(map, "requires_recall", pointer)?;
@@ -653,28 +716,124 @@ fn register_id(
     Ok(())
 }
 
-fn parse_predicates(value: &Value, pointer: &str) -> Result<Vec<Predicate>, PolicyError> {
+fn parse_predicates(
+    value: &Value,
+    pointer: &str,
+    tool: ToolKind,
+) -> Result<Vec<Predicate>, PolicyError> {
     let array = as_array(value, pointer)?;
     let mut predicates = Vec::with_capacity(array.len());
     for (index, predicate_value) in array.iter().enumerate() {
         let predicate_pointer = child_pointer(pointer, &index.to_string());
-        let map = as_object(predicate_value, &predicate_pointer)?;
-        check_known_keys(map, &predicate_pointer, &["kind", "arg"])?;
-        let kind = require_string(map, "kind", &predicate_pointer)?;
-        let arg = require_string(map, "arg", &predicate_pointer)?;
-        let predicate = match kind.as_str() {
-            "arg-present" => Predicate::ArgPresent(arg),
-            "arg-absent" => Predicate::ArgAbsent(arg),
-            other => {
-                return Err(PolicyError::UnknownPredicateKind {
-                    pointer: child_pointer(&predicate_pointer, "kind"),
-                    kind: other.to_string(),
-                });
-            }
-        };
-        predicates.push(predicate);
+        predicates.push(parse_predicate(predicate_value, &predicate_pointer, tool)?);
     }
     Ok(predicates)
+}
+
+fn parse_predicate(value: &Value, pointer: &str, tool: ToolKind) -> Result<Predicate, PolicyError> {
+    let map = as_object(value, pointer)?;
+    let kind = require_string(map, "kind", pointer)?;
+    let predicate = match kind.as_str() {
+        "arg-present" | "arg-absent" => {
+            check_known_keys(map, pointer, &["kind", "arg"])?;
+            let arg = require_string(map, "arg", pointer)?;
+            if kind == "arg-present" {
+                Predicate::ArgPresent(arg)
+            } else {
+                Predicate::ArgAbsent(arg)
+            }
+        }
+        "field-present" | "field-absent" => {
+            check_known_keys(map, pointer, &["kind", "field"])?;
+            let field = require_string(map, "field", pointer)?;
+            if kind == "field-present" {
+                Predicate::FieldPresent { field }
+            } else {
+                Predicate::FieldAbsent { field }
+            }
+        }
+        "field-equals" => {
+            check_known_keys(map, pointer, &["kind", "field", "any_of", "ignore_case"])?;
+            Predicate::FieldEquals {
+                field: require_string(map, "field", pointer)?,
+                any_of: parse_any_of(map, pointer)?,
+                ignore_case: optional_bool(map, "ignore_case", pointer)?,
+            }
+        }
+        "field-contains" => {
+            check_known_keys(map, pointer, &["kind", "field", "any_of"])?;
+            Predicate::FieldContains {
+                field: require_string(map, "field", pointer)?,
+                any_of: parse_any_of(map, pointer)?,
+            }
+        }
+        "field-ends-with" => {
+            check_known_keys(map, pointer, &["kind", "field", "any_of"])?;
+            Predicate::FieldEndsWith {
+                field: require_string(map, "field", pointer)?,
+                any_of: parse_any_of(map, pointer)?,
+            }
+        }
+        "field-greater-than" => {
+            check_known_keys(map, pointer, &["kind", "field", "value"])?;
+            let value_pointer = child_pointer(pointer, "value");
+            let value =
+                require(map, "value", pointer)?
+                    .as_i64()
+                    .ok_or_else(|| PolicyError::WrongType {
+                        pointer: value_pointer,
+                        expected: "an integer".to_string(),
+                    })?;
+            Predicate::FieldGreaterThan {
+                field: require_string(map, "field", pointer)?,
+                value,
+            }
+        }
+        other => {
+            return Err(PolicyError::UnknownPredicateKind {
+                pointer: child_pointer(pointer, "kind"),
+                kind: other.to_string(),
+            });
+        }
+    };
+
+    // An arg predicate can only resolve against a Bash invocation's arguments
+    // and a field predicate only against a Fields tool's input; a predicate
+    // in the wrong place would never hold, so its rule would silently never
+    // fire -- fail closed at parse time instead.
+    let applies = if tool == ToolKind::Bash {
+        predicate.reads_args()
+    } else {
+        !predicate.reads_args()
+    };
+    if !applies {
+        return Err(PolicyError::PredicateNotApplicable {
+            pointer: child_pointer(pointer, "kind"),
+            kind,
+            tool: tool.as_str().to_string(),
+        });
+    }
+    Ok(predicate)
+}
+
+/// A predicate's `any_of` list: one or more non-empty strings. An empty list
+/// would never match and an empty string would match everything (every
+/// string contains and ends with `""`), so both are rejected as the policy
+/// errors they are rather than shipped as a rule that fails open or closed by
+/// accident.
+fn parse_any_of(
+    map: &serde_json::Map<String, Value>,
+    pointer: &str,
+) -> Result<Vec<String>, PolicyError> {
+    let any_of_pointer = child_pointer(pointer, "any_of");
+    let values = parse_string_array(require(map, "any_of", pointer)?, &any_of_pointer)?;
+    if values.is_empty() || values.iter().any(String::is_empty) {
+        return Err(PolicyError::WrongType {
+            pointer: any_of_pointer,
+            expected: "a non-empty array of non-empty strings".to_string(),
+        });
+    }
+    Ok(values)
 }
 
 fn parse_outcome(
@@ -1118,6 +1277,201 @@ mod tests {
             PolicyError::UnknownPredicateKind {
                 pointer: "/tools/Bash/families/gh/rules/0/predicates/0/kind".to_string(),
                 kind: "arg-matches".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn every_tool_field_kind_parses_as_a_fields_tool() {
+        // The ten tool kinds the tool-field hooks are registered under
+        // (hooks.json) all parse, each as an ordered Fields rule list.
+        let text = r#"{"tools": {
+            "Grep": {"rules": []}, "Glob": {"rules": []}, "Read": {"rules": []},
+            "Write": {"rules": []}, "Edit": {"rules": []}, "MultiEdit": {"rules": []},
+            "Agent": {"rules": []}, "Task": {"rules": []},
+            "WebFetch": {"rules": []}, "WebSearch": {"rules": []}
+        }}"#;
+        let policy = parse_policy(text).expect("valid");
+        for kind in [
+            ToolKind::Grep,
+            ToolKind::Glob,
+            ToolKind::Read,
+            ToolKind::Write,
+            ToolKind::Edit,
+            ToolKind::MultiEdit,
+            ToolKind::Agent,
+            ToolKind::Task,
+            ToolKind::WebFetch,
+            ToolKind::WebSearch,
+        ] {
+            assert_eq!(
+                policy.tools.get(&kind),
+                Some(&ToolRules::Fields { rules: Vec::new() }),
+                "{kind:?} must parse as a Fields tool"
+            );
+        }
+    }
+
+    #[test]
+    fn every_field_predicate_kind_parses_under_a_fields_tool() {
+        let text = r#"{"tools": {"Read": {"rules": [
+            {"id": "r", "predicates": [
+                {"kind": "field-present", "field": "file_path"},
+                {"kind": "field-absent", "field": "limit"},
+                {"kind": "field-equals", "field": "a", "any_of": ["x", "y"], "ignore_case": true},
+                {"kind": "field-contains", "field": "b", "any_of": ["/memory/"]},
+                {"kind": "field-ends-with", "field": "c", "any_of": [".rs"]},
+                {"kind": "field-greater-than", "field": "limit", "value": 200}
+            ], "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let policy = parse_policy(text).expect("valid");
+        let ToolRules::Fields { rules } = &policy.tools[&ToolKind::Read] else {
+            panic!("expected Fields rules");
+        };
+        assert_eq!(
+            rules[0].predicates,
+            vec![
+                Predicate::FieldPresent {
+                    field: "file_path".to_string()
+                },
+                Predicate::FieldAbsent {
+                    field: "limit".to_string()
+                },
+                Predicate::FieldEquals {
+                    field: "a".to_string(),
+                    any_of: vec!["x".to_string(), "y".to_string()],
+                    ignore_case: true,
+                },
+                Predicate::FieldContains {
+                    field: "b".to_string(),
+                    any_of: vec!["/memory/".to_string()],
+                },
+                Predicate::FieldEndsWith {
+                    field: "c".to_string(),
+                    any_of: vec![".rs".to_string()],
+                },
+                Predicate::FieldGreaterThan {
+                    field: "limit".to_string(),
+                    value: 200,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn field_equals_ignore_case_defaults_to_false() {
+        let text = r#"{"tools": {"Agent": {"rules": [
+            {"id": "r", "predicates": [{"kind": "field-equals", "field": "a", "any_of": ["x"]}],
+             "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let policy = parse_policy(text).expect("valid");
+        let ToolRules::Fields { rules } = &policy.tools[&ToolKind::Agent] else {
+            panic!("expected Fields rules");
+        };
+        assert_eq!(
+            rules[0].predicates,
+            vec![Predicate::FieldEquals {
+                field: "a".to_string(),
+                any_of: vec!["x".to_string()],
+                ignore_case: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_field_predicate_under_bash_is_rejected() {
+        // A field predicate has no Bash argument to resolve against; a rule
+        // carrying one would never fire, so it is a policy error.
+        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
+            {"id": "x", "predicates": [{"kind": "field-present", "field": "command"}],
+             "outcome": {"kind": "allow"}}
+        ]}}}}}"#;
+        let err = parse_policy(text).expect_err("field predicate under Bash");
+        assert_eq!(
+            err,
+            PolicyError::PredicateNotApplicable {
+                pointer: "/tools/Bash/families/gh/rules/0/predicates/0/kind".to_string(),
+                kind: "field-present".to_string(),
+                tool: "Bash".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_arg_predicate_under_a_fields_tool_is_rejected() {
+        let text = r#"{"tools": {"Grep": {"rules": [
+            {"id": "x", "predicates": [{"kind": "arg-present", "arg": "secret"}],
+             "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let err = parse_policy(text).expect_err("arg predicate under a Fields tool");
+        assert_eq!(
+            err,
+            PolicyError::PredicateNotApplicable {
+                pointer: "/tools/Grep/rules/0/predicates/0/kind".to_string(),
+                kind: "arg-present".to_string(),
+                tool: "Grep".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_any_of_list_is_rejected() {
+        let text = r#"{"tools": {"Write": {"rules": [
+            {"id": "x", "predicates": [{"kind": "field-contains", "field": "content", "any_of": []}],
+             "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let err = parse_policy(text).expect_err("empty any_of");
+        assert_eq!(
+            err,
+            PolicyError::WrongType {
+                pointer: "/tools/Write/rules/0/predicates/0/any_of".to_string(),
+                expected: "a non-empty array of non-empty strings".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_string_in_any_of_is_rejected() {
+        // `ends_with("")` holds for every string: an empty suffix would turn a
+        // narrow deny into a deny of every call.
+        let text = r#"{"tools": {"Read": {"rules": [
+            {"id": "x", "predicates": [{"kind": "field-ends-with", "field": "file_path", "any_of": [".rs", ""]}],
+             "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let err = parse_policy(text).expect_err("empty string in any_of");
+        assert!(matches!(err, PolicyError::WrongType { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn a_non_integer_greater_than_value_is_rejected() {
+        let text = r#"{"tools": {"Read": {"rules": [
+            {"id": "x", "predicates": [{"kind": "field-greater-than", "field": "limit", "value": "200"}],
+             "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let err = parse_policy(text).expect_err("string value");
+        assert_eq!(
+            err,
+            PolicyError::WrongType {
+                pointer: "/tools/Read/rules/0/predicates/0/value".to_string(),
+                expected: "an integer".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_on_a_field_predicate_names_its_pointer() {
+        // `ignore_case` is only valid on field-equals; on field-contains it
+        // would be a silently ignored typo otherwise.
+        let text = r#"{"tools": {"Write": {"rules": [
+            {"id": "x", "predicates": [{"kind": "field-contains", "field": "content", "any_of": ["a"], "ignore_case": true}],
+             "outcome": {"kind": "allow"}}
+        ]}}}"#;
+        let err = parse_policy(text).expect_err("unknown key");
+        assert_eq!(
+            err,
+            PolicyError::UnknownField {
+                pointer: "/tools/Write/rules/0/predicates/0/ignore_case".to_string(),
+                field: "ignore_case".to_string(),
             }
         );
     }
