@@ -121,7 +121,13 @@ For each claim with evidence available:
   `{source, url, score, text}` rows with the speakers' own words in `text`.
 - **Emergent insights:** discourse that keeps returning to something the intent never
   claimed is a finding, not noise. Add it as an insight, `emergent: true`, held to the
-  same evidence rules, with any verdict it earns.
+  same evidence rules, with any verdict it earns. One exception: an emergent that instead
+  CHALLENGES a committed item (a `settled` proposal, a `boundary`, or the `what_it_is`
+  framing) is not added as a scored insight -- the schema has no verdict for "the operator's
+  bet may be wrong," and scoring it `contradicted` would relitigate the committed direction.
+  It goes to the operator as a named note in the discover report, and the Discovery lands at
+  `review` for the ruling even when no scored insight is contradicted. The operator, not this
+  step, decides whether a committed bet moves.
 
 ## The inverse pass (required)
 
@@ -253,9 +259,10 @@ for no stated reason has skipped a step; say so in the report.
 ## Refuses
 
 - Treating an empty query result as disconfirmation.
-- Returning a verdict on a committed item -- a `settled` proposal or a `what_it_is` framing.
-  Discovery grounds how a committed direction is designed; it never decides whether it is
-  needed, and an emergent challenge to a committed item goes to the operator as a note.
+- Returning a verdict on a committed item -- a `settled` proposal, a `boundary`, or the
+  `what_it_is` framing. Discovery grounds how a committed direction is designed; it never
+  decides whether it is needed, and an emergent challenge to a committed item goes to the
+  operator as a report note, never a scored insight.
 - Landing a FINAL Discovery whose supported insights never faced a counter-probe -- the inverse
   pass is a step, not a suggestion. (An orientation draft parks without it; its supported
   insights are provisional.)

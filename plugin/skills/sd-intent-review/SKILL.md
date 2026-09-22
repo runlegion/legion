@@ -21,17 +21,20 @@ service design, and it happens only after the claims are tested.
 ## What the intent commits, and what it leaves open
 
 Not every statement in an intent is a hypothesis. A `direction.proposals` entry marked
-`settled` is the operator's committed bet, and `what_it_is` is the operator's framing:
-Discovery informs HOW these are designed, never WHETHER they are needed. An intent may say
-so outright -- one repo's `meta.purpose` reads "every direction item is required; Discovery
-informs how each is designed and does not decide whether it is needed." Derive a service or
-claim to test ONLY from what the intent leaves genuinely open: proposals carrying
-`needs_pressure_test`, unresolved `open_questions`, and `current_state.cut_or_broken` whys
-(the problem, never the committed solution). Never derive a test from a settled proposal or
-from `what_it_is`. An intent whose direction is fully committed yields an EMPTY agenda --
-that is correct, not a failure, and sd-discover then only grounds how. Manufacturing claims
-against a committed direction is over-producing in its most damaging form: it hands the
-operator's bet to outside discourse to relitigate.
+`settled`, the `what_it_is` framing, and the intent's `boundaries` are the operator's
+committed direction: Discovery informs HOW these are designed, never WHETHER they are
+needed. An intent may say so outright -- one repo's `meta.purpose` reads "every direction
+item is required; Discovery informs how each is designed and does not decide whether it is
+needed." Derive a service or claim to test ONLY from what the intent leaves genuinely open:
+proposals carrying `needs_pressure_test`, unresolved `open_questions`, and
+`current_state.cut_or_broken` whys that no settled proposal already commits to fixing. A
+`cut_or_broken` why that is the rationale for a settled proposal is committed alongside that
+proposal -- testing it relitigates the committed fix through the `cut_or_broken` door, so it
+gets no test. Never derive a test from a settled proposal, a `boundary`, or `what_it_is`. An
+intent whose direction is fully committed yields an EMPTY agenda -- that is correct, not a
+failure, and sd-discover then only grounds how. Manufacturing claims against a committed
+direction is over-producing in its most damaging form: it hands the operator's bet to
+outside discourse to relitigate.
 
 ## Gate: distill the intent first
 
@@ -49,23 +52,26 @@ goes back to its writer, not forward to a review.
 
 1. Read the intent in full: `legion document view <intent-id> --json`. The fields that
    feed the agenda: `what_it_is` (the reason to exist), `direction.becoming` and its
-   proposals, `current_state.cut_or_broken` (each entry's `why` is a claim),
+   proposals, `current_state.cut_or_broken` (an entry's `why` is a claim only when no settled
+   proposal already commits to fixing it -- see "What the intent commits"),
    `current_state.known_gaps` where present, `open_questions` (unresolved ones ARE agenda
    items), and `evidence` (existing lenses and crawl topics constrain where proof can come
    from).
 
 2. Derive **services_to_test**: for each genuinely-open service the intent implies (see
    "What the intent commits" -- a service wholly under settled proposals is committed and
-   gets no test), one entry `{name, actor, goal, test}` where `test` states what real
-   discourse would confirm the need exists. Lightweight hypotheses only -- no `system_response`, no real/planned
+   gets no test; a service part-committed and part-open gets a test scoped to its open part
+   only), one entry `{name, actor, goal, test}` where `test` states what real discourse
+   would confirm the need exists. Lightweight hypotheses only -- no `system_response`, no real/planned
    status, no merging or splitting of services. If two candidate services blur together,
    list both; sd-discover's evidence will sort them. A service with two actors names the
    primary in `actor` and the second inside `goal`.
 
 3. Derive **claims_to_test**: for each genuinely-open claim (see "What the intent commits";
-   start from `needs_pressure_test` proposals, `current_state.cut_or_broken` whys, unresolved
-   `open_questions`, and its `claims[]` test cards where present -- never a settled proposal
-   or a `what_it_is` assertion), one entry
+   start from `needs_pressure_test` proposals, `current_state.cut_or_broken` whys that no
+   settled proposal already commits to fixing, unresolved `open_questions`, and its
+   `claims[]` test cards where present -- never a settled proposal, a `boundary`, or a
+   `what_it_is` assertion), one entry
    `{claim, who, evidence_target, right_if}` where `evidence_target` names the
    lens (or lens-to-be) and the query that would surface it, and `right_if`
    states what result confirms or kills it, as a comparison sd-discover can run (the
@@ -146,8 +152,9 @@ exists to prevent. The discover report names each claim left unwitnessed and why
 - Stamping build status: real versus planned is build state and belongs to later steps.
 - Inventing claims the intent neither states nor implies -- an emergent insight is
   sd-discover's to discover from evidence, not this step's to guess.
-- Deriving a service or claim to test from a settled proposal or from `what_it_is`: a
-  committed direction is designed, not relitigated. An all-settled intent's agenda is empty.
+- Deriving a service or claim to test from a settled proposal, a `boundary`, `what_it_is`, or
+  a `cut_or_broken` why that a settled proposal already commits to fixing: a committed
+  direction is designed, not relitigated. An all-settled intent's agenda is empty.
 - Reviewing an intent that does not exist, does not validate, or does not pass the distill
   gate (above): stop and emit the gaps.
 - Witnessing its own predictions. The review stakes them; sd-discover's verdicts score
