@@ -35,6 +35,13 @@ pub(crate) enum ReplacementError {
     /// The facts carry issue numbers the target has no place for.
     #[error("the rewrite would drop {0} issue number(s) the target does not carry")]
     IssueNumbersNotCarried(usize),
+
+    /// The original `tool_input` is an object with no `command` field (an
+    /// Agent, Edit, or Write call). Inserting one would leave the fields the
+    /// tool actually runs on untouched, and the adapter's `allow` would then
+    /// grant the original call outright.
+    #[error("the tool input has no command field to replace")]
+    NoCommandField,
 }
 
 /// Builds the replacement `tool_input` for a rewrite: the target's command
@@ -62,6 +69,9 @@ pub(crate) fn build_replacement(
     }
 
     let mut patched: Map<String, Value> = match original {
+        Value::Object(map) if !map.contains_key("command") => {
+            return Err(ReplacementError::NoCommandField);
+        }
         Value::Object(map) => map.clone(),
         _ => Map::new(),
     };
@@ -157,6 +167,18 @@ mod tests {
         let err = build_replacement(&target(""), &Facts::default(), &original)
             .expect_err("an empty target must not become an empty command");
         assert_eq!(err, ReplacementError::EmptyTarget);
+    }
+
+    #[test]
+    fn a_tool_input_without_a_command_is_refused() {
+        let original = serde_json::json!({"subagent_type": "Explore", "prompt": "map it"});
+        let err = build_replacement(
+            &target("legion:legion-explore"),
+            &Facts::default(),
+            &original,
+        )
+        .expect_err("a rewrite must not invent a command field");
+        assert_eq!(err, ReplacementError::NoCommandField);
     }
 
     #[test]

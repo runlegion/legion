@@ -23,7 +23,9 @@
 //!
 //! - allow: no `permissionDecision`, so the harness's own rules decide and
 //!   an allow never grants a permission the harness would not (FR-CMD-002);
-//!   route's note, if any, rides along as `additionalContext`.
+//!   route's note, if any, rides along as `additionalContext`. The FR-CMD-016
+//!   no-match default carries no note, so the adapter supplies one: a default
+//!   is always visible to the agent.
 //! - rewrite: `allow` plus `updatedInput` built by
 //!   `crate::cmd::replacement`, with what the command became and why in
 //!   `additionalContext` (FR-CMD-003).
@@ -103,6 +105,12 @@ const LOOKUP_LIMIT: usize = 5;
 /// The response written when the adapter cannot serialize its own response.
 /// A fixed string, not built with `serde_json`, so it cannot itself fail.
 const FALLBACK_DENY_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd could not serialize its response -- instead: legion cmd-check -- <command>"}}"#;
+
+/// What the agent reads when no policy rule governed its command and the
+/// FR-CMD-016 default allowed it. Without it the default allow would be
+/// byte-identical to the hook not running, and the default must be visible.
+const DEFAULT_ALLOW_NOTE: &str =
+    "legion-cmd: no policy rule governs this command; it runs under the default allow";
 
 /// The PreToolUse payload fields the adapter acts on. Unknown fields are
 /// ignored, not rejected: the harness may add fields, and `session_id` and
@@ -422,7 +430,10 @@ fn is_safe_repo_name(name: &str) -> bool {
 /// Applies route's Decision to the hook response (FR-CMD-017).
 fn apply(routed: &Routed, payload: &HookPayload) -> Value {
     match &routed.decision {
-        Decision::Allow { note } => pass_through(note.as_deref()),
+        Decision::Allow { note } => match (&routed.deciding, note.as_deref()) {
+            (Deciding::Default, None | Some("")) => pass_through(Some(DEFAULT_ALLOW_NOTE)),
+            (_, note) => pass_through(note),
+        },
         Decision::Proxy { .. } => pass_through(None),
         Decision::Rewrite { target, reason } => {
             match build_replacement(target, &routed.facts, &payload.tool_input) {
@@ -791,13 +802,59 @@ mod tests {
     // -- each Decision applied (FR-CMD-017) -----------------------------------
 
     #[test]
-    fn an_unmanaged_command_passes_through_with_no_permission_decision() {
-        // FR-CMD-002 / FR-CMD-016: the harness's own rules decide.
+    fn an_unmanaged_command_passes_through_and_the_default_is_surfaced() {
+        // FR-CMD-002: the harness's own rules decide the permission.
+        // FR-CMD-016: the default allow still reaches the agent, so it is
+        // never indistinguishable from the hook not running.
         let response = respond_stub(&payload("echo hi"), POLICY);
         let out = output(&response);
         assert_eq!(out["hookEventName"], "PreToolUse");
         assert!(out.get("permissionDecision").is_none());
         assert!(out.get("updatedInput").is_none());
+        assert_eq!(out["additionalContext"], DEFAULT_ALLOW_NOTE);
+    }
+
+    #[test]
+    fn a_rule_allow_without_a_note_adds_no_default_note() {
+        // Only the FR-CMD-016 default is labelled as one; a matched rule's
+        // allow is the rule's decision, not a default.
+        let routed = Routed {
+            decision: Decision::Allow { note: None },
+            facts: Facts::default(),
+            deciding: Deciding::Rule {
+                id: "ls".to_string(),
+                needs_operator: false,
+            },
+        };
+        let response = apply(&routed, &parsed_payload("ls"));
+        assert!(output(&response).get("additionalContext").is_none());
+    }
+
+    #[test]
+    fn a_rewrite_of_a_tool_with_no_command_field_denies() {
+        // An Agent/Edit/Write rewrite has no `command` to replace. Patching
+        // one in would explicitly allow the untouched original call, a
+        // permission the harness would not grant; it denies instead.
+        let routed = Routed {
+            decision: Decision::Rewrite {
+                target: ManagedTarget::new("legion:legion-explore"),
+                reason: "use the legion explorer".to_string(),
+            },
+            facts: Facts::default(),
+            deciding: Deciding::Rule {
+                id: "agent-explore".to_string(),
+                needs_operator: false,
+            },
+        };
+        let payload: HookPayload = serde_json::from_value(json!({
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "Explore", "prompt": "map it"},
+            "cwd": REPO_CWD
+        }))
+        .expect("valid payload");
+        let response = apply(&routed, &payload);
+        assert_denied(&response);
+        assert!(reason(&response).contains("replacement:"));
     }
 
     #[test]
