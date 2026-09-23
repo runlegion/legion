@@ -7,11 +7,14 @@
 //! hooks are accounted for as cases, not transcribed as rules: a row records
 //! what the hook does today (`hook_behavior`) beside what route does against
 //! the SHIPPED `plugin/legion-cmd/policy.json` (`route`), and `agrees` says
-//! whether the two land on the same Decision arm. This test asserts the
-//! `route` column against route's actual Decision, so a row can never drift
-//! from reality while claiming a decision route no longer makes; and it
-//! asserts the row is internally honest: `agrees` cannot be true when the arms
-//! differ, and every disagreement carries a note for the operator.
+//! whether the agent sees the same thing from both: the same Decision arm,
+//! and on the allow arm the same presence of text (a silent hook matches only
+//! a route allow with no note, an injecting hook only one with a note). This
+//! test asserts the `route` column against route's actual Decision, so a row
+//! can never drift from reality while claiming a decision route no longer
+//! makes; and it asserts the row is internally honest: `agrees` cannot be true
+//! when the arms or the allow text differ, and every disagreement carries a
+//! note for the operator.
 //!
 //! Row shape (the Bash-hook issue's, plus optional expectations):
 //!
@@ -317,6 +320,25 @@ fn every_hook_case_matches_routes_actual_decision() {
                 },
             ) => {
                 let note = note.as_deref().unwrap_or("");
+                // On the allow arm, what the agent reads is part of the
+                // decision: a silent hook agrees only with a silent route,
+                // and an injecting hook only with a route that says
+                // something. Anything else is a note-content disagreement
+                // and must be listed for the operator.
+                let route_speaks = !note.is_empty();
+                let hook_speaks = case.hook_behavior == "inject";
+                if case.agrees && route_speaks != hook_speaks {
+                    failures.push(format!(
+                        "{id}: agrees is true, but the hook is {} and route's allow {} -- \
+                         mark it a disagreement of note content",
+                        if hook_speaks { "injecting" } else { "silent" },
+                        if route_speaks {
+                            "carries a note"
+                        } else {
+                            "carries none"
+                        }
+                    ));
+                }
                 if let Some(want) = note_contains
                     && !note.contains(want.as_str())
                 {

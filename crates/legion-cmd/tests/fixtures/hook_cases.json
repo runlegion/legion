@@ -345,6 +345,16 @@
     "agrees": false,
     "note": "coverage gate, as for every hook. DISAGREEMENT: hook allow, route deny."
   },
+  {
+    "hook": "pre-read-sym.sh",
+    "case": "read-missing-file-path",
+    "tool": "Read",
+    "input": { "limit": 50 },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook exits silently when file_path is empty (pre-read-sym.sh:49); route's first Read rule reads file_path and cannot resolve, which is the FR-CMD-016 deny for an unresolvable managed rule. DISAGREEMENT: hook allow, route deny (the harness rejects a Read without file_path before either runs)."
+  },
 
   {
     "hook": "no-local-memory.sh",
@@ -586,8 +596,8 @@
     "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
     "hook_behavior": "allow",
     "route": "allow",
-    "agrees": true,
-    "note": "same arm: the hook withholds its nudge in a repo legion does not cover, while route carries no coverage predicate and still attaches the note. A note the agent may not be able to act on, never a refusal."
+    "agrees": false,
+    "note": "same arm: the hook withholds its nudge in a repo legion does not cover, while route carries no coverage predicate and still attaches the note. A note the agent may not be able to act on, never a refusal. DISAGREEMENT of note content on the same arm: the hook is silent, route allows with its sym note."
   },
   {
     "hook": "pre-script-search.sh",
@@ -596,8 +606,8 @@
     "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
     "hook_behavior": "allow",
     "route": "allow",
-    "agrees": true,
-    "note": "same arm: the hook refuses to point at sym in a repo with no index (advice the agent cannot take); route has no index gate and still notes. Recorded so the operator can see the note fires unconditionally."
+    "agrees": false,
+    "note": "same arm: the hook refuses to point at sym in a repo with no index (advice the agent cannot take); route has no index gate and still notes. Recorded so the operator can see the note fires unconditionally. DISAGREEMENT of note content on the same arm: the hook is silent, route allows with its sym note."
   },
   {
     "hook": "pre-script-search.sh",
@@ -606,8 +616,18 @@
     "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
     "hook_behavior": "allow",
     "route": "allow",
-    "agrees": true,
-    "note": "LEGION_SKIP_SCRIPT_SEARCH=1 silences the hook; route still notes. Same arm."
+    "agrees": false,
+    "note": "LEGION_SKIP_SCRIPT_SEARCH=1 silences the hook; route still notes. Same arm. DISAGREEMENT of note content on the same arm: the hook is silent, route allows with its sym note."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "write-script-missing-content",
+    "tool": "Write",
+    "input": { "file_path": "/repo/search.py" },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "with no content the hook has no text to classify and stays silent; route's script-shape Write rules read content and cannot resolve, which is the FR-CMD-016 deny. DISAGREEMENT: hook allow, route deny (the harness rejects a Write without content before either runs)."
   },
 
   {
@@ -768,8 +788,8 @@
     "context": { "recall": "empty" },
     "hook_behavior": "allow",
     "route": "allow",
-    "agrees": true,
-    "note": "recall ran and found nothing: the hook emits nothing; route allows with its note. Same arm."
+    "agrees": false,
+    "note": "recall ran and found nothing: the hook emits nothing; route allows with its note. Same arm. DISAGREEMENT of note content on the same arm: the hook is silent, and route's static note tells the agent to read hits that recall did not find."
   },
   {
     "hook": "recall-first.sh",
@@ -789,8 +809,8 @@
     "context": { "recall": "empty" },
     "hook_behavior": "allow",
     "route": "allow",
-    "agrees": true,
-    "note": "a prompt under four characters is skipped by the hook; route has no length predicate and still requires recall, which ran and found nothing here. Same arm."
+    "agrees": false,
+    "note": "a prompt under four characters is skipped by the hook; route has no length predicate and still requires recall, which ran and found nothing here. Same arm. DISAGREEMENT of note content on the same arm: the hook is silent, and route's static note tells the agent to read hits that recall did not find."
   },
   {
     "hook": "recall-first.sh",
@@ -800,8 +820,8 @@
     "context": { "recall": "found" },
     "hook_behavior": "allow",
     "route": "allow",
-    "agrees": true,
-    "note": "coverage gate: the hook injects nothing outside covered repos; route allows with its note once recall is in Context. Same arm."
+    "agrees": false,
+    "note": "coverage gate: the hook injects nothing outside covered repos; route allows with its note once recall is in Context. Same arm. DISAGREEMENT of note content on the same arm: the hook is silent, route allows with its read-the-hits note."
   },
   {
     "hook": "recall-first.sh",
