@@ -78,7 +78,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::cmd::config::RouteSettings;
-use crate::cmd::replacement::build_replacement;
+use crate::cmd::replacement::{build_replacement, rewritable_field};
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
 use crate::timerange::TimeRange;
@@ -133,6 +133,18 @@ impl HookPayload {
             .get("command")
             .and_then(Value::as_str)
             .filter(|command| !command.is_empty())
+    }
+
+    /// The value a rewrite replaces -- the Bash command, or an Agent/Task
+    /// spawn's `subagent_type` -- for the message that tells the agent what
+    /// its call became. Reads the field `rewritable_field` names, so the
+    /// message and the patch cannot name different fields.
+    fn rewritten_value(&self) -> Option<&str> {
+        let field: &str = rewritable_field(&self.tool_input)?;
+        self.tool_input
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
     }
 }
 
@@ -437,7 +449,7 @@ fn apply(routed: &Routed, payload: &HookPayload) -> Value {
         Decision::Proxy { .. } => pass_through(None),
         Decision::Rewrite { target, reason } => {
             match build_replacement(target, &routed.facts, &payload.tool_input) {
-                Ok(updated) => rewrite_response(payload.command(), target, reason, updated),
+                Ok(updated) => rewrite_response(payload.rewritten_value(), target, reason, updated),
                 Err(e) => deny_for_error(&AdapterError::Replacement(e.to_string()), Some(payload)),
             }
         }
@@ -831,10 +843,37 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_of_a_tool_with_no_command_field_denies() {
-        // An Agent/Edit/Write rewrite has no `command` to replace. Patching
-        // one in would explicitly allow the untouched original call, a
-        // permission the harness would not grant; it denies instead.
+    fn a_rewrite_of_a_tool_with_no_rewritable_field_denies() {
+        // An Edit/Write rewrite has no `command` or `subagent_type` to
+        // replace. Patching one in would explicitly allow the untouched
+        // original call, a permission the harness would not grant; it denies.
+        let routed = Routed {
+            decision: Decision::Rewrite {
+                target: ManagedTarget::new("legion issue list"),
+                reason: "a hand-built rewrite on an Edit".to_string(),
+            },
+            facts: Facts::default(),
+            deciding: Deciding::Rule {
+                id: "edit-rewrite".to_string(),
+                needs_operator: false,
+            },
+        };
+        let payload: HookPayload = serde_json::from_value(json!({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "a.rs", "old_string": "x", "new_string": "y"},
+            "cwd": REPO_CWD
+        }))
+        .expect("valid payload");
+        let response = apply(&routed, &payload);
+        assert_denied(&response);
+        assert!(reason(&response).contains("replacement:"));
+    }
+
+    #[test]
+    fn an_explore_spawn_is_rewritten_to_the_legion_explorer() {
+        // #1233: the no-harness-explore.sh case through the adapter -- allow,
+        // updatedInput with only subagent_type changed, and a message naming
+        // what the spawn was and what it became.
         let routed = Routed {
             decision: Decision::Rewrite {
                 target: ManagedTarget::new("legion:legion-explore"),
@@ -842,7 +881,7 @@ mod tests {
             },
             facts: Facts::default(),
             deciding: Deciding::Rule {
-                id: "agent-explore".to_string(),
+                id: "agent-explore-to-legion".to_string(),
                 needs_operator: false,
             },
         };
@@ -852,9 +891,18 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let response = apply(&routed, &payload);
-        assert_denied(&response);
-        assert!(reason(&response).contains("replacement:"));
+        let out = apply(&routed, &payload)["hookSpecificOutput"].clone();
+        assert_eq!(out["permissionDecision"], "allow");
+        assert_eq!(
+            out["updatedInput"],
+            json!({"subagent_type": "legion:legion-explore", "prompt": "map it"})
+        );
+        let context = out["additionalContext"].as_str().expect("context");
+        assert!(context.contains("`Explore`"), "got: {context}");
+        assert!(
+            context.contains("`legion:legion-explore`"),
+            "got: {context}"
+        );
     }
 
     #[test]

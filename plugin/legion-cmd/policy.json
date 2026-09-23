@@ -5,6 +5,11 @@
       "id": "find-content",
       "sym_command": "legion sym etc find-content",
       "interpreter_patterns": ["rglob", "read_text"]
+    },
+    {
+      "id": "find-file",
+      "sym_command": "legion sym etc find-file",
+      "interpreter_patterns": []
     }
   ],
   "wrappers": [
@@ -96,6 +101,263 @@
           ]
         }
       }
+    },
+    "Grep": {
+      "rules": [
+        { "id": "grep-tool-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }
+      ]
+    },
+    "Glob": {
+      "rules": [
+        { "id": "glob-tool-to-sym", "outcome": { "kind": "sym", "job": "find-file" } }
+      ]
+    },
+    "Read": {
+      "rules": [
+        {
+          "id": "read-source-unbounded",
+          "predicates": [
+            {
+              "kind": "field-ends-with",
+              "field": "file_path",
+              "any_of": [".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".rb", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".cs"]
+            },
+            { "kind": "field-absent", "field": "limit" }
+          ],
+          "outcome": {
+            "kind": "deny",
+            "reason": "an unbounded Read of a source file bills every line as cache_read, when one symbol's signature and docstring is usually the question",
+            "instead": "legion sym hover <Symbol> (or legion sym def <Symbol>), or Read the file with limit=200"
+          }
+        },
+        {
+          "id": "read-source-oversized-limit",
+          "predicates": [
+            {
+              "kind": "field-ends-with",
+              "field": "file_path",
+              "any_of": [".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".rb", ".php", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".cs"]
+            },
+            { "kind": "field-greater-than", "field": "limit", "value": 500 }
+          ],
+          "outcome": {
+            "kind": "deny",
+            "reason": "a Read of a source file with a limit above 500 lines is unbounded for the cost argument: it bills every line as cache_read when one symbol's signature is usually the question",
+            "instead": "legion sym hover <Symbol> (or legion sym def <Symbol>), or Read the file with limit=200"
+          }
+        }
+      ]
+    },
+    "Write": {
+      "rules": [
+        {
+          "id": "write-auto-memory",
+          "predicates": [
+            { "kind": "field-contains", "field": "file_path", "any_of": [".claude/projects/"] },
+            { "kind": "field-contains", "field": "file_path", "any_of": ["/memory/"] }
+          ],
+          "outcome": {
+            "kind": "deny",
+            "reason": "this path is in the Claude Code auto-memory directory, which no other session, agent or repo can read; legion is the memory layer",
+            "instead": "legion reflect --repo <repo> --text '<the note>' (project-wide guidance belongs in CLAUDE.md)"
+          }
+        },
+        {
+          "id": "write-script-tree",
+          "predicates": [
+            {
+              "kind": "field-contains",
+              "field": "content",
+              "any_of": ["os.walk", "os.scandir", "os.listdir", "readdirSync", "fs.readdir", ".rglob(", "walkdir"]
+            }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a directory walk in a script you are writing; `legion sym tree --repo <repo>` returns it directly, with no file to write and no walk to run. Not blocking you: a script that walks a tree may also do real work, and if so carry on."
+          }
+        },
+        {
+          "id": "write-script-file",
+          "predicates": [
+            {
+              "kind": "field-contains",
+              "field": "content",
+              "any_of": ["fnmatch", "glob.glob", ".glob(", ".endswith(", "path.match"]
+            }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a filename or glob match in a script you are writing; `legion sym etc find-file '<name-or-glob>' --repo <repo>` returns it directly. Not blocking you: if the match is incidental to real work, carry on."
+          }
+        },
+        {
+          "id": "write-script-content",
+          "predicates": [
+            {
+              "kind": "field-contains",
+              "field": "content",
+              "any_of": ["re.search", "re.findall", "re.compile", ".includes("]
+            }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a text search inside files in a script you are writing; `legion sym etc find-content '<pattern>' --repo <repo>` returns it directly. Not blocking you: if the search is incidental to real work, carry on."
+          }
+        },
+        {
+          "id": "write-script-subprocess-grep",
+          "predicates": [
+            { "kind": "field-contains", "field": "content", "any_of": ["subprocess"] },
+            { "kind": "field-contains", "field": "content", "any_of": ["grep"] }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a grep shelled out from a script you are writing; `legion sym etc find-content '<pattern>' --repo <repo>` returns it directly. Not blocking you: if the search is incidental to real work, carry on."
+          }
+        }
+      ]
+    },
+    "Edit": {
+      "rules": [
+        {
+          "id": "edit-auto-memory",
+          "predicates": [
+            { "kind": "field-contains", "field": "file_path", "any_of": [".claude/projects/"] },
+            { "kind": "field-contains", "field": "file_path", "any_of": ["/memory/"] }
+          ],
+          "outcome": {
+            "kind": "deny",
+            "reason": "this path is in the Claude Code auto-memory directory, which no other session, agent or repo can read; legion is the memory layer",
+            "instead": "legion reflect --repo <repo> --text '<the note>' (project-wide guidance belongs in CLAUDE.md)"
+          }
+        },
+        {
+          "id": "edit-script-tree",
+          "predicates": [
+            {
+              "kind": "field-contains",
+              "field": "new_string",
+              "any_of": ["os.walk", "os.scandir", "os.listdir", "readdirSync", "fs.readdir", ".rglob(", "walkdir"]
+            }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a directory walk in a script you are editing; `legion sym tree --repo <repo>` returns it directly, with no file to write and no walk to run. Not blocking you: a script that walks a tree may also do real work, and if so carry on."
+          }
+        },
+        {
+          "id": "edit-script-file",
+          "predicates": [
+            {
+              "kind": "field-contains",
+              "field": "new_string",
+              "any_of": ["fnmatch", "glob.glob", ".glob(", ".endswith(", "path.match"]
+            }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a filename or glob match in a script you are editing; `legion sym etc find-file '<name-or-glob>' --repo <repo>` returns it directly. Not blocking you: if the match is incidental to real work, carry on."
+          }
+        },
+        {
+          "id": "edit-script-content",
+          "predicates": [
+            {
+              "kind": "field-contains",
+              "field": "new_string",
+              "any_of": ["re.search", "re.findall", "re.compile", ".includes("]
+            }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a text search inside files in a script you are editing; `legion sym etc find-content '<pattern>' --repo <repo>` returns it directly. Not blocking you: if the search is incidental to real work, carry on."
+          }
+        },
+        {
+          "id": "edit-script-subprocess-grep",
+          "predicates": [
+            { "kind": "field-contains", "field": "new_string", "any_of": ["subprocess"] },
+            { "kind": "field-contains", "field": "new_string", "any_of": ["grep"] }
+          ],
+          "outcome": {
+            "kind": "allow",
+            "note": "that looks like a grep shelled out from a script you are editing; `legion sym etc find-content '<pattern>' --repo <repo>` returns it directly. Not blocking you: if the search is incidental to real work, carry on."
+          }
+        }
+      ]
+    },
+    "MultiEdit": {
+      "rules": [
+        {
+          "id": "multiedit-auto-memory",
+          "predicates": [
+            { "kind": "field-contains", "field": "file_path", "any_of": [".claude/projects/"] },
+            { "kind": "field-contains", "field": "file_path", "any_of": ["/memory/"] }
+          ],
+          "outcome": {
+            "kind": "deny",
+            "reason": "this path is in the Claude Code auto-memory directory, which no other session, agent or repo can read; legion is the memory layer",
+            "instead": "legion reflect --repo <repo> --text '<the note>' (project-wide guidance belongs in CLAUDE.md)"
+          }
+        }
+      ]
+    },
+    "Agent": {
+      "rules": [
+        {
+          "id": "agent-untyped",
+          "predicates": [{ "kind": "field-absent", "field": "subagent_type" }],
+          "outcome": { "kind": "allow" }
+        },
+        {
+          "id": "agent-explore-to-legion",
+          "predicates": [
+            { "kind": "field-equals", "field": "subagent_type", "any_of": ["explore"], "ignore_case": true }
+          ],
+          "outcome": {
+            "kind": "rewrite",
+            "target": "legion:legion-explore",
+            "reason": "the built-in Explore agent greps and reads raw files; legion:legion-explore orients through sym and recall and returns conclusions with file:line evidence, so read its result as a cited answer rather than a listing"
+          }
+        }
+      ]
+    },
+    "Task": {
+      "rules": [
+        {
+          "id": "task-untyped",
+          "predicates": [{ "kind": "field-absent", "field": "subagent_type" }],
+          "outcome": { "kind": "allow" }
+        },
+        {
+          "id": "task-explore-to-legion",
+          "predicates": [
+            { "kind": "field-equals", "field": "subagent_type", "any_of": ["explore"], "ignore_case": true }
+          ],
+          "outcome": {
+            "kind": "rewrite",
+            "target": "legion:legion-explore",
+            "reason": "the built-in Explore agent greps and reads raw files; legion:legion-explore orients through sym and recall and returns conclusions with file:line evidence, so read its result as a cited answer rather than a listing"
+          }
+        }
+      ]
+    },
+    "WebFetch": {
+      "rules": [
+        {
+          "id": "webfetch-recall-first",
+          "requires_recall": true,
+          "outcome": {
+            "kind": "allow",
+            "note": "recall ran before this fetch: read its hits first, and skip the fetch if they already answer the question. Consider whether the reflection explains WHY before you search the web for WHAT."
+          }
+        }
+      ]
+    },
+    "WebSearch": {
+      "rules": [
+        { "id": "websearch-recall-clamped", "outcome": { "kind": "allow" } }
+      ]
     }
   }
 }

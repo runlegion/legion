@@ -14,9 +14,10 @@
 //! adapter's job.
 
 use crate::decision::ToolCall;
-use crate::evaluate::{self, select_bash_rule, select_fields_rule};
+use crate::evaluate::{self, FieldsSelection, select_bash_rule, select_fields_rule};
 use crate::policy::{Policy, Rule, ToolKind};
-use crate::route::{bash_command, collect_strings, expand_command};
+use crate::route::{bash_command, expand_command};
+use serde_json::Value;
 
 /// The lookups the matched rules require, each with the query text to run it
 /// with. `None` means no matched rule requires that lookup. Mirrors the two
@@ -85,11 +86,22 @@ fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, Stri
     let Some(kind) = ToolKind::ALL.into_iter().find(|k| k.as_str() == call.tool) else {
         return Vec::new();
     };
+    let FieldsSelection::Rule(rule) = select_fields_rule(policy, kind, &call.input) else {
+        return Vec::new();
+    };
     let mut values: Vec<String> = Vec::new();
     collect_strings(&call.input, &mut values);
-    match select_fields_rule(policy, kind, &values) {
-        Some(rule) => vec![(rule, values.join(" "))],
-        None => Vec::new(),
+    vec![(rule, values.join(" "))]
+}
+
+/// Every string value in a Fields tool's input, depth-first: the text a
+/// matched Fields rule's lookup query is built from.
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
+        Value::Object(map) => map.values().for_each(|v| collect_strings(v, out)),
+        _ => {}
     }
 }
 
@@ -201,7 +213,7 @@ mod tests {
     fn a_fields_rule_requiring_a_lookup_uses_the_input_values_as_its_query() {
         let p = policy(
             r#"{"tools": {"Edit": {"rules": [
-                {"id": "edit-env", "predicates": [{"kind": "arg-present", "arg": ".env"}],
+                {"id": "edit-env", "predicates": [{"kind": "field-equals", "field": "file_path", "any_of": [".env"]}],
                  "requires_consult": true,
                  "outcome": {"kind": "deny", "reason": "secrets", "instead": "leave it"}}
             ]}}}"#,

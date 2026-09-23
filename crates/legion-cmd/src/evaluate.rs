@@ -11,6 +11,8 @@
 //! sends it to sym ... never allowed or proxied"), and only when no part is a
 //! sym job do the remaining parts fold by the strictest-Decision order.
 
+use serde_json::Value;
+
 use crate::decision::{Deciding, Decision, ProxyReason};
 use crate::policy::{Family, Policy, Predicate, Rule, RuleOutcome, ToolKind, ToolRules};
 use crate::splitter::{Unreduced, UnreducedReason};
@@ -84,33 +86,69 @@ pub(crate) fn select_bash_rule<'a>(
     Some((verb, rule))
 }
 
-/// The first rule under `kind` whose predicates hold over `values`, if any.
+/// Which rule governs one Fields-tool call, walking the kind's rules in order
+/// against the call's own `tool_input`.
+pub(crate) enum FieldsSelection<'a> {
+    /// A rule's field predicates hold; its outcome decides the call.
+    Rule(&'a Rule),
+    /// A rule reads a field the call does not carry as a usable value. The
+    /// walk stops here: the managed rule cannot resolve (FR-CMD-016).
+    Unresolvable { rule: &'a Rule, field: String },
+    /// No rule under this kind applies to the call.
+    NoMatch,
+}
+
 /// The one rule-selection step for Fields tools, shared by [`decide_fields`]
-/// and the lookup pre-pass.
+/// and the lookup pre-pass ([`crate::lookups`]) so the two cannot disagree
+/// about which rule applies.
 pub(crate) fn select_fields_rule<'a>(
     policy: &'a Policy,
     kind: ToolKind,
-    values: &[String],
-) -> Option<&'a Rule> {
-    let ToolRules::Fields { rules } = policy.tools.get(&kind)? else {
-        return None;
+    input: &Value,
+) -> FieldsSelection<'a> {
+    let Some(ToolRules::Fields { rules }) = policy.tools.get(&kind) else {
+        return FieldsSelection::NoMatch;
     };
-    rules
-        .iter()
-        .find(|rule| predicates_hold(&rule.predicates, values))
+    for rule in rules {
+        match field_predicates_hold(&rule.predicates, input) {
+            FieldMatch::Holds => return FieldsSelection::Rule(rule),
+            FieldMatch::Fails => {}
+            FieldMatch::Unresolvable { field } => {
+                return FieldsSelection::Unresolvable { rule, field };
+            }
+        }
+    }
+    FieldsSelection::NoMatch
 }
 
-/// Decides one Fields-tool invocation (Edit/Write/Read/Grep/Agent), matching
-/// each rule's predicates against the tool call's string field values.
-pub fn decide_fields(
-    policy: &Policy,
-    kind: ToolKind,
-    values: &[String],
-    ctx: &Context,
-) -> PartOutcome {
-    match select_fields_rule(policy, kind, values) {
-        Some(rule) => resolve_rule(policy, rule, ctx, None),
-        None => allow_default(),
+/// Decides one Fields-tool call (every tool kind but Bash), matching each
+/// rule's field predicates against the call's own `tool_input` in order
+/// (FR-CMD-011, FR-CMD-016).
+///
+/// No rule matches -> allow (nothing managed applies to this call). A rule
+/// reads a field the call does not carry as a usable value -> deny, naming the
+/// rule and the field: the managed rule cannot resolve, and FR-CMD-016 fails
+/// closed rather than guessing. A rule matches -> its outcome, through the
+/// same lookup gates as a Bash rule.
+pub fn decide_fields(policy: &Policy, kind: ToolKind, input: &Value, ctx: &Context) -> PartOutcome {
+    match select_fields_rule(policy, kind, input) {
+        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None),
+        FieldsSelection::Unresolvable { rule, field } => {
+            let tool = kind.as_str();
+            rule_outcome(
+                rule,
+                deny(
+                    format!(
+                        "this {tool} call carries no usable '{field}' field, which rule '{}' reads",
+                        rule.id
+                    ),
+                    format!("retry the {tool} call with '{field}' set"),
+                ),
+                false,
+                None,
+            )
+        }
+        FieldsSelection::NoMatch => allow_default(),
     }
 }
 
@@ -363,7 +401,94 @@ fn predicates_hold(predicates: &[Predicate], args: &[String]) -> bool {
     predicates.iter().all(|predicate| match predicate {
         Predicate::ArgPresent(word) => args.iter().any(|a| dequote_outer(a) == word),
         Predicate::ArgAbsent(word) => !args.iter().any(|a| dequote_outer(a) == word),
+        // A field predicate has no Bash argument to resolve against, and the
+        // parser rejects one under Bash; should one ever arrive, its rule
+        // never fires rather than firing on nothing.
+        Predicate::FieldPresent { .. }
+        | Predicate::FieldAbsent { .. }
+        | Predicate::FieldEquals { .. }
+        | Predicate::FieldContains { .. }
+        | Predicate::FieldEndsWith { .. }
+        | Predicate::FieldGreaterThan { .. } => false,
     })
+}
+
+/// How a Fields rule's predicates resolved against one call.
+#[derive(Debug, PartialEq, Eq)]
+enum FieldMatch {
+    Holds,
+    Fails,
+    /// A predicate read `field`, and the call carries no such field, carries
+    /// it as null, or carries it with a JSON type the predicate cannot read.
+    Unresolvable {
+        field: String,
+    },
+}
+
+/// All predicates in order; the first that fails or cannot resolve decides.
+fn field_predicates_hold(predicates: &[Predicate], input: &Value) -> FieldMatch {
+    for predicate in predicates {
+        let result = field_predicate_holds(predicate, input);
+        if result != FieldMatch::Holds {
+            return result;
+        }
+    }
+    FieldMatch::Holds
+}
+
+fn field_predicate_holds(predicate: &Predicate, input: &Value) -> FieldMatch {
+    // A top-level key of `tool_input`; an explicit null is treated as absent,
+    // which is how the harness sends an omitted optional field.
+    let value_of = |field: &str| input.get(field).filter(|v| !v.is_null());
+    let string_of = |field: &str, test: &dyn Fn(&str) -> bool| match value_of(field) {
+        Some(Value::String(s)) => held(test(s)),
+        _ => FieldMatch::Unresolvable {
+            field: field.to_string(),
+        },
+    };
+
+    match predicate {
+        // Parse-time scoping keeps arg predicates out of Fields rules; a rule
+        // carrying one would otherwise fire on nothing.
+        Predicate::ArgPresent(_) | Predicate::ArgAbsent(_) => FieldMatch::Fails,
+        Predicate::FieldPresent { field } => held(value_of(field).is_some()),
+        Predicate::FieldAbsent { field } => held(value_of(field).is_none()),
+        Predicate::FieldEquals {
+            field,
+            any_of,
+            ignore_case,
+        } => string_of(field, &|s| {
+            any_of.iter().any(|want| {
+                if *ignore_case {
+                    s.eq_ignore_ascii_case(want)
+                } else {
+                    s == want
+                }
+            })
+        }),
+        Predicate::FieldContains { field, any_of } => string_of(field, &|s| {
+            any_of.iter().any(|want| s.contains(want.as_str()))
+        }),
+        Predicate::FieldEndsWith { field, any_of } => string_of(field, &|s| {
+            any_of.iter().any(|want| s.ends_with(want.as_str()))
+        }),
+        Predicate::FieldGreaterThan { field, value } => {
+            match value_of(field).and_then(Value::as_i64) {
+                Some(n) => held(n > *value),
+                None => FieldMatch::Unresolvable {
+                    field: field.clone(),
+                },
+            }
+        }
+    }
+}
+
+fn held(holds: bool) -> FieldMatch {
+    if holds {
+        FieldMatch::Holds
+    } else {
+        FieldMatch::Fails
+    }
 }
 
 /// The strictest-Decision order (FR-CMD-007): deny, ask, proxy, rewrite,
@@ -708,6 +833,249 @@ mod tests {
     #[test]
     fn combine_of_no_parts_allows() {
         assert_eq!(combine(vec![]).decision, Decision::Allow { note: None });
+    }
+
+    // -- Fields tools -----------------------------------------------------
+
+    fn json(text: &str) -> Value {
+        serde_json::from_str(text).expect("valid json")
+    }
+
+    fn deny_reason(outcome: &PartOutcome) -> &str {
+        match &outcome.decision {
+            Decision::Deny(details) => details.reason(),
+            other => panic!("expected deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fields_rule_matches_on_its_named_field_case_insensitively() {
+        let p = policy(
+            r#"{"tools": {"Agent": {"rules": [
+            {"id": "explore", "predicates": [{"kind": "field-equals", "field": "subagent_type", "any_of": ["explore"], "ignore_case": true}],
+             "outcome": {"kind": "rewrite", "target": "legion:legion-explore", "reason": "r"}}
+        ]}}}"#,
+        );
+        let ctx = Context::default();
+        for spelling in ["Explore", "explore", "EXPLORE"] {
+            let input = json(&format!(
+                r#"{{"subagent_type": "{spelling}", "prompt": "p"}}"#
+            ));
+            let outcome = decide_fields(&p, ToolKind::Agent, &input, &ctx);
+            assert!(
+                matches!(outcome.decision, Decision::Rewrite { .. }),
+                "{spelling} must rewrite"
+            );
+            assert_eq!(
+                outcome.deciding,
+                Deciding::Rule {
+                    id: "explore".to_string(),
+                    needs_operator: false
+                }
+            );
+        }
+        // Exact match, not substring: the redirect target and a lookalike
+        // pass through to the allow default.
+        for other in [
+            "legion-explore",
+            "legion:legion-explore",
+            "code-explorer",
+            "Plan",
+        ] {
+            let input = json(&format!(r#"{{"subagent_type": "{other}"}}"#));
+            let outcome = decide_fields(&p, ToolKind::Agent, &input, &ctx);
+            assert_eq!(outcome.decision, Decision::Allow { note: None }, "{other}");
+            assert_eq!(outcome.deciding, Deciding::Default);
+        }
+    }
+
+    #[test]
+    fn a_fields_rule_reading_a_missing_field_denies_naming_the_field() {
+        // FR-CMD-016: the managed rule cannot resolve, so the call is denied
+        // rather than falling through to a later rule or the allow default.
+        let p = policy(
+            r#"{"tools": {"Write": {"rules": [
+            {"id": "memory", "predicates": [{"kind": "field-contains", "field": "file_path", "any_of": ["/memory/"]}],
+             "outcome": {"kind": "deny", "reason": "r", "instead": "i"}},
+            {"id": "anything", "outcome": {"kind": "allow"}}
+        ]}}}"#,
+        );
+        let outcome = decide_fields(
+            &p,
+            ToolKind::Write,
+            &json(r#"{"content": "hello"}"#),
+            &Context::default(),
+        );
+        assert!(deny_reason(&outcome).contains("'file_path'"));
+        assert!(deny_reason(&outcome).contains("'memory'"));
+        assert_eq!(
+            outcome.deciding,
+            Deciding::Rule {
+                id: "memory".to_string(),
+                needs_operator: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_null_field_is_absent_and_a_wrong_typed_field_is_unresolvable() {
+        let p = policy(
+            r#"{"tools": {"Read": {"rules": [
+            {"id": "big", "predicates": [{"kind": "field-greater-than", "field": "limit", "value": 500}],
+             "outcome": {"kind": "deny", "reason": "r", "instead": "i"}}
+        ]}}}"#,
+        );
+        let ctx = Context::default();
+        // null reads as absent -> unresolvable for a reading predicate.
+        let outcome = decide_fields(&p, ToolKind::Read, &json(r#"{"limit": null}"#), &ctx);
+        assert!(deny_reason(&outcome).contains("'limit'"));
+        // a string where an integer is read -> unresolvable too.
+        let outcome = decide_fields(&p, ToolKind::Read, &json(r#"{"limit": "600"}"#), &ctx);
+        assert!(deny_reason(&outcome).contains("'limit'"));
+        // an integer resolves: 600 > 500 denies by the rule's own outcome.
+        let outcome = decide_fields(&p, ToolKind::Read, &json(r#"{"limit": 600}"#), &ctx);
+        assert_eq!(deny_reason(&outcome), "r");
+        // 200 is not > 500 -> no match -> allow default.
+        let outcome = decide_fields(&p, ToolKind::Read, &json(r#"{"limit": 200}"#), &ctx);
+        assert_eq!(outcome.decision, Decision::Allow { note: None });
+    }
+
+    #[test]
+    fn a_presence_rule_ordered_first_lets_a_legitimately_missing_field_through() {
+        // The Read shape: no limit is the ordinary case and must reach its own
+        // rule (here: deny as unbounded) before any rule that reads `limit`
+        // would find it missing and deny for the wrong reason.
+        let p = policy(
+            r#"{"tools": {"Read": {"rules": [
+            {"id": "unbounded", "predicates": [
+                {"kind": "field-ends-with", "field": "file_path", "any_of": [".rs", ".py"]},
+                {"kind": "field-absent", "field": "limit"}],
+             "outcome": {"kind": "deny", "reason": "unbounded", "instead": "i"}},
+            {"id": "oversized", "predicates": [
+                {"kind": "field-ends-with", "field": "file_path", "any_of": [".rs", ".py"]},
+                {"kind": "field-greater-than", "field": "limit", "value": 500}],
+             "outcome": {"kind": "deny", "reason": "oversized", "instead": "i"}}
+        ]}}}"#,
+        );
+        let ctx = Context::default();
+        let unbounded = decide_fields(
+            &p,
+            ToolKind::Read,
+            &json(r#"{"file_path": "src/main.rs"}"#),
+            &ctx,
+        );
+        assert_eq!(deny_reason(&unbounded), "unbounded");
+        let oversized = decide_fields(
+            &p,
+            ToolKind::Read,
+            &json(r#"{"file_path": "src/main.rs", "limit": 2000}"#),
+            &ctx,
+        );
+        assert_eq!(deny_reason(&oversized), "oversized");
+        let bounded = decide_fields(
+            &p,
+            ToolKind::Read,
+            &json(r#"{"file_path": "src/main.rs", "limit": 200}"#),
+            &ctx,
+        );
+        assert_eq!(bounded.decision, Decision::Allow { note: None });
+        // Not a source file: neither rule's suffix predicate holds, and the
+        // absent `limit` is never read -> allow default.
+        let prose = decide_fields(
+            &p,
+            ToolKind::Read,
+            &json(r#"{"file_path": "README.md"}"#),
+            &ctx,
+        );
+        assert_eq!(prose.decision, Decision::Allow { note: None });
+    }
+
+    #[test]
+    fn field_contains_is_a_conjunction_across_predicates_and_a_disjunction_within() {
+        let p = policy(
+            r#"{"tools": {"Write": {"rules": [
+            {"id": "memory", "predicates": [
+                {"kind": "field-contains", "field": "file_path", "any_of": [".claude/projects/"]},
+                {"kind": "field-contains", "field": "file_path", "any_of": ["/memory/", "/MEMORY/"]}],
+             "outcome": {"kind": "deny", "reason": "r", "instead": "i"}}
+        ]}}}"#,
+        );
+        let ctx = Context::default();
+        let denied = decide_fields(
+            &p,
+            ToolKind::Write,
+            &json(r#"{"file_path": "/h/.claude/projects/x/memory/MEMORY.md", "content": "c"}"#),
+            &ctx,
+        );
+        assert!(matches!(denied.decision, Decision::Deny(_)));
+        // One of the two conjuncts missing -> the rule does not match.
+        let allowed = decide_fields(
+            &p,
+            ToolKind::Write,
+            &json(r#"{"file_path": "/repo/src/memory/notes.md", "content": "c"}"#),
+            &ctx,
+        );
+        assert_eq!(allowed.decision, Decision::Allow { note: None });
+    }
+
+    #[test]
+    fn a_fields_rule_routes_to_a_sym_job() {
+        let p = policy(
+            r#"{
+            "sym_jobs": [{"id": "find-file", "sym_command": "legion sym etc find-file", "interpreter_patterns": []}],
+            "tools": {"Glob": {"rules": [{"id": "glob", "outcome": {"kind": "sym", "job": "find-file"}}]}}
+        }"#,
+        );
+        let outcome = decide_fields(
+            &p,
+            ToolKind::Glob,
+            &json(r#"{"pattern": "**/*.rs"}"#),
+            &Context::default(),
+        );
+        assert!(outcome.is_sym);
+        match outcome.decision {
+            Decision::Deny(details) => assert_eq!(details.instead(), "legion sym etc find-file"),
+            other => panic!("expected deny naming sym, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fields_rule_requiring_recall_is_gated_like_a_bash_rule() {
+        let p = policy(
+            r#"{"tools": {"WebFetch": {"rules": [
+            {"id": "recall-first", "requires_recall": true, "outcome": {"kind": "allow", "note": "read the hits"}}
+        ]}}}"#,
+        );
+        let input = json(r#"{"url": "https://example.com", "prompt": "how does sync work"}"#);
+        assert!(matches!(
+            decide_fields(&p, ToolKind::WebFetch, &input, &Context::default()).decision,
+            Decision::Deny(_)
+        ));
+        let ctx = Context {
+            recall: Lookup::Empty,
+            ..Context::default()
+        };
+        assert_eq!(
+            decide_fields(&p, ToolKind::WebFetch, &input, &ctx).decision,
+            Decision::Allow {
+                note: Some("read the hits".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn a_fields_tool_with_no_rules_entry_allows() {
+        let p = policy(
+            r#"{"tools": {"Grep": {"rules": [{"id": "g", "outcome": {"kind": "allow"}}]}}}"#,
+        );
+        let outcome = decide_fields(
+            &p,
+            ToolKind::WebSearch,
+            &json(r#"{"query": "q"}"#),
+            &Context::default(),
+        );
+        assert_eq!(outcome.decision, Decision::Allow { note: None });
+        assert_eq!(outcome.deciding, Deciding::Default);
     }
 
     #[test]
