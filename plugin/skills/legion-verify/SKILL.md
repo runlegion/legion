@@ -44,7 +44,9 @@ never `pass` -- verify never asserts an unprovable claim.
    - For the predictions criterion, fetch what was emitted for this issue by its issue ref --
      `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` -- not by searching
      emission text, and witness each row it returns. When it returns zero rows, state plainly
-     that no prediction carries that issue ref; zero rows is not "all witnessed".
+     that no prediction carries that issue ref; zero rows is not "all witnessed". If stderr
+     reports "most recent N of M", the rows were cut at `--limit`: re-run with `--limit M`
+     or higher so every prediction for the issue is witnessed.
 
 3. **Judge each criterion** honestly:
    - `pass` -- satisfied, and you can cite the test / file:line / behavior that proves it.

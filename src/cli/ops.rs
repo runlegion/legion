@@ -721,7 +721,8 @@ const PREDICTION_STATES: [uncertainty::types::PredictionState; 5] = [
 /// predictions exist" -- the silent-empty diagnosis this command exists to
 /// end. Empty results name which empty they are (nothing stored vs the
 /// filters matched nothing); in `--json` mode stdout stays a parseable `[]`
-/// and that message goes to stderr.
+/// and that message goes to stderr. A `--json` result cut by `--limit` names
+/// the cut on stderr too (see `json_truncation_note`).
 fn write_predictions(
     database: &crate::db::Database,
     out: &mut impl std::io::Write,
@@ -807,6 +808,9 @@ fn write_predictions(
             })
             .collect();
         writeln!(out, "{}", serde_json::to_string(&rows)?)?;
+        if let Some(note) = json_truncation_note(shown.len(), predictions.len()) {
+            eprintln!("{note}");
+        }
         return Ok(());
     }
 
@@ -853,6 +857,21 @@ fn write_predictions(
         )?;
     }
     Ok(())
+}
+
+/// The stderr note for a `--json` predictions result cut by `--limit`, or
+/// `None` when every matching row was shown.
+///
+/// The table view says "most recent N of M" inline; JSON cannot without
+/// breaking the array, so the same words go to stderr. Without it a caller
+/// reading stdout alone (legion-verify witnessing an issue's predictions)
+/// would take a page for the whole set and leave the rest unwitnessed.
+fn json_truncation_note(shown: usize, total: usize) -> Option<String> {
+    (shown < total).then(|| {
+        format!(
+            "[legion uncertainty] most recent {shown} of {total}: pass --limit {total} to see all"
+        )
+    })
 }
 
 /// Parse a duration string like "1h", "30m", "24h" into minutes.
@@ -1545,6 +1564,30 @@ mod tests {
         let json: String = run(&db, None, None, true, 2);
         let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn predictions_json_truncation_note_only_when_cut() {
+        let db = test_db();
+        for _ in 0..5 {
+            db.insert_prediction(&Prediction::new(input("legion.gate", None)))
+                .unwrap();
+        }
+        // Over the limit: stdout is a full-limit array, and the note names
+        // the cut in the table view's words plus the limit that shows all.
+        let json: String = run(&db, None, None, true, 2);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows.len(), 2);
+        let note: String = json_truncation_note(2, 5).expect("a cut result carries a note");
+        assert!(note.contains("most recent 2 of 5"), "{note}");
+        assert!(note.contains("--limit 5"), "{note}");
+
+        // Within the limit: every row on stdout, no note.
+        let json: String = run(&db, None, None, true, 5);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(json_truncation_note(5, 5), None);
+        assert_eq!(json_truncation_note(3, 3), None);
     }
 
     #[test]
