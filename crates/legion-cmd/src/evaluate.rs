@@ -56,17 +56,18 @@ pub fn decide_bash_invocation(
     };
 
     match selection.rule {
-        Some(rule) => {
-            // The family's own subcommand words are what the target replaces;
-            // every other argument must translate for a rewrite to fire.
-            let beyond: Vec<&str> = args
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !selection.governed.contains(index))
-                .map(|(_, arg)| arg.as_str())
-                .collect();
-            resolve_rule(policy, rule, ctx, Some(selection.verb), &beyond)
-        }
+        // The family's own subcommand words are what the target replaces;
+        // every other argument must translate for a rewrite to fire. The
+        // arguments go through whole, with the governed positions beside them,
+        // so a valued flag is judged against its true adjacent argument.
+        Some(rule) => resolve_rule(
+            policy,
+            rule,
+            ctx,
+            Some(selection.verb),
+            args,
+            &selection.governed,
+        ),
         // The family is managed, but no rule resolves these arguments.
         None => PartOutcome {
             decision: deny(
@@ -167,7 +168,7 @@ pub fn decide_fields(policy: &Policy, kind: ToolKind, input: &Value, ctx: &Conte
     match select_fields_rule(policy, kind, input) {
         // A Fields call has no argument list: a rewrite here patches one
         // field and keeps the rest, lossless by construction.
-        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None, &[]),
+        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None, &[], &[]),
         FieldsSelection::Unresolvable { rule, field } => {
             let tool = kind.as_str();
             rule_outcome(
@@ -243,14 +244,16 @@ pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
 
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
 /// (FR-CMD-016), the sym action (FR-CMD-007), and a rewrite's argument
-/// coverage (FR-CMD-008). `args` are the invocation's arguments beyond the
-/// family's subcommand words -- empty for a Fields call.
+/// coverage (FR-CMD-008). `args` are the invocation's arguments and
+/// `governed` the indices of the family's subcommand words among them -- both
+/// empty for a Fields call.
 fn resolve_rule(
     policy: &Policy,
     rule: &Rule,
     ctx: &Context,
     verb: Option<String>,
-    args: &[&str],
+    args: &[String],
+    governed: &[usize],
 ) -> PartOutcome {
     for (required, lookup, name) in [
         (rule.requires_recall, &ctx.recall, "recall"),
@@ -272,7 +275,7 @@ fn resolve_rule(
     let (decision, is_sym) = match &rule.outcome {
         RuleOutcome::Allow { note } => (Decision::Allow { note: note.clone() }, false),
         RuleOutcome::Rewrite { spec, reason } => {
-            let decision = match first_untranslatable(&spec.translatable, args) {
+            let decision = match first_untranslatable(&spec.translatable, args, governed) {
                 None => Decision::Rewrite {
                     target: spec.target.clone(),
                     reason: reason.clone(),
@@ -311,27 +314,48 @@ fn resolve_rule(
 /// answering yes or no, is what lets the default fallback's deny tell the
 /// agent exactly what the target cannot carry (FR-CMD-005).
 ///
+/// The family's subcommand words, at the `governed` indices, are skipped in
+/// place: the target replaces them, so they need not translate, but they keep
+/// their positions so no argument is paired with a word it was never adjacent
+/// to.
+///
 /// Every word starting with `-` is an option word and must be declared
-/// verbatim: a combined short-option cluster (`-rn`), `--`, and a bare `-`
-/// are untranslatable unless the spec lists them, because splitting or
-/// reinterpreting them needs per-binary knowledge the spec does not carry.
-/// A valued flag consumes the next argument as its value, or carries it
-/// joined with `=`; a valued flag with no value left is untranslatable. Every
-/// other word is an operand, matched against the declared shapes by position.
-fn first_untranslatable<'a>(spec: &ArgSpec, args: &[&'a str]) -> Option<&'a str> {
+/// verbatim: a combined short-option cluster (`-rn`) or `--` is
+/// untranslatable unless the spec lists it, because splitting or
+/// reinterpreting it needs per-binary knowledge the spec does not carry. A
+/// bare `-` is always untranslatable: the spec parser rejects option words
+/// shorter than two characters, so it can never be declared. A valued flag
+/// consumes its true next argument as its value, or carries it joined with
+/// `=`; a valued flag with no value left, or whose next argument is one of the
+/// family's subcommand words, is untranslatable. Every other word is an
+/// operand, matched against the declared shapes by position.
+fn first_untranslatable<'a>(
+    spec: &ArgSpec,
+    args: &'a [String],
+    governed: &[usize],
+) -> Option<&'a str> {
     let declared = |list: &[String], word: &str| list.iter().any(|f| f == word);
     let mut operand_position = 0;
-    let mut remaining = args.iter();
-    while let Some(&raw) = remaining.next() {
+    let mut index = 0;
+    while index < args.len() {
+        let current = index;
+        index += 1;
+        if governed.contains(&current) {
+            continue;
+        }
+        let raw = args[current].as_str();
         let arg = dequote_outer(raw);
         if arg.starts_with('-') {
             if declared(&spec.flags, arg) {
                 continue;
             }
             if declared(&spec.valued_flags, arg) {
-                if remaining.next().is_none() {
+                // The value is the adjacent argument or nothing: a subcommand
+                // word there is not a value, and a later word is not adjacent.
+                if index >= args.len() || governed.contains(&index) {
                     return Some(raw);
                 }
+                index += 1;
                 continue;
             }
             if let Some((name, _)) = arg.split_once('=')
@@ -1297,6 +1321,23 @@ mod tests {
         // `--json` as the last word has no value to translate.
         let dangling = decide(&p, "gh", &["pr", "view", "12", "--json"]);
         assert!(deny_reason(&dangling).contains("`--json`"));
+        // Between two of the family's words, `--json`'s adjacent argument is a
+        // subcommand word, not a value: the trailing operand is not swallowed.
+        let mid_family = decide(&p, "gh", &["pr", "--json", "view", "my-branch"]);
+        assert!(
+            deny_reason(&mid_family).contains("`--json`"),
+            "{:?}",
+            mid_family.decision
+        );
+        let mid_family_integer = decide(&p, "gh", &["pr", "--json", "view", "12"]);
+        assert!(deny_reason(&mid_family_integer).contains("`--json`"));
+        // Before the whole subcommand sequence, the same holds.
+        let leading = decide(&p, "gh", &["--json", "pr", "view", "12"]);
+        assert!(
+            deny_reason(&leading).contains("`--json`"),
+            "{:?}",
+            leading.decision
+        );
         // `=` joined to a switch that takes no value is not the switch.
         let joined = decide(&p, "gh", &["pr", "view", "--comments=yes"]);
         assert!(deny_reason(&joined).contains("`--comments=yes`"));
