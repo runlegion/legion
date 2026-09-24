@@ -197,6 +197,26 @@ pub(crate) enum UncertaintyAction {
         json: bool,
     },
 
+    /// List the raw predictions the engine has stored (#902): a
+    /// (surface, state) summary with un-capped counts, then the most recent
+    /// rows. Every other read here is a DERIVED view; this is the one that
+    /// shows whether predictions exist at all. Read-only and side-effect
+    /// free: never sweeps orphans, never rolls calibration.
+    Predictions {
+        /// Filter to one surface (e.g. `legion.gate`).
+        #[arg(long)]
+        surface: Option<String>,
+        /// Filter to one state (emitted, witnessed, calibrated, orphaned, retired).
+        #[arg(long)]
+        state: Option<String>,
+        /// Emit JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
+        /// Cap rows returned; counts in the summary line are un-capped.
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
+
     /// Run the calibration write side (#359): sweep stale `emitted`
     /// predictions into `orphaned`, then roll fresh calibration snapshots
     /// for every cohort with witnessed data. Both steps share one `now`
@@ -538,6 +558,22 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
             }
         }
 
+        UncertaintyAction::Predictions {
+            surface,
+            state,
+            json,
+            limit,
+        } => {
+            write_predictions(
+                &database,
+                &mut out,
+                surface.as_deref(),
+                state.as_deref(),
+                json,
+                limit,
+            )?;
+        }
+
         UncertaintyAction::Roll { json } => {
             let now = chrono::Utc::now().to_rfc3339();
             let swept = database
@@ -624,6 +660,146 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
             });
             writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
         }
+    }
+    Ok(())
+}
+
+/// The `--state` values `legion uncertainty predictions` accepts, in
+/// lifecycle order. Named in the invalid-state error so a typo is a loud
+/// failure instead of a silent empty result (#902).
+const PREDICTION_STATES: [uncertainty::types::PredictionState; 5] = [
+    uncertainty::types::PredictionState::Emitted,
+    uncertainty::types::PredictionState::Witnessed,
+    uncertainty::types::PredictionState::Calibrated,
+    uncertainty::types::PredictionState::Orphaned,
+    uncertainty::types::PredictionState::Retired,
+];
+
+/// Body of `legion uncertainty predictions`, split out so the read-only
+/// contract can be tested against a seeded database.
+///
+/// The state filter is validated before any query: an unknown value must
+/// exit non-zero even on an empty database, or it would read as "no
+/// predictions exist" -- the silent-empty diagnosis this command exists to
+/// end. Empty results name which empty they are (nothing stored vs the
+/// filters matched nothing); in `--json` mode stdout stays a parseable `[]`
+/// and that message goes to stderr.
+fn write_predictions(
+    database: &crate::db::Database,
+    out: &mut impl std::io::Write,
+    surface: Option<&str>,
+    state: Option<&str>,
+    json: bool,
+    limit: u32,
+) -> error::Result<()> {
+    let state_filter: Option<uncertainty::types::PredictionState> = match state {
+        None => None,
+        Some(s) => match PREDICTION_STATES.iter().find(|st| st.as_str() == s) {
+            Some(st) => Some(*st),
+            None => {
+                let valid: Vec<&str> = PREDICTION_STATES.iter().map(|st| st.as_str()).collect();
+                return Err(error::LegionError::WorkSource(format!(
+                    "unknown --state '{s}': valid values are {}",
+                    valid.join(", ")
+                )));
+            }
+        },
+    };
+
+    let predictions: Vec<uncertainty::types::Prediction> =
+        database.list_predictions(surface, state_filter)?;
+
+    if predictions.is_empty() {
+        let message: String = if surface.is_none() && state_filter.is_none() {
+            "[legion uncertainty] no predictions exist: nothing has been emitted to this database"
+                .to_string()
+        } else {
+            let total: usize = database.list_predictions(None, None)?.len();
+            let mut filters: Vec<String> = Vec::new();
+            if let Some(s) = surface {
+                filters.push(format!("surface={s}"));
+            }
+            if let Some(st) = state_filter {
+                filters.push(format!("state={}", st.as_str()));
+            }
+            format!(
+                "[legion uncertainty] no predictions matched the filters ({}); \
+                 {total} prediction(s) exist unfiltered",
+                filters.join(", ")
+            )
+        };
+        if json {
+            writeln!(out, "[]")?;
+            eprintln!("{message}");
+        } else {
+            writeln!(out, "{message}")?;
+        }
+        return Ok(());
+    }
+
+    let shown: &[uncertainty::types::Prediction] =
+        &predictions[..predictions.len().min(limit as usize)];
+
+    if json {
+        let rows: Vec<serde_json::Value> = shown
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "surface": p.surface,
+                    "state": p.state.as_str(),
+                    "claimed_confidence": p.claimed_confidence.value(),
+                    "outcome_correctness": p.outcome_correctness.map(|c| c.value()),
+                    "created_at": p.created_at,
+                    "orphan_after": p.orphan_after,
+                })
+            })
+            .collect();
+        writeln!(out, "{}", serde_json::to_string(&rows)?)?;
+        return Ok(());
+    }
+
+    // Grouped over the full filtered set, not `shown`: the totals are the
+    // diagnosis, so the row cap must never touch them.
+    let mut counts: std::collections::BTreeMap<(&str, &str), usize> =
+        std::collections::BTreeMap::new();
+    for p in &predictions {
+        *counts
+            .entry((p.surface.as_str(), p.state.as_str()))
+            .or_insert(0) += 1;
+    }
+    writeln!(
+        out,
+        "[legion uncertainty] {} prediction(s) in scope",
+        predictions.len()
+    )?;
+    writeln!(out, "{:<32} {:<12} {:<8}", "surface", "state", "count")?;
+    for ((surface_key, state_key), n) in &counts {
+        writeln!(out, "{:<32} {:<12} {:<8}", surface_key, state_key, n)?;
+    }
+    writeln!(out)?;
+    writeln!(out, "most recent {} of {}:", shown.len(), predictions.len())?;
+    writeln!(
+        out,
+        "{:<38} {:<24} {:<12} {:<8} {:<8} {:<34} {:<34}",
+        "id", "surface", "state", "claimed", "correct", "created_at", "orphan_after"
+    )?;
+    for p in shown {
+        let correctness: String = p
+            .outcome_correctness
+            .map(|c| format!("{:.2}", c.value()))
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(
+            out,
+            "{:<38} {:<24} {:<12} {:<8.2} {:<8} {:<34} {:<34}",
+            p.id,
+            p.surface,
+            p.state.as_str(),
+            p.claimed_confidence.value(),
+            correctness,
+            p.created_at,
+            p.orphan_after.as_deref().unwrap_or("-"),
+        )?;
     }
     Ok(())
 }
@@ -1200,4 +1376,197 @@ pub(crate) fn handle_health(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::testutil::test_db;
+    use crate::uncertainty::types::{
+        Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
+    };
+
+    fn input(surface: &str, orphan_after: Option<&str>) -> PredictionInput {
+        PredictionInput {
+            surface: surface.into(),
+            feature_key: "test.feature".into(),
+            input_fingerprint: format!("fp-{}", uuid::Uuid::now_v7()),
+            model: "claude-opus-4-7".into(),
+            model_version: "4.7".into(),
+            claimed_confidence: Confidence::from_f64(0.8).unwrap(),
+            prediction_payload: serde_json::json!({}),
+            orphan_after: orphan_after.map(str::to_string),
+        }
+    }
+
+    fn run(
+        db: &crate::db::Database,
+        surface: Option<&str>,
+        state: Option<&str>,
+        json: bool,
+        limit: u32,
+    ) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_predictions(db, &mut buf, surface, state, json, limit).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// Every column of every prediction row, in id order, as raw SQLite
+    /// values -- the byte-level fingerprint the read-only test compares.
+    fn prediction_table(db: &crate::db::Database) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT * FROM uncertainty_prediction ORDER BY id")
+            .unwrap();
+        let cols: usize = stmt.column_count();
+        stmt.query_map([], |row| {
+            (0..cols)
+                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    }
+
+    fn snapshot_count(db: &crate::db::Database) -> i64 {
+        db.conn
+            .query_row(
+                "SELECT COUNT(*) FROM uncertainty_calibration_snapshot",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn predictions_command_is_read_only() {
+        let db = test_db();
+        // An emitted row already past its orphan deadline: a sweep would
+        // flip it to orphaned.
+        db.insert_prediction(&Prediction::new(input(
+            "legion.gate",
+            Some("2020-01-01T00:00:00+00:00"),
+        )))
+        .unwrap();
+        // A witnessed row: a calibration roll would write snapshots for it.
+        let mut w = Prediction::new(input("legion.gate", None));
+        db.insert_prediction(&w).unwrap();
+        let prev = w.state;
+        w.witness(
+            OutcomeLabel::Shipped,
+            serde_json::json!({}),
+            Correctness::from_f64(1.0).unwrap(),
+            "2026-06-01T00:00:00+00:00",
+        )
+        .unwrap();
+        db.update_prediction(&w, prev).unwrap();
+
+        let before: Vec<Vec<rusqlite::types::Value>> = prediction_table(&db);
+        let snapshots_before: i64 = snapshot_count(&db);
+
+        run(&db, None, None, false, 50);
+        run(&db, None, None, true, 50);
+        run(&db, Some("legion.gate"), Some("emitted"), false, 1);
+
+        assert_eq!(prediction_table(&db), before);
+        assert_eq!(snapshot_count(&db), snapshots_before);
+        assert_eq!(snapshots_before, 0);
+    }
+
+    #[test]
+    fn predictions_summary_counts_are_not_capped_by_limit() {
+        let db = test_db();
+        for _ in 0..5 {
+            db.insert_prediction(&Prediction::new(input("legion.gate", None)))
+                .unwrap();
+        }
+        let text: String = run(&db, None, None, false, 2);
+        assert!(text.contains("5 prediction(s) in scope"), "{text}");
+        let summary_line: &str = text
+            .lines()
+            .find(|l| l.starts_with("legion.gate") && l.contains("emitted"))
+            .unwrap();
+        assert!(summary_line.trim_end().ends_with('5'), "{summary_line}");
+        assert!(text.contains("most recent 2 of 5"), "{text}");
+
+        let json: String = run(&db, None, None, true, 2);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn predictions_json_rows_carry_the_required_fields() {
+        let db = test_db();
+        let p = Prediction::new(input("legion.task", Some("2030-01-01T00:00:00+00:00")));
+        db.insert_prediction(&p).unwrap();
+        let json: String = run(&db, None, None, true, 50);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["id"], p.id.as_str());
+        assert_eq!(row["surface"], "legion.task");
+        assert_eq!(row["state"], "emitted");
+        assert_eq!(row["claimed_confidence"], 0.8);
+        assert!(row["outcome_correctness"].is_null());
+        assert_eq!(row["created_at"], p.created_at.as_str());
+        assert_eq!(row["orphan_after"], "2030-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn predictions_empty_messages_distinguish_nothing_stored_from_filter_miss() {
+        let db = test_db();
+        let none_stored: String = run(&db, None, None, false, 50);
+        assert!(
+            none_stored.contains("no predictions exist"),
+            "{none_stored}"
+        );
+
+        db.insert_prediction(&Prediction::new(input("legion.task", None)))
+            .unwrap();
+        let filter_miss: String = run(&db, Some("legion.gate"), None, false, 50);
+        assert!(
+            filter_miss.contains("no predictions matched the filters (surface=legion.gate)"),
+            "{filter_miss}"
+        );
+        assert!(filter_miss.contains("1 prediction(s) exist unfiltered"));
+        assert!(!filter_miss.contains("no predictions exist"));
+
+        // JSON mode keeps stdout a parseable empty array either way.
+        let json_miss: String = run(&db, None, Some("orphaned"), true, 50);
+        assert_eq!(json_miss.trim(), "[]");
+    }
+
+    #[test]
+    fn predictions_db_failure_propagates_as_database_error() {
+        let db = test_db();
+        db.conn
+            .execute_batch("DROP TABLE uncertainty_prediction")
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let err = write_predictions(&db, &mut buf, None, None, false, 50).unwrap_err();
+        assert!(matches!(err, error::LegionError::Database(_)), "{err}");
+    }
+
+    #[test]
+    fn predictions_state_filter_accepts_every_lifecycle_state() {
+        let db = test_db();
+        for st in PREDICTION_STATES {
+            run(&db, None, Some(st.as_str()), false, 50);
+        }
+    }
+
+    #[test]
+    fn predictions_unknown_state_errors_naming_valid_set_even_on_empty_db() {
+        let db = test_db();
+        let mut buf: Vec<u8> = Vec::new();
+        let err = write_predictions(&db, &mut buf, None, Some("bogus"), false, 50).unwrap_err();
+        let msg: String = err.to_string();
+        assert!(matches!(err, error::LegionError::WorkSource(_)), "{msg}");
+        for valid in ["emitted", "witnessed", "calibrated", "orphaned", "retired"] {
+            assert!(msg.contains(valid), "{msg} should name {valid}");
+        }
+        assert!(msg.contains("bogus"));
+        assert!(buf.is_empty(), "nothing may print on an invalid state");
+    }
 }
