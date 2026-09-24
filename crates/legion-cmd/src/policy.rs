@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use crate::decision::ProxyReason;
+use crate::decision::{ManagedTarget, ProxyReason};
 
 /// The tool a set of rules governs. The policy is organized by tool kind first
 /// (FR-CMD-011), then, within Bash, by managed-binary family.
@@ -169,18 +169,22 @@ impl Predicate {
 /// What a matched rule yields.
 ///
 /// The first five variants are exactly the five Decision arms (FR-CMD-001).
+/// A rewrite carries its [`RewriteSpec`], so whether it fires is judged from
+/// the invocation's arguments, never from the verb alone (FR-CMD-008).
 /// [`RuleOutcome::Sym`] is not a sixth Decision: it is a routing action that
 /// resolves to a Decision via the referenced [`SymJob`] -- a deny naming the
-/// sym command in this issue, a rewrite when lossless once #1228 lands. It is
-/// carried here, rather than as a plain deny, so the evaluator can give a sym
-/// job precedence over the strictest-order fold (FR-CMD-007).
+/// sym command (a lossless rewrite to it, per operator decision 01a0ab48, is
+/// not built by any issue yet). It is carried here, rather than as a plain
+/// deny, so the
+/// evaluator can give a sym job precedence over the strictest-order fold
+/// (FR-CMD-007).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleOutcome {
     Allow {
         note: Option<String>,
     },
     Rewrite {
-        target: String,
+        spec: RewriteSpec,
         reason: String,
     },
     Proxy {
@@ -201,6 +205,93 @@ pub enum RuleOutcome {
     /// Route this command to the named sym job.
     Sym {
         job: String,
+    },
+}
+
+/// A rewrite rule's target, the arguments it can translate, and what applies
+/// when an invocation carries an argument it cannot (FR-CMD-008).
+///
+/// Losslessness is a property of the arguments, not the verb: a rewrite that
+/// silently drops a flag runs something the agent did not ask for. So the
+/// evaluator yields the rewrite only when every argument of the invocation
+/// beyond the family's own subcommand words is covered by `translatable`;
+/// otherwise `otherwise` decides.
+///
+/// Only a Bash rewrite declares `translatable` (and may declare `otherwise`).
+/// A Fields rewrite (Agent, Task, ...) replaces the one `tool_input` field the
+/// adapter patches and keeps every other field, so it is lossless by
+/// construction: its call has no argument list, and the empty [`ArgSpec`] it
+/// carries covers that empty list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewriteSpec {
+    pub target: ManagedTarget,
+    /// Flags and operand shapes the target expresses exactly.
+    pub translatable: ArgSpec,
+    pub otherwise: FallbackDecision,
+}
+
+/// The arguments a rewrite target expresses exactly (FR-CMD-008). Anything
+/// not listed -- an undeclared option, a combined short-option cluster, an
+/// operand beyond the declared positions or of the wrong shape -- makes the
+/// invocation ineligible for the rewrite. An empty spec is a real
+/// declaration: the target translates the family's subcommand words and
+/// nothing more.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ArgSpec {
+    /// Option words that take no value, matched as whole words (`--web`).
+    pub flags: Vec<String>,
+    /// Option words that take a value, either as the next argument
+    /// (`--limit 5`) or joined with `=` (`--limit=5`).
+    pub valued_flags: Vec<String>,
+    /// The shapes of the operands the target carries, by position. An
+    /// invocation may carry fewer operands than listed, never more.
+    pub operands: Vec<OperandShape>,
+}
+
+/// The shape one positional operand must have to be translatable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandShape {
+    /// Any word.
+    Any,
+    /// A non-negative decimal integer (an issue or PR number).
+    Integer,
+}
+
+impl OperandShape {
+    /// Every member, so the parser rejects a wire name outside the set.
+    pub const ALL: [OperandShape; 2] = [OperandShape::Any, OperandShape::Integer];
+
+    /// The shape's wire name, as it appears in a `translatable.operands` list.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OperandShape::Any => "any",
+            OperandShape::Integer => "integer",
+        }
+    }
+}
+
+/// What a rewrite rule yields when the invocation carries an argument its
+/// [`ArgSpec`] does not cover (FR-CMD-008). The default is a deny naming the
+/// untranslatable argument and the managed command to run instead
+/// (FR-CMD-005); a policy entry may name another arm instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackDecision {
+    /// Deny, with a reason naming the untranslatable argument and the target
+    /// as the command to run instead. Written `{"kind": "deny"}`, or implied
+    /// when the rule declares no `otherwise`.
+    DenyNamingTarget,
+    Allow {
+        note: Option<String>,
+    },
+    Proxy {
+        reason: ProxyReason,
+    },
+    Ask {
+        question: String,
+        reason: String,
+        /// Carried like [`RuleOutcome::Ask`]'s mark; route never copies it
+        /// into its output (FR-CMD-006).
+        needs_operator: bool,
     },
 }
 
@@ -692,6 +783,7 @@ fn parse_rule(
     let outcome = parse_outcome(
         require(map, "outcome", pointer)?,
         &child_pointer(pointer, "outcome"),
+        kind,
         sym_job_ids,
     )?;
 
@@ -845,6 +937,7 @@ fn parse_any_of(
 fn parse_outcome(
     value: &Value,
     pointer: &str,
+    tool: ToolKind,
     sym_job_ids: &[&str],
 ) -> Result<RuleOutcome, PolicyError> {
     let map = as_object(value, pointer)?;
@@ -859,7 +952,18 @@ fn parse_outcome(
             Ok(RuleOutcome::Allow { note })
         }
         "rewrite" => {
-            check_known_keys(map, pointer, &["kind", "target", "reason"])?;
+            // Only a Bash call carries an argument list, so only a Bash
+            // rewrite declares which arguments translate. A Fields rewrite
+            // patches one field and keeps the rest -- lossless by
+            // construction -- and a `translatable` there would be a key that
+            // never takes effect, so it is rejected like any unknown field.
+            let is_bash = tool == ToolKind::Bash;
+            let known: &[&str] = if is_bash {
+                &["kind", "target", "reason", "translatable", "otherwise"]
+            } else {
+                &["kind", "target", "reason"]
+            };
+            check_known_keys(map, pointer, known)?;
             let target = require_string(map, "target", pointer)?;
             let reason = require_string(map, "reason", pointer)?;
             if target.is_empty() || reason.is_empty() {
@@ -867,7 +971,31 @@ fn parse_outcome(
                     pointer: root_pointer(pointer),
                 });
             }
-            Ok(RuleOutcome::Rewrite { target, reason })
+            let (translatable, otherwise) = if is_bash {
+                // A Bash rewrite with no declared argument coverage is the
+                // verb-only judgment FR-CMD-008 forbids.
+                let translatable = parse_arg_spec(
+                    require(map, "translatable", pointer)?,
+                    &child_pointer(pointer, "translatable"),
+                )?;
+                let otherwise = match map.get("otherwise") {
+                    Some(fallback) => {
+                        parse_fallback(fallback, &child_pointer(pointer, "otherwise"))?
+                    }
+                    None => FallbackDecision::DenyNamingTarget,
+                };
+                (translatable, otherwise)
+            } else {
+                (ArgSpec::default(), FallbackDecision::DenyNamingTarget)
+            };
+            Ok(RuleOutcome::Rewrite {
+                spec: RewriteSpec {
+                    target: ManagedTarget::new(target),
+                    translatable,
+                    otherwise,
+                },
+                reason,
+            })
         }
         "proxy" => {
             check_known_keys(map, pointer, &["kind", "reason"])?;
@@ -926,6 +1054,99 @@ fn parse_outcome(
             pointer: child_pointer(pointer, "kind"),
             arm: other.to_string(),
         }),
+    }
+}
+
+/// A Bash rewrite's `translatable` declaration. Every key is optional, so
+/// `{}` declares that the target translates the family's subcommand words and
+/// nothing more. A declared flag must be an option word (it starts with `-`):
+/// the evaluator only ever compares option words against flags, so any other
+/// entry would be a declaration that never takes effect.
+fn parse_arg_spec(value: &Value, pointer: &str) -> Result<ArgSpec, PolicyError> {
+    let map = as_object(value, pointer)?;
+    check_known_keys(map, pointer, &["flags", "valued_flags", "operands"])?;
+    let option_words = |key: &str| -> Result<Vec<String>, PolicyError> {
+        let key_pointer = child_pointer(pointer, key);
+        let words = match map.get(key) {
+            Some(list) => parse_string_array(list, &key_pointer)?,
+            None => Vec::new(),
+        };
+        if let Some(index) = words
+            .iter()
+            .position(|w| w.len() < 2 || !w.starts_with('-'))
+        {
+            return Err(PolicyError::WrongType {
+                pointer: child_pointer(&key_pointer, &index.to_string()),
+                expected: "an option word starting with '-'".to_string(),
+            });
+        }
+        Ok(words)
+    };
+    let flags = option_words("flags")?;
+    let valued_flags = option_words("valued_flags")?;
+
+    let operands_pointer = child_pointer(pointer, "operands");
+    let operand_names = match map.get("operands") {
+        Some(list) => parse_string_array(list, &operands_pointer)?,
+        None => Vec::new(),
+    };
+    let mut operands = Vec::with_capacity(operand_names.len());
+    for (index, name) in operand_names.iter().enumerate() {
+        let shape = OperandShape::ALL
+            .into_iter()
+            .find(|s| s.as_str() == name)
+            .ok_or_else(|| PolicyError::WrongType {
+                pointer: child_pointer(&operands_pointer, &index.to_string()),
+                expected: "an operand shape: 'any' or 'integer'".to_string(),
+            })?;
+        operands.push(shape);
+    }
+
+    Ok(ArgSpec {
+        flags,
+        valued_flags,
+        operands,
+    })
+}
+
+/// A Bash rewrite's `otherwise` arm. `{"kind": "deny"}` is the default deny
+/// naming the untranslatable argument and the target, and takes no fields: a
+/// hand-written reason could not name the argument. allow, proxy and ask are
+/// parsed exactly as rule outcomes are. A rewrite or sym fallback is refused:
+/// the fallback applies precisely because the rewrite cannot.
+fn parse_fallback(value: &Value, pointer: &str) -> Result<FallbackDecision, PolicyError> {
+    let map = as_object(value, pointer)?;
+    let kind = require_string(map, "kind", pointer)?;
+    match kind.as_str() {
+        "deny" => {
+            check_known_keys(map, pointer, &["kind"])?;
+            Ok(FallbackDecision::DenyNamingTarget)
+        }
+        "rewrite" | "sym" => Err(PolicyError::WrongType {
+            pointer: child_pointer(pointer, "kind"),
+            expected: "a fallback arm: deny, allow, proxy or ask".to_string(),
+        }),
+        _ => match parse_outcome(value, pointer, ToolKind::Bash, &[])? {
+            RuleOutcome::Allow { note } => Ok(FallbackDecision::Allow { note }),
+            RuleOutcome::Proxy { reason } => Ok(FallbackDecision::Proxy { reason }),
+            RuleOutcome::Ask {
+                question,
+                reason,
+                needs_operator,
+            } => Ok(FallbackDecision::Ask {
+                question,
+                reason,
+                needs_operator,
+            }),
+            // "deny", "rewrite" and "sym" are handled above; parse_outcome
+            // yields nothing else for the remaining kinds.
+            RuleOutcome::Deny { .. } | RuleOutcome::Rewrite { .. } | RuleOutcome::Sym { .. } => {
+                Err(PolicyError::WrongType {
+                    pointer: child_pointer(pointer, "kind"),
+                    expected: "a fallback arm: deny, allow, proxy or ask".to_string(),
+                })
+            }
+        },
     }
 }
 
@@ -1495,6 +1716,223 @@ mod tests {
             PolicyError::UnknownField {
                 pointer: "/tools/Write/rules/0/predicates/0/ignore_case".to_string(),
                 field: "ignore_case".to_string(),
+            }
+        );
+    }
+
+    // -- rewrite specs (FR-CMD-008) -------------------------------------------
+
+    #[test]
+    fn a_bash_rewrite_without_a_translatable_declaration_is_rejected() {
+        // Coverage declared by nobody is the verb-only judgment FR-CMD-008
+        // forbids; the error names the rule's pointer.
+        let text = r#"{"tools": {"Bash": {"families": {"gh issue list": {"rules": [
+            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "r"}}
+        ]}}}}}"#;
+        let err = parse_policy(text).expect_err("rewrite without translatable");
+        assert_eq!(
+            err,
+            PolicyError::MissingField {
+                pointer: "/tools/Bash/families/gh issue list/rules/0/outcome".to_string(),
+                field: "translatable".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_bash_rewrite_parses_its_spec_and_defaults_its_fallback_to_the_named_deny() {
+        let text = r#"{"tools": {"Bash": {"families": {"gh pr view": {"rules": [
+            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion pr view", "reason": "r",
+             "translatable": {"flags": ["--web"], "valued_flags": ["--json"], "operands": ["integer", "any"]}}}
+        ]}}}}}"#;
+        let policy = parse_policy(text).expect("valid");
+        let ToolRules::Bash { families } = &policy.tools[&ToolKind::Bash] else {
+            panic!("expected Bash rules");
+        };
+        assert_eq!(
+            families["gh pr view"].rules[0].outcome,
+            RuleOutcome::Rewrite {
+                spec: RewriteSpec {
+                    target: ManagedTarget::new("legion pr view"),
+                    translatable: ArgSpec {
+                        flags: vec!["--web".to_string()],
+                        valued_flags: vec!["--json".to_string()],
+                        operands: vec![OperandShape::Integer, OperandShape::Any],
+                    },
+                    otherwise: FallbackDecision::DenyNamingTarget,
+                },
+                reason: "r".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_translatable_declaration_is_accepted() {
+        // `{}` declares that nothing beyond the family's words translates --
+        // the exact-arguments rewrite, a real declaration.
+        let text = r#"{"tools": {"Bash": {"families": {"gh issue list": {"rules": [
+            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "r",
+             "translatable": {}}}
+        ]}}}}}"#;
+        parse_policy(text).expect("an empty ArgSpec is a declaration");
+    }
+
+    #[test]
+    fn each_fallback_arm_parses() {
+        let parse_otherwise = |otherwise: &str| {
+            let text = format!(
+                r#"{{"tools": {{"Bash": {{"families": {{"gh": {{"rules": [
+                {{"id": "x", "outcome": {{"kind": "rewrite", "target": "t", "reason": "r",
+                 "translatable": {{}}, "otherwise": {otherwise}}}}}
+            ]}}}}}}}}}}"#
+            );
+            let policy = parse_policy(&text).expect("valid");
+            let ToolRules::Bash { families } = &policy.tools[&ToolKind::Bash] else {
+                panic!("expected Bash rules");
+            };
+            match &families["gh"].rules[0].outcome {
+                RuleOutcome::Rewrite { spec, .. } => spec.otherwise.clone(),
+                other => panic!("expected rewrite, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            parse_otherwise(r#"{"kind": "deny"}"#),
+            FallbackDecision::DenyNamingTarget
+        );
+        assert_eq!(
+            parse_otherwise(r#"{"kind": "allow", "note": "n"}"#),
+            FallbackDecision::Allow {
+                note: Some("n".to_string())
+            }
+        );
+        assert_eq!(
+            parse_otherwise(r#"{"kind": "proxy", "reason": "binary"}"#),
+            FallbackDecision::Proxy {
+                reason: ProxyReason::Binary
+            }
+        );
+        assert_eq!(
+            parse_otherwise(
+                r#"{"kind": "ask", "question": "q", "reason": "r", "needs_operator": true}"#
+            ),
+            FallbackDecision::Ask {
+                question: "q".to_string(),
+                reason: "r".to_string(),
+                needs_operator: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_rewrite_or_sym_fallback_and_a_deny_fallback_with_text_are_rejected() {
+        let with_otherwise = |otherwise: &str| {
+            format!(
+                r#"{{"sym_jobs": [{{"id": "j", "sym_command": "legion sym x"}}],
+                "tools": {{"Bash": {{"families": {{"gh": {{"rules": [
+                {{"id": "x", "outcome": {{"kind": "rewrite", "target": "t", "reason": "r",
+                 "translatable": {{}}, "otherwise": {otherwise}}}}}
+            ]}}}}}}}}}}"#
+            )
+        };
+        for arm in [
+            r#"{"kind": "rewrite", "target": "t", "reason": "r"}"#,
+            r#"{"kind": "sym", "job": "j"}"#,
+        ] {
+            assert_eq!(
+                parse_policy(&with_otherwise(arm)).expect_err("not a fallback arm"),
+                PolicyError::WrongType {
+                    pointer: "/tools/Bash/families/gh/rules/0/outcome/otherwise/kind".to_string(),
+                    expected: "a fallback arm: deny, allow, proxy or ask".to_string(),
+                },
+                "{arm}"
+            );
+        }
+        // A hand-written deny reason could not name the argument. One extra
+        // key only: which of several is reported first depends on serde_json's
+        // map order, which feature unification can change.
+        assert_eq!(
+            parse_policy(&with_otherwise(r#"{"kind": "deny", "instead": "i"}"#))
+                .expect_err("deny fallback takes no fields"),
+            PolicyError::UnknownField {
+                pointer: "/tools/Bash/families/gh/rules/0/outcome/otherwise/instead".to_string(),
+                field: "instead".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_fields_rewrite_parses_without_translatable_and_rejects_one() {
+        // Operator, 2026-09-23: a Fields rewrite is lossless by construction,
+        // so it needs no declaration -- and a declaration there is a key that
+        // never takes effect.
+        let ok = r#"{"tools": {"Agent": {"rules": [
+            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion:legion-explore", "reason": "r"}}
+        ]}}}"#;
+        let policy = parse_policy(ok).expect("a Fields rewrite needs no translatable");
+        let ToolRules::Fields { rules } = &policy.tools[&ToolKind::Agent] else {
+            panic!("expected Fields rules");
+        };
+        assert_eq!(
+            rules[0].outcome,
+            RuleOutcome::Rewrite {
+                spec: RewriteSpec {
+                    target: ManagedTarget::new("legion:legion-explore"),
+                    translatable: ArgSpec::default(),
+                    otherwise: FallbackDecision::DenyNamingTarget,
+                },
+                reason: "r".to_string(),
+            }
+        );
+
+        let declared = r#"{"tools": {"Task": {"rules": [
+            {"id": "x", "outcome": {"kind": "rewrite", "target": "t", "reason": "r", "translatable": {}}}
+        ]}}}"#;
+        assert_eq!(
+            parse_policy(declared).expect_err("translatable under a Fields tool"),
+            PolicyError::UnknownField {
+                pointer: "/tools/Task/rules/0/outcome/translatable".to_string(),
+                field: "translatable".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_translatable_declaration_names_its_pointer() {
+        let with_spec = |spec: &str| {
+            format!(
+                r#"{{"tools": {{"Bash": {{"families": {{"gh": {{"rules": [
+                {{"id": "x", "outcome": {{"kind": "rewrite", "target": "t", "reason": "r",
+                 "translatable": {spec}}}}}
+            ]}}}}}}}}}}"#
+            )
+        };
+        let base = "/tools/Bash/families/gh/rules/0/outcome/translatable";
+        assert_eq!(
+            parse_policy(&with_spec(r#"{"operands": ["integer", "path"]}"#)).expect_err("shape"),
+            PolicyError::WrongType {
+                pointer: format!("{base}/operands/1"),
+                expected: "an operand shape: 'any' or 'integer'".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_policy(&with_spec(r#"{"flags": ["--web", "web"]}"#)).expect_err("not a flag"),
+            PolicyError::WrongType {
+                pointer: format!("{base}/flags/1"),
+                expected: "an option word starting with '-'".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_policy(&with_spec(r#"{"valued_flags": ["-"]}"#)).expect_err("bare dash"),
+            PolicyError::WrongType {
+                pointer: format!("{base}/valued_flags/0"),
+                expected: "an option word starting with '-'".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_policy(&with_spec(r#"{"flag": ["--web"]}"#)).expect_err("typo'd key"),
+            PolicyError::UnknownField {
+                pointer: format!("{base}/flag"),
+                field: "flag".to_string(),
             }
         );
     }

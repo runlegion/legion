@@ -74,8 +74,7 @@ fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, Stri
             .invocations
             .iter()
             .filter_map(|invocation| {
-                let (_, rule) = select_bash_rule(policy, &invocation.binary, &invocation.args)?;
-                let rule = rule?;
+                let rule = select_bash_rule(policy, &invocation.binary, &invocation.args)?.rule?;
                 let mut words: Vec<&str> = vec![invocation.binary.as_str()];
                 words.extend(invocation.args.iter().map(|a| evaluate::dequote_outer(a)));
                 Some((rule, words.join(" ")))
