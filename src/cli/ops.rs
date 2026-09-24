@@ -151,6 +151,10 @@ pub(crate) enum UncertaintyAction {
         /// Default 30. Setting 0 disables the orphan sweep for this row.
         #[arg(long, default_value_t = 30)]
         orphan_ttl_days: u32,
+        /// The issue this prediction is about, as owner/repo#N. Optional: a prediction
+        /// with no issue (a gate, an sd insight) stays valid.
+        #[arg(long, value_parser = parse_issue_ref)]
+        issue: Option<String>,
     },
 
     /// Record an outcome for a prediction. Mirrors platform's
@@ -374,6 +378,33 @@ fn fmt_i64(v: Option<i64>) -> String {
     }
 }
 
+/// Validate `--issue` as `<owner>/<repo>#<digits>` (#1258).
+///
+/// Runs as a clap value parser so a malformed key is a usage error (non-zero
+/// exit) before `run_uncertainty` is reached, deliberately NOT emit's
+/// non-blocking exit-0 path: a prediction stored under a key verify can never
+/// look up is the orphan this flag exists to end, so it must fail loudly.
+fn parse_issue_ref(raw: &str) -> Result<String, String> {
+    let expected =
+        || format!("expected <owner>/<repo>#<number> (e.g. runlegion/legion#1229), got '{raw}'");
+    let (path, number) = raw.split_once('#').ok_or_else(expected)?;
+    let (owner, repo) = path.split_once('/').ok_or_else(expected)?;
+    let segment_ok = |seg: &str| {
+        !seg.is_empty()
+            && !seg
+                .chars()
+                .any(|c| c == '/' || c == '#' || c.is_whitespace())
+    };
+    if !segment_ok(owner)
+        || !segment_ok(repo)
+        || number.is_empty()
+        || !number.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(expected());
+    }
+    Ok(raw.to_owned())
+}
+
 /// Dispatch `legion uncertainty ...`. Non-blocking emit posture: emit
 /// failures log to stderr and return Ok so an upstream hook can never
 /// abort the agent on a telemetry-shaped problem. Witness / calibration /
@@ -395,6 +426,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
             claimed_confidence,
             payload,
             orphan_ttl_days,
+            issue,
         } => {
             // Resolution order, first hit wins (#831): an explicit --model,
             // then the live model for --session-id, then an explicit unknown
@@ -440,6 +472,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 claimed_confidence: confidence,
                 prediction_payload: payload_value,
                 orphan_after: uncertainty::storage::orphan_after_from_ttl(orphan_ttl_days),
+                issue_ref: issue,
             };
             let prediction = uncertainty::types::Prediction::new(input);
             if let Err(e) = database.insert_prediction(&prediction) {
@@ -1396,6 +1429,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.8).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: orphan_after.map(str::to_string),
+            issue_ref: None,
         }
     }
 
@@ -1568,5 +1602,39 @@ mod tests {
         }
         assert!(msg.contains("bogus"));
         assert!(buf.is_empty(), "nothing may print on an invalid state");
+    }
+
+    #[test]
+    fn parse_issue_ref_accepts_owner_repo_number() {
+        assert_eq!(
+            parse_issue_ref("runlegion/legion#1229").unwrap(),
+            "runlegion/legion#1229"
+        );
+        assert_eq!(parse_issue_ref("a/b#0").unwrap(), "a/b#0");
+    }
+
+    #[test]
+    fn parse_issue_ref_rejects_malformed_with_expected_form() {
+        for bad in [
+            "",
+            "1229",
+            "#1229",
+            "legion#1229",
+            "runlegion/legion",
+            "runlegion/legion#",
+            "runlegion/legion#12a",
+            "runlegion/legion#-1",
+            "/legion#1",
+            "runlegion/#1",
+            "a/b/c#1",
+            "a/b#1#2",
+            "run legion/legion#1",
+        ] {
+            let err = parse_issue_ref(bad).unwrap_err();
+            assert!(
+                err.contains("<owner>/<repo>#<number>"),
+                "error for {bad:?} must name the expected form, got: {err}"
+            );
+        }
     }
 }

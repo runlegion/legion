@@ -150,6 +150,8 @@ fn prediction_input(row: &QualityGateRow) -> UncertaintyResult<PredictionInput> 
         claimed_confidence: Confidence::from_f64(confidence_for(row.result))?,
         prediction_payload: payload,
         orphan_after: orphan_after_from_ttl(GATE_ORPHAN_TTL_DAYS),
+        // A gate verdict is keyed on (skill, commit), not an issue.
+        issue_ref: None,
     })
 }
 

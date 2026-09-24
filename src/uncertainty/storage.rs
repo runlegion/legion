@@ -47,8 +47,8 @@ impl Database {
             "INSERT INTO uncertainty_prediction \
              (id, surface, feature_key, input_fingerprint, model, model_version, \
               claimed_confidence, prediction_payload, state, cohort_key, \
-              created_at, updated_at, orphan_after) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              created_at, updated_at, orphan_after, issue_ref) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 p.id,
                 p.surface,
@@ -63,6 +63,7 @@ impl Database {
                 p.created_at,
                 p.updated_at,
                 p.orphan_after,
+                p.issue_ref,
             ],
         )?;
         Ok(())
@@ -75,7 +76,7 @@ impl Database {
             "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
              claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
              outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after \
+             orphan_after, issue_ref \
              FROM uncertainty_prediction \
              WHERE id = ?1 AND deleted_at IS NULL",
         )?;
@@ -102,7 +103,7 @@ impl Database {
             "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
              claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
              outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after \
+             orphan_after, issue_ref \
              FROM uncertainty_prediction \
              WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
              AND deleted_at IS NULL \
@@ -327,7 +328,7 @@ impl Database {
             "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
              claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
              outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after \
+             orphan_after, issue_ref \
              FROM uncertainty_prediction \
              WHERE deleted_at IS NULL \
              AND (?1 IS NULL OR surface = ?1) \
@@ -553,6 +554,7 @@ fn map_prediction_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Prediction> {
         updated_at: row.get(14)?,
         witnessed_at: row.get(15)?,
         orphan_after: row.get(16)?,
+        issue_ref: row.get(17)?,
     })
 }
 
@@ -582,6 +584,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.7).unwrap(),
             prediction_payload: serde_json::json!({ "predicted_tokens": 1500 }),
             orphan_after: Some("2026-06-12T00:00:00+00:00".into()),
+            issue_ref: None,
         }
     }
 
@@ -596,6 +599,22 @@ mod tests {
         assert_eq!(fetched.state, PredictionState::Emitted);
         assert_eq!(fetched.claimed_confidence.value(), 0.7);
         assert!(fetched.outcome_correctness.is_none());
+    }
+
+    #[test]
+    fn insert_and_get_prediction_round_trips_issue_ref() {
+        let db = test_db();
+        let mut input = fresh_input();
+        input.issue_ref = Some("runlegion/legion#1229".into());
+        let with_ref = Prediction::new(input);
+        db.insert_prediction(&with_ref).unwrap();
+        let without_ref = Prediction::new(fresh_input());
+        db.insert_prediction(&without_ref).unwrap();
+
+        let fetched = db.get_prediction(&with_ref.id).unwrap().unwrap();
+        assert_eq!(fetched.issue_ref.as_deref(), Some("runlegion/legion#1229"));
+        let fetched = db.get_prediction(&without_ref.id).unwrap().unwrap();
+        assert_eq!(fetched.issue_ref, None);
     }
 
     #[test]
@@ -900,6 +919,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: None,
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         db.insert_prediction(&p).unwrap();
@@ -931,6 +951,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: Some("2026-05-01T00:00:00+00:00".into()),
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         p.orphan("2026-06-01T00:00:00+00:00").unwrap();
@@ -1079,6 +1100,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: None,
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         p.cohort_key = cohort_key.to_string();
@@ -1106,6 +1128,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: Some("2026-05-01T00:00:00+00:00".into()),
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         p.cohort_key = cohort_key.to_string();
