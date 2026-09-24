@@ -13,8 +13,11 @@
 
 use serde_json::Value;
 
-use crate::decision::{Deciding, Decision, ProxyReason};
-use crate::policy::{Family, Policy, Predicate, Rule, RuleOutcome, ToolKind, ToolRules};
+use crate::decision::{Deciding, Decision, ManagedTarget, ProxyReason};
+use crate::policy::{
+    ArgSpec, FallbackDecision, Family, OperandShape, Policy, Predicate, Rule, RuleOutcome,
+    ToolKind, ToolRules,
+};
 use crate::splitter::{Unreduced, UnreducedReason};
 use crate::{Context, Lookup};
 
@@ -38,19 +41,33 @@ pub struct PartOutcome {
 /// carries no managed binary). A family matches but no rule in it resolves the
 /// arguments -> deny (a managed rule that cannot resolve). A rule matches but
 /// its required recall or consult result is [`Lookup::NotFetched`] -> deny. A
-/// rule matches and its lookups are satisfied -> the rule's outcome.
+/// rule matches and its lookups are satisfied -> the rule's outcome. A
+/// rewrite rule's outcome is judged from the arguments beyond the family's
+/// subcommand words (FR-CMD-008): the rewrite when all of them translate,
+/// the rule's fallback otherwise.
 pub fn decide_bash_invocation(
     policy: &Policy,
     binary: &str,
     args: &[String],
     ctx: &Context,
 ) -> PartOutcome {
-    let Some((verb, rule)) = select_bash_rule(policy, binary, args) else {
+    let Some(selection) = select_bash_rule(policy, binary, args) else {
         return allow_default();
     };
 
-    match rule {
-        Some(rule) => resolve_rule(policy, rule, ctx, Some(verb)),
+    match selection.rule {
+        // The family's own subcommand words are what the target replaces;
+        // every other argument must translate for a rewrite to fire. The
+        // arguments go through whole, with the governed positions beside them,
+        // so a valued flag is judged against its true adjacent argument.
+        Some(rule) => resolve_rule(
+            policy,
+            rule,
+            ctx,
+            Some(selection.verb),
+            args,
+            &selection.governed,
+        ),
         // The family is managed, but no rule resolves these arguments.
         None => PartOutcome {
             decision: deny(
@@ -59,31 +76,48 @@ pub fn decide_bash_invocation(
             ),
             deciding: Deciding::Default,
             is_sym: false,
-            verb: Some(verb),
+            verb: Some(selection.verb),
         },
     }
 }
 
+/// The result of selecting the rule for one Bash invocation.
+pub(crate) struct BashSelection<'a> {
+    /// The verb the matched family names.
+    pub(crate) verb: String,
+    /// The first rule whose predicates hold; `None` when none does.
+    pub(crate) rule: Option<&'a Rule>,
+    /// Indices into the invocation's arguments of the family's subcommand
+    /// words, as the family match consumed them. A rewrite's coverage check
+    /// excludes exactly these positions, so a later argument that happens to
+    /// repeat a subcommand word is still judged.
+    pub(crate) governed: Vec<usize>,
+}
+
 /// The rule that governs one Bash invocation, with the verb its family names.
-/// `None` when no family matches the binary (an unmanaged command);
-/// `Some((verb, None))` when a family matches but no rule in it resolves the
-/// arguments. The one rule-selection step for Bash, shared by
+/// `None` when no family matches the binary (an unmanaged command); a
+/// selection whose `rule` is `None` when a family matches but no rule in it
+/// resolves the arguments. The one rule-selection step for Bash, shared by
 /// [`decide_bash_invocation`] and the lookup pre-pass ([`crate::lookups`]) so
 /// the two cannot disagree about which rule applies.
 pub(crate) fn select_bash_rule<'a>(
     policy: &'a Policy,
     binary: &str,
     args: &[String],
-) -> Option<(String, Option<&'a Rule>)> {
+) -> Option<BashSelection<'a>> {
     let ToolRules::Bash { families } = policy.tools.get(&ToolKind::Bash)? else {
         return None;
     };
-    let (verb, family) = most_specific_family(families, binary, args)?;
+    let (verb, family, governed) = most_specific_family(families, binary, args)?;
     let rule = family
         .rules
         .iter()
         .find(|rule| predicates_hold(&rule.predicates, args));
-    Some((verb, rule))
+    Some(BashSelection {
+        verb,
+        rule,
+        governed,
+    })
 }
 
 /// Which rule governs one Fields-tool call, walking the kind's rules in order
@@ -132,7 +166,9 @@ pub(crate) fn select_fields_rule<'a>(
 /// same lookup gates as a Bash rule.
 pub fn decide_fields(policy: &Policy, kind: ToolKind, input: &Value, ctx: &Context) -> PartOutcome {
     match select_fields_rule(policy, kind, input) {
-        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None),
+        // A Fields call has no argument list: a rewrite here patches one
+        // field and keeps the rest, lossless by construction.
+        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None, &[], &[]),
         FieldsSelection::Unresolvable { rule, field } => {
             let tool = kind.as_str();
             rule_outcome(
@@ -207,8 +243,18 @@ pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
 }
 
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
-/// (FR-CMD-016) and the sym action (FR-CMD-007).
-fn resolve_rule(policy: &Policy, rule: &Rule, ctx: &Context, verb: Option<String>) -> PartOutcome {
+/// (FR-CMD-016), the sym action (FR-CMD-007), and a rewrite's argument
+/// coverage (FR-CMD-008). `args` are the invocation's arguments and
+/// `governed` the indices of the family's subcommand words among them -- both
+/// empty for a Fields call.
+fn resolve_rule(
+    policy: &Policy,
+    rule: &Rule,
+    ctx: &Context,
+    verb: Option<String>,
+    args: &[String],
+    governed: &[usize],
+) -> PartOutcome {
     for (required, lookup, name) in [
         (rule.requires_recall, &ctx.recall, "recall"),
         (rule.requires_consult, &ctx.consult, "consult"),
@@ -228,13 +274,16 @@ fn resolve_rule(policy: &Policy, rule: &Rule, ctx: &Context, verb: Option<String
 
     let (decision, is_sym) = match &rule.outcome {
         RuleOutcome::Allow { note } => (Decision::Allow { note: note.clone() }, false),
-        RuleOutcome::Rewrite { target, reason } => (
-            Decision::Rewrite {
-                target: crate::ManagedTarget::new(target.clone()),
-                reason: reason.clone(),
-            },
-            false,
-        ),
+        RuleOutcome::Rewrite { spec, reason } => {
+            let decision = match first_untranslatable(&spec.translatable, args, governed) {
+                None => Decision::Rewrite {
+                    target: spec.target.clone(),
+                    reason: reason.clone(),
+                },
+                Some(arg) => fallback(&spec.otherwise, arg, &spec.target),
+            };
+            (decision, false)
+        }
         RuleOutcome::Proxy { reason } => (Decision::Proxy { reason: *reason }, false),
         RuleOutcome::Deny { reason, instead } => (deny(reason, instead), false),
         // The operator mark is never copied from the rule into route's output
@@ -258,6 +307,99 @@ fn resolve_rule(policy: &Policy, rule: &Rule, ctx: &Context, verb: Option<String
     };
 
     rule_outcome(rule, decision, is_sym, verb)
+}
+
+/// The first argument `spec` does not cover, as typed, or `None` when every
+/// argument translates (FR-CMD-008). Naming the argument, rather than
+/// answering yes or no, is what lets the default fallback's deny tell the
+/// agent exactly what the target cannot carry (FR-CMD-005).
+///
+/// The family's subcommand words, at the `governed` indices, are skipped in
+/// place: the target replaces them, so they need not translate, but they keep
+/// their positions so no argument is paired with a word it was never adjacent
+/// to.
+///
+/// Every word starting with `-` is an option word and must be declared
+/// verbatim: a combined short-option cluster (`-rn`) or `--` is
+/// untranslatable unless the spec lists it, because splitting or
+/// reinterpreting it needs per-binary knowledge the spec does not carry. A
+/// bare `-` is always untranslatable: the spec parser rejects option words
+/// shorter than two characters, so it can never be declared. A valued flag
+/// consumes its true next argument as its value, or carries it joined with
+/// `=`; a valued flag with no value left, or whose next argument is one of the
+/// family's subcommand words, is untranslatable. Every other word is an
+/// operand, matched against the declared shapes by position.
+fn first_untranslatable<'a>(
+    spec: &ArgSpec,
+    args: &'a [String],
+    governed: &[usize],
+) -> Option<&'a str> {
+    let declared = |list: &[String], word: &str| list.iter().any(|f| f == word);
+    let mut operand_position = 0;
+    let mut index = 0;
+    while index < args.len() {
+        let current = index;
+        index += 1;
+        if governed.contains(&current) {
+            continue;
+        }
+        let raw = args[current].as_str();
+        let arg = dequote_outer(raw);
+        if arg.starts_with('-') {
+            if declared(&spec.flags, arg) {
+                continue;
+            }
+            if declared(&spec.valued_flags, arg) {
+                // The value is the adjacent argument or nothing: a subcommand
+                // word there is not a value, and a later word is not adjacent.
+                if index >= args.len() || governed.contains(&index) {
+                    return Some(raw);
+                }
+                index += 1;
+                continue;
+            }
+            if let Some((name, _)) = arg.split_once('=')
+                && declared(&spec.valued_flags, name)
+            {
+                continue;
+            }
+            return Some(raw);
+        }
+        let fits = match spec.operands.get(operand_position) {
+            Some(OperandShape::Any) => true,
+            Some(OperandShape::Integer) => {
+                !arg.is_empty() && arg.bytes().all(|b| b.is_ascii_digit())
+            }
+            None => false,
+        };
+        if !fits {
+            return Some(raw);
+        }
+        operand_position += 1;
+    }
+    None
+}
+
+/// The Decision a rewrite rule yields when `arg` does not translate to
+/// `target` (FR-CMD-008). The default names both, so the agent learns which
+/// argument blocked the rewrite and which managed command to run instead
+/// (FR-CMD-005). A declared ask never carries the rule's operator mark into
+/// route's output (FR-CMD-006).
+fn fallback(otherwise: &FallbackDecision, arg: &str, target: &ManagedTarget) -> Decision {
+    match otherwise {
+        FallbackDecision::DenyNamingTarget => deny(
+            format!(
+                "`{arg}` has no lossless translation to `{}`, so this command is not rewritten",
+                target.as_str()
+            ),
+            target.as_str(),
+        ),
+        FallbackDecision::Allow { note } => Decision::Allow { note: note.clone() },
+        FallbackDecision::Proxy { reason } => Decision::Proxy { reason: *reason },
+        FallbackDecision::Ask {
+            question, reason, ..
+        } => ask(question, reason),
+    }
 }
 
 /// A [`PartOutcome`] naming `rule` as the deciding entry, with the operator
@@ -297,8 +439,10 @@ fn sym_outcome(job_id: &str, sym_command: &str) -> PartOutcome {
 
 fn sym_outcome_with_verb(job_id: &str, sym_command: &str, verb: Option<String>) -> PartOutcome {
     PartOutcome {
-        // #1228 turns the lossless cases into rewrites; here every sym job
-        // yields the deny naming the sym command (FR-CMD-007).
+        // Every sym job yields the deny naming the sym command (FR-CMD-007).
+        // The argument-coverage rewrite (FR-CMD-008, #1228) is built for
+        // rewrite rules only; a lossless rewrite TO the sym command (operator
+        // decision 01a0ab48) is still open -- no issue builds it yet.
         decision: deny(
             format!("this is a job legion sym serves: use `{sym_command}`"),
             sym_command,
@@ -322,7 +466,8 @@ fn allow_default() -> PartOutcome {
 }
 
 /// The most specific family whose binary and operand words match, with the
-/// verb it names. A family key is whitespace-separated: the first token is the
+/// verb it names and the argument indices its subcommand words matched. A
+/// family key is whitespace-separated: the first token is the
 /// binary, any further tokens are subcommand words the invocation must carry as
 /// its leading operands in order. The verb is those subcommand words, or the
 /// binary when the key names none.
@@ -341,11 +486,14 @@ fn most_specific_family<'a>(
     families: &'a std::collections::BTreeMap<String, Family>,
     binary: &str,
     args: &[String],
-) -> Option<(String, &'a Family)> {
-    let operands: Vec<&str> = args
+) -> Option<(String, &'a Family, Vec<usize>)> {
+    // Each operand with its index in `args`, so the matched subcommand words
+    // can be reported by position.
+    let operands: Vec<(usize, &str)> = args
         .iter()
         .map(|a| dequote_outer(a))
-        .filter(|a| !a.starts_with('-'))
+        .enumerate()
+        .filter(|(_, a)| !a.starts_with('-'))
         .collect();
 
     let mut best: Option<(usize, String, &Family)> = None;
@@ -364,7 +512,7 @@ fn most_specific_family<'a>(
         if subcommands
             .iter()
             .zip(operands.iter())
-            .all(|(want, have)| want == have)
+            .all(|(want, (_, have))| want == have)
         {
             let verb = if subcommands.is_empty() {
                 binary.to_string()
@@ -377,7 +525,14 @@ fn most_specific_family<'a>(
             }
         }
     }
-    best.map(|(_, verb, family)| (verb, family))
+    best.map(|(specificity, verb, family)| {
+        let governed: Vec<usize> = operands
+            .iter()
+            .take(specificity)
+            .map(|(index, _)| *index)
+            .collect();
+        (verb, family, governed)
+    })
 }
 
 /// Removes one matched outer pair of single or double quotes if the whole
@@ -689,7 +844,7 @@ mod tests {
             "sym_jobs": [{"id": "find", "sym_command": "legion sym find-content", "interpreter_patterns": ["rglob"]}],
             "tools": {"Bash": {"families": {
                 "a": {"rules": [{"id": "ra", "outcome": {"kind": "allow"}}]},
-                "b": {"rules": [{"id": "rb", "outcome": {"kind": "rewrite", "target": "legion x", "reason": "r"}}]},
+                "b": {"rules": [{"id": "rb", "outcome": {"kind": "rewrite", "target": "legion x", "reason": "r", "translatable": {}}}]},
                 "c": {"rules": [{"id": "rc", "outcome": {"kind": "proxy", "reason": "binary"}}]},
                 "d": {"rules": [{"id": "rd", "outcome": {"kind": "deny", "reason": "r", "instead": "x"}}]},
                 "e": {"rules": [{"id": "re", "outcome": {"kind": "ask", "question": "q", "reason": "r"}}]}
@@ -1076,6 +1231,238 @@ mod tests {
         );
         assert_eq!(outcome.decision, Decision::Allow { note: None });
         assert_eq!(outcome.deciding, Deciding::Default);
+    }
+
+    // -- rewrite eligibility is a function of the arguments (FR-CMD-008) -----
+
+    /// `gh pr view [N] [--comments] [--json F]` translates to `legion pr view`;
+    /// anything else it carries does not.
+    const PR_VIEW: &str = r#"{"tools": {"Bash": {"families": {"gh pr view": {"rules": [
+        {"id": "pr-view", "outcome": {"kind": "rewrite", "target": "legion pr view",
+         "reason": "legion tracks PRs",
+         "translatable": {"flags": ["--comments"], "valued_flags": ["--json"], "operands": ["integer"]}}}
+    ]}}}}}"#;
+
+    fn decide(p: &Policy, binary: &str, words: &[&str]) -> PartOutcome {
+        decide_bash_invocation(p, binary, &args(words), &Context::default())
+    }
+
+    fn rewrite_target(outcome: &PartOutcome) -> &str {
+        match &outcome.decision {
+            Decision::Rewrite { target, .. } => target.as_str(),
+            other => panic!("expected rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_verb_is_rewritten_for_translatable_arguments_and_denied_for_an_untranslatable_flag() {
+        // The FR-CMD-008 pair: same binary, same verb, different arguments,
+        // different Decisions.
+        let p = policy(PR_VIEW);
+        let translatable = decide(&p, "gh", &["pr", "view", "12"]);
+        let untranslatable = decide(&p, "gh", &["pr", "view", "12", "--web"]);
+
+        assert_eq!(translatable.verb.as_deref(), Some("pr view"));
+        assert_eq!(
+            translatable.verb, untranslatable.verb,
+            "the pair shares a verb"
+        );
+
+        assert_eq!(rewrite_target(&translatable), "legion pr view");
+        match &untranslatable.decision {
+            Decision::Deny(details) => {
+                assert!(details.reason().contains("`--web`"), "{}", details.reason());
+                assert!(details.reason().contains("`legion pr view`"));
+                assert_eq!(details.instead(), "legion pr view");
+            }
+            other => panic!("expected the default deny, got {other:?}"),
+        }
+        // Both are decided by the same rule; only the arguments differ.
+        assert_eq!(translatable.deciding, untranslatable.deciding);
+    }
+
+    #[test]
+    fn one_verb_is_rewritten_for_an_integer_operand_and_denied_for_a_word_operand() {
+        let p = policy(PR_VIEW);
+        assert_eq!(
+            rewrite_target(&decide(&p, "gh", &["pr", "view", "12"])),
+            "legion pr view"
+        );
+        let word = decide(&p, "gh", &["pr", "view", "my-branch"]);
+        assert!(deny_reason(&word).contains("`my-branch`"));
+    }
+
+    #[test]
+    fn one_verb_is_rewritten_within_its_operand_count_and_denied_beyond_it() {
+        let p = policy(PR_VIEW);
+        // Fewer operands than declared is still covered: nothing is dropped.
+        assert_eq!(
+            rewrite_target(&decide(&p, "gh", &["pr", "view"])),
+            "legion pr view"
+        );
+        let extra = decide(&p, "gh", &["pr", "view", "12", "13"]);
+        assert!(deny_reason(&extra).contains("`13`"));
+    }
+
+    #[test]
+    fn a_valued_flag_translates_in_both_spellings_and_needs_its_value() {
+        let p = policy(PR_VIEW);
+        for words in [
+            vec!["pr", "view", "12", "--json", "title"],
+            vec!["pr", "view", "--json=title", "12"],
+            vec!["pr", "view", "--comments", "12"],
+        ] {
+            assert_eq!(
+                rewrite_target(&decide(&p, "gh", &words)),
+                "legion pr view",
+                "{words:?}"
+            );
+        }
+        // `--json` as the last word has no value to translate.
+        let dangling = decide(&p, "gh", &["pr", "view", "12", "--json"]);
+        assert!(deny_reason(&dangling).contains("`--json`"));
+        // Between two of the family's words, `--json`'s adjacent argument is a
+        // subcommand word, not a value: the trailing operand is not swallowed.
+        let mid_family = decide(&p, "gh", &["pr", "--json", "view", "my-branch"]);
+        assert!(
+            deny_reason(&mid_family).contains("`--json`"),
+            "{:?}",
+            mid_family.decision
+        );
+        let mid_family_integer = decide(&p, "gh", &["pr", "--json", "view", "12"]);
+        assert!(deny_reason(&mid_family_integer).contains("`--json`"));
+        // Before the whole subcommand sequence, the same holds.
+        let leading = decide(&p, "gh", &["--json", "pr", "view", "12"]);
+        assert!(
+            deny_reason(&leading).contains("`--json`"),
+            "{:?}",
+            leading.decision
+        );
+        // `=` joined to a switch that takes no value is not the switch.
+        let joined = decide(&p, "gh", &["pr", "view", "--comments=yes"]);
+        assert!(deny_reason(&joined).contains("`--comments=yes`"));
+    }
+
+    #[test]
+    fn option_words_the_spec_does_not_list_verbatim_are_untranslatable() {
+        // A combined cluster, the end-of-options marker and a bare `-` would
+        // each need per-binary knowledge to reinterpret: fail closed.
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"grep": {"rules": [
+            {"id": "g", "outcome": {"kind": "rewrite", "target": "legion sym etc find-content",
+             "reason": "r", "translatable": {"flags": ["-r", "-n"], "operands": ["any"]}}}
+        ]}}}}}"#,
+        );
+        assert_eq!(
+            rewrite_target(&decide(&p, "grep", &["-r", "-n", "foo"])),
+            "legion sym etc find-content"
+        );
+        for (words, named) in [
+            (vec!["-rn", "foo"], "`-rn`"),
+            (vec!["-r", "--", "foo"], "`--`"),
+            (vec!["-r", "-"], "`-`"),
+        ] {
+            let outcome = decide(&p, "grep", &words);
+            assert!(deny_reason(&outcome).contains(named), "{words:?}");
+        }
+    }
+
+    #[test]
+    fn the_family_subcommand_words_are_governed_but_a_repeat_of_one_is_judged() {
+        // `issue` and `list` are the family's words and translate by being the
+        // target; a later `issue` is an operand the empty spec does not cover.
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"gh issue list": {"rules": [
+            {"id": "l", "outcome": {"kind": "rewrite", "target": "legion issue list",
+             "reason": "r", "translatable": {}}}
+        ]}}}}}"#,
+        );
+        assert_eq!(
+            rewrite_target(&decide(&p, "gh", &["issue", "list"])),
+            "legion issue list"
+        );
+        let repeated = decide(&p, "gh", &["issue", "list", "issue"]);
+        assert!(deny_reason(&repeated).contains("`issue`"));
+        // A global option before the subcommand is still an argument: it is
+        // not one of the family's words, so it must translate too.
+        let global = decide(&p, "gh", &["--no-pager", "issue", "list"]);
+        assert!(deny_reason(&global).contains("`--no-pager`"));
+    }
+
+    #[test]
+    fn quoted_arguments_are_judged_by_the_value_the_shell_sees() {
+        let p = policy(PR_VIEW);
+        assert_eq!(
+            rewrite_target(&decide(&p, "gh", &["pr", "view", "\"12\"", "'--comments'"])),
+            "legion pr view"
+        );
+        let quoted = decide(&p, "gh", &["pr", "view", "'--web'"]);
+        assert!(
+            deny_reason(&quoted).contains("`'--web'`"),
+            "names it as typed"
+        );
+    }
+
+    #[test]
+    fn a_declared_fallback_arm_applies_instead_of_the_default_deny() {
+        // Same verb, different arguments: rewrite for the translatable ones,
+        // the rule's declared `otherwise` (here: proxy) for the rest.
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"gh pr diff": {"rules": [
+            {"id": "diff", "outcome": {"kind": "rewrite", "target": "legion pr diff",
+             "reason": "r", "translatable": {"operands": ["integer"]},
+             "otherwise": {"kind": "proxy", "reason": "full-patch"}}}
+        ]}}}}}"#,
+        );
+        assert_eq!(
+            rewrite_target(&decide(&p, "gh", &["pr", "diff", "7"])),
+            "legion pr diff"
+        );
+        assert_eq!(
+            decide(&p, "gh", &["pr", "diff", "7", "--patch"]).decision,
+            Decision::Proxy {
+                reason: ProxyReason::FullPatch
+            }
+        );
+    }
+
+    #[test]
+    fn a_declared_ask_fallback_never_carries_the_operator_mark() {
+        let p = policy(
+            r#"{"tools": {"Bash": {"families": {"gh pr merge": {"rules": [
+            {"id": "merge", "outcome": {"kind": "rewrite", "target": "legion pr merge",
+             "reason": "r", "translatable": {"operands": ["integer"]},
+             "otherwise": {"kind": "ask", "question": "merge like this?", "reason": "unusual flags",
+                           "needs_operator": true}}}
+        ]}}}}}"#,
+        );
+        let outcome = decide(&p, "gh", &["pr", "merge", "7", "--admin"]);
+        assert!(matches!(outcome.decision, Decision::Ask(_)));
+        assert_eq!(
+            outcome.deciding,
+            Deciding::Rule {
+                id: "merge".to_string(),
+                needs_operator: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_fields_rewrite_needs_no_translatable_declaration() {
+        // The shipped Explore rewrite's shape: lossless by construction.
+        let p = policy(
+            r#"{"tools": {"Task": {"rules": [
+            {"id": "explore", "predicates": [{"kind": "field-equals", "field": "subagent_type", "any_of": ["explore"], "ignore_case": true}],
+             "outcome": {"kind": "rewrite", "target": "legion:legion-explore", "reason": "r"}}
+        ]}}}"#,
+        );
+        let outcome = decide_fields(
+            &p,
+            ToolKind::Task,
+            &json(r#"{"subagent_type": "Explore", "prompt": "p", "description": "d"}"#),
+            &Context::default(),
+        );
+        assert_eq!(rewrite_target(&outcome), "legion:legion-explore");
     }
 
     #[test]

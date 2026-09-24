@@ -653,9 +653,10 @@ mod tests {
                 {"id": "rm-rf", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
                  "outcome": {"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}}
             ]},
-            "gh issue": {"rules": [
-                {"id": "gh-issue-list", "predicates": [{"kind": "arg-present", "arg": "list"}],
-                 "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "legion tracks issues"}}
+            "gh issue list": {"rules": [
+                {"id": "gh-issue-list",
+                 "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "legion tracks issues",
+                             "translatable": {}}}
             ]},
             "gh pr": {"rules": [
                 {"id": "gh-pr", "outcome": {"kind": "ask", "question": "touch the PR?",
@@ -945,13 +946,43 @@ mod tests {
 
     #[test]
     fn a_rewrite_that_would_drop_an_operand_denies_instead() {
-        // `gh issue list src/` carries a path fact the target cannot express;
-        // the replacement refuses and the agent sees a deny, never a
-        // narrower command that ran.
-        let response = respond_stub(&payload("gh issue list src/"), POLICY);
+        // A rewrite whose facts carry a path the target cannot express: the
+        // replacement refuses and the agent sees a deny, never a narrower
+        // command that ran. Built by hand, because route itself no longer
+        // rewrites `gh issue list src/` (#1228: `src/` is not translatable).
+        let routed = Routed {
+            decision: Decision::Rewrite {
+                target: ManagedTarget::new("legion issue list"),
+                reason: "legion tracks issues".to_string(),
+            },
+            facts: Facts {
+                paths: vec!["src/".to_string()],
+                ..Facts::default()
+            },
+            deciding: Deciding::Rule {
+                id: "gh-issue-list".to_string(),
+                needs_operator: false,
+            },
+        };
+        let response = apply(&routed, &parsed_payload("gh issue list src/"));
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
         assert!(reason(&response).contains("path operand"));
+    }
+
+    #[test]
+    fn route_denies_a_rewrite_whose_argument_does_not_translate() {
+        // #1228: the rule declares no translatable operand, so route denies
+        // before the adapter builds anything, naming the argument and the
+        // managed command to run instead.
+        let response = respond_stub(&payload("gh issue list src/"), POLICY);
+        assert_denied(&response);
+        assert!(
+            reason(&response).contains("`src/`"),
+            "got: {}",
+            reason(&response)
+        );
+        assert!(reason(&response).contains("instead: legion issue list"));
     }
 
     #[test]
