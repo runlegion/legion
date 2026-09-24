@@ -29,7 +29,10 @@ Discovery that grounds design and contradicts nothing -- correct, not empty work
 insights still surface (discourse the intent never claimed), and they inform how; but an
 emergent that challenges a committed item (a settled proposal, a boundary, or the
 `what_it_is` framing) is surfaced to the operator as a note, never scored as a contradiction
-of need. Contradiction is reserved for the open claims the agenda names.
+of need. Contradiction is reserved for the open claims the agenda names. Before scoring,
+read the intent (`legion document view <intent-id> --json`) for its `settled` proposals,
+`boundaries`, and `what_it_is`, so an emergent that challenges one is recognised and
+routed as a note.
 
 ## Probe the corpus first
 

@@ -46,12 +46,12 @@ never hands the gap to the operator.
   `settled` proposal, the `what_it_is` framing, and the intent's `boundaries` are the
   operator's bet -- Discovery informs HOW they are designed, never WHETHER they are needed
   (an intent's `meta.purpose` may say so outright). Hypotheses to test come only from the
-  parts the intent leaves open: proposals marked `needs_pressure_test`, unresolved
-  `open_questions`, and `cut_or_broken` whys that no settled proposal already commits to
-  fixing. The intent review produces claims from those alone; sd-discover returns their
-  verdicts; and the artifacts are drawn from the committed direction plus whatever survived
-  testing of the open parts. A fully-committed intent is designed straight through, not
-  relitigated.
+  parts the intent leaves open: proposals marked `needs_pressure_test`, the intent's
+  `claims[]` test cards, unresolved `open_questions`, and `cut_or_broken` whys that no
+  settled proposal already commits to fixing. The intent review produces claims from those
+  alone; sd-discover returns their verdicts; and the artifacts are drawn from the committed
+  direction plus whatever survived testing of the open parts. A fully-committed intent is
+  designed straight through, not relitigated.
 - **Evidence lives in the Discovery.** Every statement in a persona, journey, or blueprint
   traces to a Discovery insight or an intent field. No artifact carries evidence of its own.
 - **Emotions are data.** The schemas carry affect as valence numbers (-3 to 3 on journey

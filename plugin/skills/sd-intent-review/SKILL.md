@@ -26,12 +26,12 @@ committed direction: Discovery informs HOW these are designed, never WHETHER the
 needed. An intent may say so outright -- one repo's `meta.purpose` reads "every direction
 item is required; Discovery informs how each is designed and does not decide whether it is
 needed." Derive a service or claim to test ONLY from what the intent leaves genuinely open:
-proposals carrying `needs_pressure_test`, unresolved `open_questions`, and
-`current_state.cut_or_broken` whys that no settled proposal already commits to fixing. A
-`cut_or_broken` why that is the rationale for a settled proposal is committed alongside that
-proposal -- testing it relitigates the committed fix through the `cut_or_broken` door, so it
-gets no test. Never derive a test from a `boundary`, from `what_it_is`, or from a `settled`
-proposal that carries no `needs_pressure_test` flag.
+proposals carrying `needs_pressure_test`, the intent's `claims[]` test cards, unresolved
+`open_questions`, and `current_state.cut_or_broken` whys that no settled proposal already
+commits to fixing. A `cut_or_broken` why that is the rationale for a settled proposal is
+committed alongside that proposal -- testing it relitigates the committed fix through
+the `cut_or_broken` door, so it gets no test. Never derive a test from a `boundary`, from
+`what_it_is`, or from a `settled` proposal that carries no `needs_pressure_test` flag.
 
 A proposal has two independent fields (`status: proposed|settled` and a `needs_pressure_test`
 boolean); classify by both, so no combination falls through. `needs_pressure_test: true`
@@ -43,7 +43,7 @@ stated bet -- so escalate it to the operator as an open direction to resolve (re
 not read the intent's prose to GUESS a proposal's commitment the way the later `sd-write-spec`
 does; with no discovery evidence in hand yet, it escalates rather than judges -- the two steps
 meet the same schema shape with different licenses by design. An intent whose direction is
-fully committed yields an
+fully committed, with no `claims[]` test cards, yields an
 EMPTY agenda -- that is correct, not a failure, and sd-discover then only grounds how.
 Manufacturing claims against a committed direction is over-producing in its most damaging
 form: it hands the operator's bet to outside discourse to relitigate.
@@ -63,8 +63,9 @@ goes back to its writer, not forward to a review.
 ## Procedure
 
 1. Read the intent in full: `legion document view <intent-id> --json`. The fields that
-   feed the agenda: `what_it_is` (the reason to exist), `direction.becoming` and its
-   proposals, `current_state.cut_or_broken` (an entry's `why` is a claim only when no settled
+   feed the agenda: `what_it_is` (the reason to exist -- read for context and the distill
+   gate, never itself an agenda item), `direction.becoming` and its proposals,
+   `current_state.cut_or_broken` (an entry's `why` is a claim only when no settled
    proposal already commits to fixing it -- see "What the intent commits"),
    `current_state.known_gaps` where present, `open_questions` (unresolved ones ARE agenda
    items), and `evidence` (existing lenses and crawl topics constrain where proof can come
@@ -74,10 +75,10 @@ goes back to its writer, not forward to a review.
    "What the intent commits" -- a service wholly under settled proposals is committed and
    gets no test; a service part-committed and part-open gets a test scoped to its open part
    only), one entry `{name, actor, goal, test}` where `test` states what real discourse
-   would confirm the need exists. Lightweight hypotheses only -- no `system_response`, no real/planned
-   status, no merging or splitting of services. If two candidate services blur together,
-   list both; sd-discover's evidence will sort them. A service with two actors names the
-   primary in `actor` and the second inside `goal`.
+   would confirm the need exists. Lightweight hypotheses only -- no `system_response`, no
+   real/planned status, no merging or splitting of services. If two candidate services
+   blur together, list both; sd-discover's evidence will sort them. A service with two
+   actors names the primary in `actor` and the second inside `goal`.
 
 3. Derive **claims_to_test**: for each genuinely-open claim (see "What the intent commits";
    start from `needs_pressure_test` proposals, `current_state.cut_or_broken` whys that no
