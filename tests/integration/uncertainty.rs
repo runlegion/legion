@@ -562,3 +562,74 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
         "0.5",
     ]));
 }
+
+#[test]
+fn uncertainty_predictions_lists_emitted_rows() {
+    // #902: the raw-state read. Empty DB says "no predictions exist";
+    // after an emit, --json returns the row and a surface filter that
+    // misses says so distinctly.
+    let dir = tempfile::tempdir().unwrap();
+    let empty = run_ok(legion_cmd(dir.path()).args(["uncertainty", "predictions"]));
+    assert!(empty.contains("no predictions exist"), "{empty}");
+
+    let emit = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "emit",
+        "--surface",
+        "legion.gate",
+        "--feature-key",
+        "gate.simplify",
+        "--input-fingerprint",
+        "fp-pred-1",
+        "--model",
+        "claude-opus-4-7",
+        "--model-version",
+        "4.7",
+        "--claimed-confidence",
+        "0.6",
+        "--payload",
+        r#"{}"#,
+    ]));
+    let emit_out: serde_json::Value = serde_json::from_str(emit.trim()).unwrap();
+    let id = emit_out["id"].as_str().unwrap();
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--surface",
+        "legion.gate",
+        "--state",
+        "emitted",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id);
+    assert_eq!(rows[0]["state"], "emitted");
+
+    let miss = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--surface",
+        "legion.task",
+    ]));
+    assert!(
+        miss.contains("no predictions matched the filters"),
+        "{miss}"
+    );
+}
+
+#[test]
+fn uncertainty_predictions_unknown_state_exits_nonzero_naming_valid_values() {
+    // #902: a typo in --state must fail loudly, not read as an empty set.
+    let dir = tempfile::tempdir().unwrap();
+    let (_stdout, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["uncertainty", "predictions", "--state", "emited"]));
+    for valid in ["emitted", "witnessed", "calibrated", "orphaned", "retired"] {
+        assert!(
+            stderr.contains(valid),
+            "stderr should name {valid}: {stderr}"
+        );
+    }
+}

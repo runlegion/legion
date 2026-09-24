@@ -308,6 +308,38 @@ impl Database {
             .map_err(UncertaintyError::Database)
     }
 
+    /// Every live prediction matching the optional surface/state filters,
+    /// newest first. Read-only (#902): the raw-state view the derived
+    /// `calibration`/`orphans` reads cannot give.
+    ///
+    /// Deliberately uncapped -- `legion uncertainty predictions` groups the
+    /// whole result into (surface, state) totals before truncating the row
+    /// listing, and a capped query would make those totals lie. Returns the
+    /// crate-level `LegionError` rather than `UncertaintyError` so a DB
+    /// failure propagates as `LegionError::Database` via `?` (every failure
+    /// here, row decoding included, is a `rusqlite::Error`).
+    pub fn list_predictions(
+        &self,
+        surface: Option<&str>,
+        state: Option<PredictionState>,
+    ) -> crate::error::Result<Vec<Prediction>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
+             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
+             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
+             orphan_after \
+             FROM uncertainty_prediction \
+             WHERE deleted_at IS NULL \
+             AND (?1 IS NULL OR surface = ?1) \
+             AND (?2 IS NULL OR state = ?2) \
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let state_str: Option<&str> = state.map(|s| s.as_str());
+        let rows = stmt.query_map(params![surface, state_str], map_prediction_row)?;
+        let predictions: Vec<Prediction> = rows.collect::<rusqlite::Result<Vec<Prediction>>>()?;
+        Ok(predictions)
+    }
+
     /// Move stale `emitted` predictions into the `orphaned` state.
     ///
     /// A prediction orphans when its `orphan_after` deadline has passed
@@ -675,6 +707,124 @@ mod tests {
         let filtered = db.count_orphans_by_surface(Some("legion.task")).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].count, 3);
+    }
+
+    /// Insert a prediction with a caller-chosen `created_at` so ordering
+    /// assertions do not depend on wall-clock resolution.
+    fn seed_at(
+        db: &crate::db::Database,
+        surface: &str,
+        created_at: &str,
+        orphaned: bool,
+    ) -> Prediction {
+        let mut input = fresh_input();
+        input.surface = surface.into();
+        let mut p = Prediction::new(input);
+        p.created_at = created_at.into();
+        p.updated_at = created_at.into();
+        if orphaned {
+            p.orphan(created_at).unwrap();
+        }
+        db.insert_prediction(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn list_predictions_empty_db_returns_empty() {
+        let db = test_db();
+        assert!(db.list_predictions(None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_predictions_returns_all_newest_first() {
+        let db = test_db();
+        let a = seed_at(&db, "legion.task", "2026-06-01T00:00:00+00:00", false);
+        let b = seed_at(&db, "legion.gate", "2026-06-03T00:00:00+00:00", true);
+        let c = seed_at(&db, "legion.task", "2026-06-02T00:00:00+00:00", true);
+        let ids: Vec<String> = db
+            .list_predictions(None, None)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec![b.id, c.id, a.id]);
+    }
+
+    #[test]
+    fn list_predictions_filters_by_surface_state_and_both() {
+        let db = test_db();
+        let task_emitted = seed_at(&db, "legion.task", "2026-06-01T00:00:00+00:00", false);
+        let task_orphaned = seed_at(&db, "legion.task", "2026-06-02T00:00:00+00:00", true);
+        let gate_orphaned = seed_at(&db, "legion.gate", "2026-06-03T00:00:00+00:00", true);
+
+        let by_surface: Vec<String> = db
+            .list_predictions(Some("legion.task"), None)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            by_surface,
+            vec![task_orphaned.id.clone(), task_emitted.id.clone()]
+        );
+
+        let by_state: Vec<String> = db
+            .list_predictions(None, Some(PredictionState::Orphaned))
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            by_state,
+            vec![gate_orphaned.id.clone(), task_orphaned.id.clone()]
+        );
+
+        let both: Vec<String> = db
+            .list_predictions(Some("legion.task"), Some(PredictionState::Emitted))
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(both, vec![task_emitted.id]);
+
+        assert!(
+            db.list_predictions(Some("legion.gate"), Some(PredictionState::Witnessed))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_predictions_db_failure_is_legion_database_error() {
+        let db = test_db();
+        db.conn
+            .execute_batch("DROP TABLE uncertainty_prediction")
+            .unwrap();
+        let err = db.list_predictions(None, None).unwrap_err();
+        assert!(
+            matches!(err, crate::error::LegionError::Database(_)),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn list_predictions_excludes_soft_deleted_rows() {
+        let db = test_db();
+        let live = seed_at(&db, "legion.task", "2026-06-01T00:00:00+00:00", false);
+        let gone = seed_at(&db, "legion.task", "2026-06-02T00:00:00+00:00", false);
+        db.conn
+            .execute(
+                "UPDATE uncertainty_prediction SET deleted_at = ?1 WHERE id = ?2",
+                params!["2026-06-05T00:00:00+00:00", gone.id],
+            )
+            .unwrap();
+        let ids: Vec<String> = db
+            .list_predictions(None, None)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec![live.id]);
     }
 
     #[test]
