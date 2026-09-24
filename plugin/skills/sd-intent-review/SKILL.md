@@ -172,7 +172,7 @@ exists to prevent. The discover report names each claim left unwitnessed and why
 - Deriving a service or claim to test from a `boundary`, from `what_it_is`, from a `settled`
   proposal that carries no `needs_pressure_test` flag, or from a `cut_or_broken` why that a
   settled proposal already commits to fixing: a committed direction is designed, not
-  relitigated. An all-settled intent's agenda is empty.
+  relitigated. An all-settled intent with no `claims[]` test cards has an empty agenda.
 - Silently dropping a `proposed` proposal that carries no `needs_pressure_test` flag: it is
   undecided, so escalate it to the operator, never guess it committed or open.
 - Reviewing an intent that does not exist, does not validate, or does not pass the distill
