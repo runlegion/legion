@@ -175,9 +175,8 @@ impl Predicate {
 /// resolves to a Decision via the referenced [`SymJob`] -- a deny naming the
 /// sym command (a lossless rewrite to it, per operator decision 01a0ab48, is
 /// not built by any issue yet). It is carried here, rather than as a plain
-/// deny, so the
-/// evaluator can give a sym job precedence over the strictest-order fold
-/// (FR-CMD-007).
+/// deny, so the evaluator can give a sym job precedence over the
+/// strictest-order fold (FR-CMD-007).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleOutcome {
     Allow {
@@ -1117,15 +1116,16 @@ fn parse_arg_spec(value: &Value, pointer: &str) -> Result<ArgSpec, PolicyError> 
 fn parse_fallback(value: &Value, pointer: &str) -> Result<FallbackDecision, PolicyError> {
     let map = as_object(value, pointer)?;
     let kind = require_string(map, "kind", pointer)?;
+    let not_a_fallback = || PolicyError::WrongType {
+        pointer: child_pointer(pointer, "kind"),
+        expected: "a fallback arm: deny, allow, proxy or ask".to_string(),
+    };
     match kind.as_str() {
         "deny" => {
             check_known_keys(map, pointer, &["kind"])?;
             Ok(FallbackDecision::DenyNamingTarget)
         }
-        "rewrite" | "sym" => Err(PolicyError::WrongType {
-            pointer: child_pointer(pointer, "kind"),
-            expected: "a fallback arm: deny, allow, proxy or ask".to_string(),
-        }),
+        "rewrite" | "sym" => Err(not_a_fallback()),
         _ => match parse_outcome(value, pointer, ToolKind::Bash, &[])? {
             RuleOutcome::Allow { note } => Ok(FallbackDecision::Allow { note }),
             RuleOutcome::Proxy { reason } => Ok(FallbackDecision::Proxy { reason }),
@@ -1141,10 +1141,7 @@ fn parse_fallback(value: &Value, pointer: &str) -> Result<FallbackDecision, Poli
             // "deny", "rewrite" and "sym" are handled above; parse_outcome
             // yields nothing else for the remaining kinds.
             RuleOutcome::Deny { .. } | RuleOutcome::Rewrite { .. } | RuleOutcome::Sym { .. } => {
-                Err(PolicyError::WrongType {
-                    pointer: child_pointer(pointer, "kind"),
-                    expected: "a fallback arm: deny, allow, proxy or ask".to_string(),
-                })
+                Err(not_a_fallback())
             }
         },
     }
