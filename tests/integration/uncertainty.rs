@@ -767,3 +767,38 @@ fn uncertainty_predictions_issue_filter_returns_that_issue_only() {
     ]));
     assert!(stderr.contains("<owner>/<repo>#<number>"), "{stderr}");
 }
+
+#[test]
+fn uncertainty_predictions_issue_json_notes_truncation_on_stderr() {
+    // #1258 review: verify reads `predictions --issue <ref> --json` with no
+    // --limit, so a cut must be named on stderr (stdout stays a parseable
+    // array of --limit rows), and a result within the limit must stay quiet.
+    let dir = tempfile::tempdir().unwrap();
+    for fp in ["fp-trunc-1", "fp-trunc-2", "fp-trunc-3"] {
+        run_ok(legion_cmd(dir.path()).args(emit_args(fp, &["--issue", "runlegion/legion#1258"])));
+    }
+    let query = |limit: &str| {
+        run_ok_output(legion_cmd(dir.path()).args([
+            "uncertainty",
+            "predictions",
+            "--issue",
+            "runlegion/legion#1258",
+            "--json",
+            "--limit",
+            limit,
+        ]))
+    };
+
+    let cut = query("2");
+    let rows: serde_json::Value = serde_json::from_slice(&cut.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    let stderr = String::from_utf8_lossy(&cut.stderr);
+    assert!(stderr.contains("most recent 2 of 3"), "{stderr}");
+    assert!(stderr.contains("--limit 3"), "{stderr}");
+
+    let whole = query("3");
+    let rows: serde_json::Value = serde_json::from_slice(&whole.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 3);
+    let stderr = String::from_utf8_lossy(&whole.stderr);
+    assert!(!stderr.contains("most recent"), "{stderr}");
+}
