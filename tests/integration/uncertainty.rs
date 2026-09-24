@@ -719,3 +719,51 @@ fn uncertainty_emit_malformed_issue_exits_nonzero() {
         );
     }
 }
+
+#[test]
+fn uncertainty_predictions_issue_filter_returns_that_issue_only() {
+    // #1258: `predictions --issue` is verify's lookup -- the emitted row for
+    // the issue comes back, another issue's row does not, and a malformed
+    // key is a usage error rather than an empty result.
+    let dir = tempfile::tempdir().unwrap();
+    let mine = run_ok(legion_cmd(dir.path()).args(emit_args(
+        "fp-issue-4",
+        &["--issue", "runlegion/legion#1229"],
+    )));
+    let mine: serde_json::Value = serde_json::from_str(mine.trim()).unwrap();
+    run_ok(legion_cmd(dir.path()).args(emit_args(
+        "fp-issue-5",
+        &["--issue", "runlegion/legion#1227"],
+    )));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--issue",
+        "runlegion/legion#1229",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], mine["id"]);
+
+    let none = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--issue",
+        "runlegion/legion#9999",
+    ]));
+    assert!(
+        none.contains("no predictions matched the filters (issue=runlegion/legion#9999)"),
+        "{none}"
+    );
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--issue",
+        "legion#1229",
+    ]));
+    assert!(stderr.contains("<owner>/<repo>#<number>"), "{stderr}");
+}

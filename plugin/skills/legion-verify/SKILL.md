@@ -41,6 +41,10 @@ never `pass` -- verify never asserts an unprovable claim.
    - `git diff main..HEAD` -- the change that addresses it.
    - Run the tests (`cargo test`, the relevant suite) and note the test that exercises it.
    - For a behavioral criterion, describe the observable behavior you confirmed.
+   - For the predictions criterion, fetch what was emitted for this issue by its issue ref --
+     `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` -- not by searching
+     emission text, and witness each row it returns. When it returns zero rows, state plainly
+     that no prediction carries that issue ref; zero rows is not "all witnessed".
 
 3. **Judge each criterion** honestly:
    - `pass` -- satisfied, and you can cite the test / file:line / behavior that proves it.

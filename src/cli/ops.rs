@@ -213,6 +213,9 @@ pub(crate) enum UncertaintyAction {
         /// Filter to one state (emitted, witnessed, calibrated, orphaned, retired).
         #[arg(long)]
         state: Option<String>,
+        /// Only the predictions emitted for this issue, as owner/repo#N (#1258).
+        #[arg(long, value_parser = parse_issue_ref)]
+        issue: Option<String>,
         /// Emit JSON instead of the human table.
         #[arg(long)]
         json: bool,
@@ -594,6 +597,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
         UncertaintyAction::Predictions {
             surface,
             state,
+            issue,
             json,
             limit,
         } => {
@@ -602,6 +606,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 &mut out,
                 surface.as_deref(),
                 state.as_deref(),
+                issue.as_deref(),
                 json,
                 limit,
             )?;
@@ -722,6 +727,7 @@ fn write_predictions(
     out: &mut impl std::io::Write,
     surface: Option<&str>,
     state: Option<&str>,
+    issue: Option<&str>,
     json: bool,
     limit: u32,
 ) -> error::Result<()> {
@@ -739,11 +745,20 @@ fn write_predictions(
         },
     };
 
-    let predictions: Vec<uncertainty::types::Prediction> =
-        database.list_predictions(surface, state_filter)?;
+    // `--issue` reads through the indexed issue_ref lookup (#1258); the
+    // surface/state filters then narrow that set the same way the SQL does.
+    let predictions: Vec<uncertainty::types::Prediction> = match issue {
+        Some(issue_ref) => database
+            .predictions_for_issue(issue_ref)?
+            .into_iter()
+            .filter(|p| surface.is_none_or(|s| p.surface == s))
+            .filter(|p| state_filter.is_none_or(|st| p.state == st))
+            .collect(),
+        None => database.list_predictions(surface, state_filter)?,
+    };
 
     if predictions.is_empty() {
-        let message: String = if surface.is_none() && state_filter.is_none() {
+        let message: String = if surface.is_none() && state_filter.is_none() && issue.is_none() {
             "[legion uncertainty] no predictions exist: nothing has been emitted to this database"
                 .to_string()
         } else {
@@ -754,6 +769,9 @@ fn write_predictions(
             }
             if let Some(st) = state_filter {
                 filters.push(format!("state={}", st.as_str()));
+            }
+            if let Some(i) = issue {
+                filters.push(format!("issue={i}"));
             }
             format!(
                 "[legion uncertainty] no predictions matched the filters ({}); \
@@ -1441,7 +1459,7 @@ mod tests {
         limit: u32,
     ) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        write_predictions(db, &mut buf, surface, state, json, limit).unwrap();
+        write_predictions(db, &mut buf, surface, state, None, json, limit).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -1578,7 +1596,7 @@ mod tests {
             .execute_batch("DROP TABLE uncertainty_prediction")
             .unwrap();
         let mut buf: Vec<u8> = Vec::new();
-        let err = write_predictions(&db, &mut buf, None, None, false, 50).unwrap_err();
+        let err = write_predictions(&db, &mut buf, None, None, None, false, 50).unwrap_err();
         assert!(matches!(err, error::LegionError::Database(_)), "{err}");
     }
 
@@ -1594,7 +1612,8 @@ mod tests {
     fn predictions_unknown_state_errors_naming_valid_set_even_on_empty_db() {
         let db = test_db();
         let mut buf: Vec<u8> = Vec::new();
-        let err = write_predictions(&db, &mut buf, None, Some("bogus"), false, 50).unwrap_err();
+        let err =
+            write_predictions(&db, &mut buf, None, Some("bogus"), None, false, 50).unwrap_err();
         let msg: String = err.to_string();
         assert!(matches!(err, error::LegionError::WorkSource(_)), "{msg}");
         for valid in ["emitted", "witnessed", "calibrated", "orphaned", "retired"] {
@@ -1602,6 +1621,54 @@ mod tests {
         }
         assert!(msg.contains("bogus"));
         assert!(buf.is_empty(), "nothing may print on an invalid state");
+    }
+
+    #[test]
+    fn predictions_issue_filter_returns_only_that_issue_and_names_it_on_a_miss() {
+        let db = test_db();
+        let mut mine = input("legion.task", None);
+        mine.issue_ref = Some("runlegion/legion#1229".into());
+        let mine = Prediction::new(mine);
+        db.insert_prediction(&mine).unwrap();
+        let mut other = input("legion.task", None);
+        other.issue_ref = Some("runlegion/legion#1227".into());
+        db.insert_prediction(&Prediction::new(other)).unwrap();
+        db.insert_prediction(&Prediction::new(input("legion.task", None)))
+            .unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_predictions(
+            &db,
+            &mut buf,
+            None,
+            None,
+            Some("runlegion/legion#1229"),
+            true,
+            50,
+        )
+        .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], mine.id.as_str());
+
+        // Surface/state narrow the issue's set; a miss names every filter.
+        let mut buf: Vec<u8> = Vec::new();
+        write_predictions(
+            &db,
+            &mut buf,
+            Some("legion.gate"),
+            None,
+            Some("runlegion/legion#1229"),
+            false,
+            50,
+        )
+        .unwrap();
+        let text: String = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("no predictions matched the filters (surface=legion.gate, issue=runlegion/legion#1229)"),
+            "{text}"
+        );
+        assert!(text.contains("3 prediction(s) exist unfiltered"), "{text}");
     }
 
     #[test]
