@@ -17,6 +17,20 @@ use super::types::{
     CalibrationSnapshot, Confidence, Correctness, OutcomeLabel, Prediction, PredictionState,
 };
 
+/// `SELECT <every column map_prediction_row reads> FROM uncertainty_prediction `,
+/// as a literal for `concat!`. One list for every prediction reader, so a new
+/// column cannot reach `map_prediction_row` in one query and be missing from
+/// another -- the rows are decoded by position, so a short list fails at read.
+macro_rules! select_prediction {
+    () => {
+        "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
+         claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
+         outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
+         orphan_after, issue_ref \
+         FROM uncertainty_prediction "
+    };
+}
+
 /// One row of the surface-grouped orphan summary.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OrphanSummaryRow {
@@ -72,14 +86,10 @@ impl Database {
     /// Fetch one prediction by id. None if the row does not exist or is
     /// soft-deleted.
     pub fn get_prediction(&self, id: &str) -> Result<Option<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after, issue_ref \
-             FROM uncertainty_prediction \
-             WHERE id = ?1 AND deleted_at IS NULL",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE id = ?1 AND deleted_at IS NULL"
+        ))?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(map_prediction_row(row)?))
@@ -99,17 +109,13 @@ impl Database {
         surface: &str,
         fingerprint: &str,
     ) -> Result<Option<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after, issue_ref \
-             FROM uncertainty_prediction \
-             WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
-             AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id DESC \
-             LIMIT 1",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
+                 AND deleted_at IS NULL \
+                 ORDER BY created_at DESC, id DESC \
+                 LIMIT 1"
+        ))?;
         let mut rows = stmt.query(params![surface, fingerprint])?;
         if let Some(row) = rows.next()? {
             Ok(Some(map_prediction_row(row)?))
@@ -324,17 +330,13 @@ impl Database {
         surface: Option<&str>,
         state: Option<PredictionState>,
     ) -> crate::error::Result<Vec<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after, issue_ref \
-             FROM uncertainty_prediction \
-             WHERE deleted_at IS NULL \
-             AND (?1 IS NULL OR surface = ?1) \
-             AND (?2 IS NULL OR state = ?2) \
-             ORDER BY created_at DESC, id DESC",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE deleted_at IS NULL \
+                 AND (?1 IS NULL OR surface = ?1) \
+                 AND (?2 IS NULL OR state = ?2) \
+                 ORDER BY created_at DESC, id DESC"
+        ))?;
         let state_str: Option<&str> = state.map(|s| s.as_str());
         let rows = stmt.query_map(params![surface, state_str], map_prediction_row)?;
         let predictions: Vec<Prediction> = rows.collect::<rusqlite::Result<Vec<Prediction>>>()?;
@@ -347,15 +349,10 @@ impl Database {
     /// column, never a search of payload text. Returns `LegionError` for the
     /// same reason `list_predictions` does.
     pub fn predictions_for_issue(&self, issue_ref: &str) -> crate::error::Result<Vec<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after, issue_ref \
-             FROM uncertainty_prediction \
-             WHERE issue_ref = ?1 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id DESC",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE issue_ref = ?1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC"
+        ))?;
         let rows = stmt.query_map(params![issue_ref], map_prediction_row)?;
         let predictions: Vec<Prediction> = rows.collect::<rusqlite::Result<Vec<Prediction>>>()?;
         Ok(predictions)
