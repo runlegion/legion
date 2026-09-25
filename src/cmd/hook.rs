@@ -93,6 +93,7 @@ use serde_json::{Map, Value, json};
 use crate::cmd::config::RouteSettings;
 use crate::cmd::prediction::{self, AppliedRewrite};
 use crate::cmd::replacement::{build_replacement, rewritable_field};
+use crate::db::Database;
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
 use crate::timerange::TimeRange;
@@ -242,21 +243,34 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 /// written; the prediction for a rewrite the decision applied is emitted
 /// here. Each runs under [`best_effort`], so a failure or a panic in either
 /// is a line on stderr, not a deny.
+///
+/// The store is opened once, here, before the pass starts: `Database::open`
+/// runs the migration chain, and two connections migrating a fresh store at
+/// once collide. The emit uses this handle; the pass and the decision's
+/// lookups open their own connections only after it, when migration is done.
+/// A store that cannot be opened skips the pass and the emit.
 fn respond(input: &str, witness: &mut Option<PendingWitness>) -> Value {
+    let mut store: Option<Database> = None;
+    best_effort("store open", || {
+        store = Some(crate::cli::util::open_db()?);
+        Ok(())
+    });
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
-    let session_input: String = input.to_string();
+    let session_input: Option<String> = store.as_ref().map(|_| input.to_string());
     let (applied, pending) = respond_beside_witness(
         input,
         read_policy_text(),
         Arc::new(StoreLookups),
         legion_repo,
-        move || witness_session(&session_input),
+        move || match session_input {
+            Some(session_input) => witness_session(&session_input),
+            None => Ok(()),
+        },
     );
     *witness = pending;
-    if let Some(rewrite) = &applied.rewrite {
+    if let (Some(rewrite), Some(db)) = (&applied.rewrite, &store) {
         best_effort("rewrite prediction", || {
-            let db = crate::cli::util::open_db()?;
-            prediction::emit_rewrite_prediction(&db, rewrite)?;
+            prediction::emit_rewrite_prediction(db, rewrite)?;
             Ok(())
         });
     }
