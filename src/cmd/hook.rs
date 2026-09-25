@@ -367,8 +367,9 @@ fn open_store_within(
 
 /// Starts the witness pass on its own worker thread, then runs the decision
 /// as it always runs, under its own deadline. The decision never waits on the
-/// pass. The pass's budget is one `deadline` from its start, so the call as
-/// a whole stays within one deadline plus the decision's overhead.
+/// pass. The pass's budget is one `deadline` from its start, so from here
+/// the call stays within one deadline plus the decision's overhead (the
+/// store open before it waits at most one more).
 fn respond_beside_witness(
     input: &str,
     deadline: Duration,
