@@ -19,8 +19,17 @@
 //! `command`, or an Agent/Task spawn's `subagent_type` (the Explore rewrite
 //! `plugin/hooks/no-harness-explore.sh` performs today). [`rewritable_field`]
 //! is the one place that choice is made.
+//!
+//! A Bash rewrite rule may declare arguments the target translates
+//! (FR-CMD-008, #1228), and route then returns Rewrite for an invocation
+//! carrying them. This module carries no argument forward (#1267): route
+//! returns the target, not the covered arguments, the adapter never scans the
+//! command to recover them (FR-CMD-017), and a rule's `translatable` names the
+//! source's words without saying how the target spells them. So a rewrite
+//! whose rule declares any translatable argument is refused, naming the rule,
+//! rather than run as a replacement that drops what the agent typed.
 
-use legion_cmd::{Facts, ManagedTarget};
+use legion_cmd::{ArgSpec, Facts, ManagedTarget};
 use serde_json::{Map, Value};
 
 /// Why a rewrite's replacement could not be built. Each becomes a deny at the
@@ -32,6 +41,14 @@ pub(crate) enum ReplacementError {
     /// hand; it stays a refusal rather than an empty command.
     #[error("the rewrite target is empty; nothing to run in place of the command")]
     EmptyTarget,
+
+    /// The rule declares arguments the target translates, and the replacement
+    /// carries none of them forward (#1267); running the bare target would
+    /// drop every covered argument the invocation carried.
+    #[error(
+        "rewrite rule '{0}' declares translatable arguments, and the replacement does not carry arguments; refusing rather than dropping them"
+    )]
+    ArgumentsNotCarried(String),
 
     /// The facts carry path operands the target has no place for.
     #[error("the rewrite would drop {0} path operand(s) the target does not carry")]
@@ -67,15 +84,25 @@ pub(crate) fn rewritable_field(original: &Value) -> Option<&'static str> {
 /// and `description`. `updatedInput` replaces the whole
 /// `tool_input`, so rebuilding it from the command alone would turn a
 /// background command into a foreground one and drop a raised timeout (the
-/// bug `emit.sh`'s `emit_rewrite` already paid for). Refuses when the facts
-/// carry an operand the target cannot express (see the module doc).
+/// bug `emit.sh`'s `emit_rewrite` already paid for). Refuses when `rule_id`'s
+/// `translatable` declares any argument, or when the facts carry an operand
+/// the target cannot express (see the module doc).
+///
+/// The `translatable` refusal comes before the operand checks: a covered
+/// operand can also land in the facts as a path or an issue number, and the
+/// deny must then name the rule, not only the operand.
 pub(crate) fn build_replacement(
     target: &ManagedTarget,
+    rule_id: &str,
+    translatable: &ArgSpec,
     facts: &Facts,
     original: &Value,
 ) -> Result<Value, ReplacementError> {
     if target.as_str().is_empty() {
         return Err(ReplacementError::EmptyTarget);
+    }
+    if declares_arguments(translatable) {
+        return Err(ReplacementError::ArgumentsNotCarried(rule_id.to_string()));
     }
     if !facts.paths.is_empty() {
         return Err(ReplacementError::PathOperandsNotCarried(facts.paths.len()));
@@ -97,6 +124,13 @@ pub(crate) fn build_replacement(
     Ok(Value::Object(patched))
 }
 
+/// Whether `spec` declares any argument beyond the family's subcommand words.
+/// An empty spec (every Fields rewrite, and a Bash rule written
+/// `"translatable": {}`) covers no argument, so there is nothing to carry.
+fn declares_arguments(spec: &ArgSpec) -> bool {
+    !(spec.flags.is_empty() && spec.valued_flags.is_empty() && spec.operands.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,12 +139,83 @@ mod tests {
         ManagedTarget::new(name)
     }
 
+    /// A replacement under a rule that declares no translatable argument --
+    /// every Fields rewrite, and a Bash rule written `"translatable": {}`.
+    fn build(
+        target: &ManagedTarget,
+        facts: &Facts,
+        original: &Value,
+    ) -> Result<Value, ReplacementError> {
+        build_replacement(target, "rule", &ArgSpec::default(), facts, original)
+    }
+
+    #[test]
+    fn a_rule_declaring_translatable_arguments_is_refused_naming_the_rule() {
+        // #1267: the replacement carries no argument forward, so a rule that
+        // covers any flag, valued flag, or operand is refused rather than run
+        // as the bare target.
+        let original = serde_json::json!({"command": "gh issue view 7 --web"});
+        for translatable in [
+            ArgSpec {
+                flags: vec!["--web".to_string()],
+                ..ArgSpec::default()
+            },
+            ArgSpec {
+                valued_flags: vec!["--repo".to_string()],
+                ..ArgSpec::default()
+            },
+            ArgSpec {
+                operands: vec![legion_cmd::OperandShape::Integer],
+                ..ArgSpec::default()
+            },
+        ] {
+            let err = build_replacement(
+                &target("legion issue view"),
+                "gh-issue-view",
+                &translatable,
+                &Facts::default(),
+                &original,
+            )
+            .expect_err("a covered argument must not be dropped");
+            assert_eq!(
+                err,
+                ReplacementError::ArgumentsNotCarried("gh-issue-view".to_string())
+            );
+            assert!(err.to_string().contains("'gh-issue-view'"));
+        }
+    }
+
+    #[test]
+    fn the_translatable_refusal_names_the_rule_before_an_operand_check_fires() {
+        // A covered integer operand is also an issue number in the facts; the
+        // deny still names the rule.
+        let facts = Facts {
+            issue_numbers: vec![7],
+            ..Facts::default()
+        };
+        let translatable = ArgSpec {
+            operands: vec![legion_cmd::OperandShape::Integer],
+            ..ArgSpec::default()
+        };
+        let err = build_replacement(
+            &target("legion issue view"),
+            "gh-issue-view",
+            &translatable,
+            &facts,
+            &serde_json::json!({"command": "gh issue view 7"}),
+        )
+        .expect_err("refused");
+        assert_eq!(
+            err,
+            ReplacementError::ArgumentsNotCarried("gh-issue-view".to_string())
+        );
+    }
+
     #[test]
     fn the_target_replaces_the_command() {
         let original = serde_json::json!({"command": "gh issue list"});
         let replaced =
-            build_replacement(&target("legion issue list"), &Facts::default(), &original)
-                .expect("builds");
+            build(&target("legion issue list"), &Facts::default(), &original).expect("builds");
         assert_eq!(
             replaced,
             serde_json::json!({"command": "legion issue list"})
@@ -126,8 +231,7 @@ mod tests {
             "run_in_background": true
         });
         let replaced =
-            build_replacement(&target("legion issue list"), &Facts::default(), &original)
-                .expect("builds");
+            build(&target("legion issue list"), &Facts::default(), &original).expect("builds");
         assert_eq!(
             replaced,
             serde_json::json!({
@@ -149,7 +253,7 @@ mod tests {
             ..Facts::default()
         };
         let original = serde_json::json!({"command": "gh issue list"});
-        assert!(build_replacement(&target("legion issue list"), &facts, &original).is_ok());
+        assert!(build(&target("legion issue list"), &facts, &original).is_ok());
     }
 
     #[test]
@@ -159,7 +263,7 @@ mod tests {
             ..Facts::default()
         };
         let original = serde_json::json!({"command": "grep -rn foo src/main.rs"});
-        let err = build_replacement(&target("legion sym etc find-content"), &facts, &original)
+        let err = build(&target("legion sym etc find-content"), &facts, &original)
             .expect_err("a path the target cannot carry must refuse");
         assert_eq!(err, ReplacementError::PathOperandsNotCarried(1));
     }
@@ -171,7 +275,7 @@ mod tests {
             ..Facts::default()
         };
         let original = serde_json::json!({"command": "gh issue view \"#123\""});
-        let err = build_replacement(&target("legion issue view"), &facts, &original)
+        let err = build(&target("legion issue view"), &facts, &original)
             .expect_err("an issue number the target cannot carry must refuse");
         assert_eq!(err, ReplacementError::IssueNumbersNotCarried(1));
     }
@@ -179,7 +283,7 @@ mod tests {
     #[test]
     fn an_empty_target_is_refused() {
         let original = serde_json::json!({"command": "gh issue list"});
-        let err = build_replacement(&target(""), &Facts::default(), &original)
+        let err = build(&target(""), &Facts::default(), &original)
             .expect_err("an empty target must not become an empty command");
         assert_eq!(err, ReplacementError::EmptyTarget);
     }
@@ -193,7 +297,7 @@ mod tests {
             "prompt": "map it",
             "description": "explore"
         });
-        let replaced = build_replacement(
+        let replaced = build(
             &target("legion:legion-explore"),
             &Facts::default(),
             &original,
@@ -212,7 +316,7 @@ mod tests {
     #[test]
     fn a_tool_input_with_no_rewritable_field_is_refused() {
         let original = serde_json::json!({"file_path": ".env", "old_string": "KEY"});
-        let err = build_replacement(&target("legion issue list"), &Facts::default(), &original)
+        let err = build(&target("legion issue list"), &Facts::default(), &original)
             .expect_err("a rewrite must not invent a field the tool ignores");
         assert_eq!(err, ReplacementError::NoRewritableField);
     }
@@ -224,7 +328,7 @@ mod tests {
             serde_json::json!(["gh", "issue", "list"]),
             serde_json::json!("gh issue list"),
         ] {
-            let err = build_replacement(&target("legion issue list"), &Facts::default(), &original)
+            let err = build(&target("legion issue list"), &Facts::default(), &original)
                 .expect_err("a malformed tool_input must not be given a command");
             assert_eq!(err, ReplacementError::NoRewritableField);
         }
