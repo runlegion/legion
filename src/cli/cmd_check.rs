@@ -188,21 +188,52 @@ fn tool_call(
 /// is single-quoted before the join. `-- git commit -m "a; rm -rf x"` is then
 /// checked as `git commit -m 'a; rm -rf x'`, one argument, as typed, never as
 /// a second `rm -rf x` command.
+///
+/// The run of leading assignment words is the exception, as it is to the
+/// shell: in `NAME=value`, only the value is quoted (`FOO='a b'`). Quoting
+/// the whole word would turn the assignment into the command name and the
+/// real command into its argument. The first word that is not an assignment
+/// ends the run.
 fn command_line(words: &[String]) -> String {
-    match words {
-        [only] => only.clone(),
-        _ => words
-            .iter()
-            .map(|word| {
-                if needs_quoting(word) {
-                    shell_single_quote(word)
-                } else {
-                    word.clone()
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(" "),
+    if let [only] = words {
+        return only.clone();
     }
+    let mut in_assignments = true;
+    words
+        .iter()
+        .map(|word| {
+            if in_assignments {
+                if let Some((name, value)) = assignment(word) {
+                    return format!("{name}={}", quoted_word(value));
+                }
+                in_assignments = false;
+            }
+            quoted_word(word)
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+/// `word` single-quoted when [`needs_quoting`] says so, else as is.
+fn quoted_word(word: &str) -> String {
+    if needs_quoting(word) {
+        shell_single_quote(word)
+    } else {
+        word.to_string()
+    }
+}
+
+/// Splits `word` into `(NAME, value)` when it is a shell assignment: `NAME`
+/// is a valid identifier (a letter or `_`, then letters, digits or `_`)
+/// followed by `=`. `None` for any other word.
+fn assignment(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once('=')?;
+    let mut chars = name.chars();
+    let starts_well = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    (starts_well && rest_ok).then_some((name, value))
 }
 
 /// True when `word` would not survive the shell as one literal word: it is
@@ -688,6 +719,49 @@ mod tests {
             command_line(&words),
             r"git commit -m 'a; rm -rf x' 'it'\''s' ''"
         );
+    }
+
+    #[test]
+    fn a_leading_assignment_keeps_its_name_bare_and_quotes_only_the_value() {
+        let words: Vec<String> = ["FOO=a b", "BAR=1", "rm", "-rf", "build"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(command_line(&words), "FOO='a b' BAR=1 rm -rf build");
+        let words: Vec<String> = ["FOO=1", "git", "push"].map(String::from).to_vec();
+        assert_eq!(command_line(&words), "FOO=1 git push");
+    }
+
+    #[test]
+    fn an_assignment_shaped_word_after_the_command_is_quoted_whole() {
+        // Past the first non-assignment word the shell reads `X=a b` as an
+        // ordinary argument, and so does the requoting.
+        let words: Vec<String> = ["echo", "X=a b"].map(String::from).to_vec();
+        assert_eq!(command_line(&words), "echo 'X=a b'");
+        // A name that is not an identifier is not an assignment either.
+        let words: Vec<String> = ["1X=a b", "ls"].map(String::from).to_vec();
+        assert_eq!(command_line(&words), "'1X=a b' ls");
+    }
+
+    #[test]
+    fn a_positional_assignment_prefix_decides_the_same_as_the_typed_command() {
+        // The re-review's case: quoting `FOO=a b` whole made `rm` an argument
+        // and allowed it; the typed `FOO="a b" rm -rf build` denies.
+        let positional = tool_call(
+            None,
+            None,
+            ["FOO=a b", "rm", "-rf", "build"].map(String::from).to_vec(),
+        )
+        .expect("a valid call");
+        let typed = tool_call(
+            Some("Bash".to_string()),
+            Some(r#"{"command": "FOO=\"a b\" rm -rf build"}"#.to_string()),
+            Vec::new(),
+        )
+        .expect("a valid call");
+        let from_positional = check_policy(positional, POLICY);
+        let from_typed = check_policy(typed, POLICY);
+        assert_eq!(from_positional.decision, from_typed.decision);
+        assert_eq!(deny_reason(&from_positional), "unrecoverable");
     }
 
     #[test]
