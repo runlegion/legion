@@ -413,6 +413,7 @@ _legion_bashgrep_classify() {
 #   - recursion or device reads (-r/-R/-d/-D, in a cluster too, or
 #     --recursive/--directories/--devices): a saved tool-results file never
 #     needs them;
+#   - a symlinked ~/.claude or ~/.claude/projects anchor;
 #   - a file argument that is not an existing regular, non-symlink file
 #     whose PHYSICAL directory (symlinks resolved, $HOME too) is still a
 #     <project>/<session>/tool-results directory -- a lexical check alone
@@ -421,7 +422,7 @@ _legion_bashgrep_classify() {
 _legion_bashgrep_reads_tool_results() {
   _legion_bashgrep_is_compound "$1" && return 1
   local toks=()
-  IFS=' ' read -ra toks <<<"$1"
+  IFS=$' \t' read -ra toks <<<"$1"
 
   # One pass collects every positional. The pattern is known to come from
   # -e/--regexp only once the whole argv is seen (`grep src/x -e PAT f`
@@ -463,6 +464,10 @@ _legion_bashgrep_reads_tool_results() {
   [ "$pattern_via_e" -eq 1 ] || positionals=("${positionals[@]:1}")
   [ "${#positionals[@]}" -gt 0 ] || return 1
 
+  # The anchor itself must be the harness's own directory: were ~/.claude
+  # or ~/.claude/projects a symlink, physical resolution would follow it
+  # and exempt any <x>/<y>/tool-results/<file> under the target.
+  [ -L "${HOME}/.claude" ] || [ -L "${HOME}/.claude/projects" ] && return 1
   local projects dir
   projects="$(cd -P -- "${HOME}/.claude/projects" 2>/dev/null && pwd -P)" || return 1
   for t in "${positionals[@]}"; do

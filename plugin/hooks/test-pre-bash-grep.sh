@@ -528,4 +528,16 @@ assert_contains "a symlinked directory in tool-results still denied" "$out" '"pe
 out=$(hook_tr "grep Symbol $FAKE_PROJ/sess-2/tool-results/lib.rs" own-trlink-t)
 assert_contains "a file under a symlinked tool-results component still denied" "$out" '"permissionDecision": "deny"'
 
+echo "==> #1264: a symlinked ~/.claude/projects anchor never takes the tool-results pass"
+# The link target holds a genuine-looking <x>/<y>/tool-results/<file>, so
+# only the anchor check refuses it.
+LINK_HOME="$WORK/link-home"
+mkdir -p "$LINK_HOME/.claude" "$WORK/elsewhere/x/y/tool-results"
+touch "$WORK/elsewhere/x/y/tool-results/f.txt"
+ln -s "$WORK/elsewhere" "$LINK_HOME/.claude/projects"
+out=$(jq -cn --arg c "grep Symbol $LINK_HOME/.claude/projects/x/y/tool-results/f.txt" \
+  '{cwd: "/tmp/legion", tool_name: "Bash", tool_input: {command: $c}, session_id: "own-anchor-t"}' |
+  HOME="$LINK_HOME" bash "$HOOK")
+assert_contains "a file under a symlinked projects anchor still denied" "$out" '"permissionDecision": "deny"'
+
 finish_tests
