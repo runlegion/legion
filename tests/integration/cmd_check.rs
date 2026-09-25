@@ -214,3 +214,68 @@ fn every_applied_rewrite_on_a_fresh_store_records_exactly_one_prediction() {
         );
     }
 }
+
+#[test]
+fn concurrent_hook_processes_on_a_fresh_store_each_record_their_prediction() {
+    // #1272 cross-process check: four `cmd-check --hook` processes at once
+    // against one fresh store, ten rounds. Every process applies a rewrite
+    // with its own tool_use_id and runs a witness pass; every round must
+    // record exactly four legion.cmd predictions.
+    const PROCESSES: usize = 4;
+    const ROUNDS: usize = 10;
+    for round in 0..ROUNDS {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = tempfile::tempdir().expect("state tempdir");
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(&transcript, "").expect("transcript");
+        let children: Vec<_> = (0..PROCESSES)
+            .map(|process| {
+                let input = serde_json::json!({
+                    "tool_name": "Agent",
+                    "tool_input": {"subagent_type": "Explore", "prompt": "map the router"},
+                    "session_id": format!("s{round}"),
+                    "transcript_path": transcript,
+                    "cwd": "/tmp/legion-test",
+                    "tool_use_id": format!("toolu_{round}_{process}")
+                })
+                .to_string()
+                .into_bytes();
+                let mut cmd = legion_cmd(dir.path());
+                cmd.args(["cmd-check", "--hook"])
+                    .env("LEGION_CMD_POLICY", shipped_policy_path())
+                    .env("XDG_STATE_HOME", state.path());
+                std::thread::spawn(move || run_with_stdin(&mut cmd, &input))
+            })
+            .collect();
+        let mut stderrs = String::new();
+        for child in children {
+            let out = child.join().expect("hook thread");
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            stderrs.push_str(&String::from_utf8_lossy(&out.stderr));
+            let response: Value = serde_json::from_str(stdout.trim()).expect("valid JSON response");
+            assert_eq!(
+                response["hookSpecificOutput"]["permissionDecision"], "allow",
+                "round {round}: the rewrite must apply\nstderr:\n{stderrs}"
+            );
+        }
+
+        let listed = run_ok(
+            legion_cmd(dir.path())
+                .args([
+                    "uncertainty",
+                    "predictions",
+                    "--surface",
+                    "legion.cmd",
+                    "--json",
+                ])
+                .env("XDG_STATE_HOME", state.path()),
+        );
+        let rows: Vec<Value> = serde_json::from_str(listed.trim()).expect("predictions JSON");
+        assert_eq!(
+            rows.len(),
+            PROCESSES,
+            "round {round}: expected {PROCESSES} legion.cmd predictions, got {}\nhook stderr:\n{stderrs}",
+            rows.len()
+        );
+    }
+}
