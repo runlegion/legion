@@ -151,6 +151,10 @@ pub(crate) enum UncertaintyAction {
         /// Default 30. Setting 0 disables the orphan sweep for this row.
         #[arg(long, default_value_t = 30)]
         orphan_ttl_days: u32,
+        /// The issue this prediction is about, as owner/repo#N. Optional: a prediction
+        /// with no issue (a gate, an sd insight) stays valid.
+        #[arg(long, value_parser = parse_issue_ref)]
+        issue: Option<String>,
     },
 
     /// Record an outcome for a prediction. Mirrors platform's
@@ -209,6 +213,9 @@ pub(crate) enum UncertaintyAction {
         /// Filter to one state (emitted, witnessed, calibrated, orphaned, retired).
         #[arg(long)]
         state: Option<String>,
+        /// Only the predictions emitted for this issue, as owner/repo#N (#1258).
+        #[arg(long, value_parser = parse_issue_ref)]
+        issue: Option<String>,
         /// Emit JSON instead of the human table.
         #[arg(long)]
         json: bool,
@@ -374,6 +381,33 @@ fn fmt_i64(v: Option<i64>) -> String {
     }
 }
 
+/// Validate `--issue` as `<owner>/<repo>#<digits>` (#1258).
+///
+/// Runs as a clap value parser so a malformed key is a usage error (non-zero
+/// exit) before `run_uncertainty` is reached, deliberately NOT emit's
+/// non-blocking exit-0 path: a prediction stored under a key verify can never
+/// look up is the orphan this flag exists to end, so it must fail loudly.
+fn parse_issue_ref(raw: &str) -> Result<String, String> {
+    let expected =
+        || format!("expected <owner>/<repo>#<number> (e.g. runlegion/legion#1229), got '{raw}'");
+    let (path, number) = raw.split_once('#').ok_or_else(expected)?;
+    let (owner, repo) = path.split_once('/').ok_or_else(expected)?;
+    let segment_ok = |seg: &str| {
+        !seg.is_empty()
+            && !seg
+                .chars()
+                .any(|c| c == '/' || c == '#' || c.is_whitespace())
+    };
+    if !segment_ok(owner)
+        || !segment_ok(repo)
+        || number.is_empty()
+        || !number.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(expected());
+    }
+    Ok(raw.to_owned())
+}
+
 /// Dispatch `legion uncertainty ...`. Non-blocking emit posture: emit
 /// failures log to stderr and return Ok so an upstream hook can never
 /// abort the agent on a telemetry-shaped problem. Witness / calibration /
@@ -395,6 +429,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
             claimed_confidence,
             payload,
             orphan_ttl_days,
+            issue,
         } => {
             // Resolution order, first hit wins (#831): an explicit --model,
             // then the live model for --session-id, then an explicit unknown
@@ -440,6 +475,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 claimed_confidence: confidence,
                 prediction_payload: payload_value,
                 orphan_after: uncertainty::storage::orphan_after_from_ttl(orphan_ttl_days),
+                issue_ref: issue,
             };
             let prediction = uncertainty::types::Prediction::new(input);
             if let Err(e) = database.insert_prediction(&prediction) {
@@ -561,6 +597,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
         UncertaintyAction::Predictions {
             surface,
             state,
+            issue,
             json,
             limit,
         } => {
@@ -569,6 +606,7 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
                 &mut out,
                 surface.as_deref(),
                 state.as_deref(),
+                issue.as_deref(),
                 json,
                 limit,
             )?;
@@ -683,12 +721,14 @@ const PREDICTION_STATES: [uncertainty::types::PredictionState; 5] = [
 /// predictions exist" -- the silent-empty diagnosis this command exists to
 /// end. Empty results name which empty they are (nothing stored vs the
 /// filters matched nothing); in `--json` mode stdout stays a parseable `[]`
-/// and that message goes to stderr.
+/// and that message goes to stderr. A `--json` result cut by `--limit` names
+/// the cut on stderr too (see `json_truncation_note`).
 fn write_predictions(
     database: &crate::db::Database,
     out: &mut impl std::io::Write,
     surface: Option<&str>,
     state: Option<&str>,
+    issue: Option<&str>,
     json: bool,
     limit: u32,
 ) -> error::Result<()> {
@@ -706,11 +746,20 @@ fn write_predictions(
         },
     };
 
-    let predictions: Vec<uncertainty::types::Prediction> =
-        database.list_predictions(surface, state_filter)?;
+    // `--issue` reads through the indexed issue_ref lookup (#1258); the
+    // surface/state filters then narrow that set the same way the SQL does.
+    let predictions: Vec<uncertainty::types::Prediction> = match issue {
+        Some(issue_ref) => database
+            .predictions_for_issue(issue_ref)?
+            .into_iter()
+            .filter(|p| surface.is_none_or(|s| p.surface == s))
+            .filter(|p| state_filter.is_none_or(|st| p.state == st))
+            .collect(),
+        None => database.list_predictions(surface, state_filter)?,
+    };
 
     if predictions.is_empty() {
-        let message: String = if surface.is_none() && state_filter.is_none() {
+        let message: String = if surface.is_none() && state_filter.is_none() && issue.is_none() {
             "[legion uncertainty] no predictions exist: nothing has been emitted to this database"
                 .to_string()
         } else {
@@ -721,6 +770,9 @@ fn write_predictions(
             }
             if let Some(st) = state_filter {
                 filters.push(format!("state={}", st.as_str()));
+            }
+            if let Some(i) = issue {
+                filters.push(format!("issue={i}"));
             }
             format!(
                 "[legion uncertainty] no predictions matched the filters ({}); \
@@ -756,6 +808,9 @@ fn write_predictions(
             })
             .collect();
         writeln!(out, "{}", serde_json::to_string(&rows)?)?;
+        if let Some(note) = json_truncation_note(shown.len(), predictions.len()) {
+            eprintln!("{note}");
+        }
         return Ok(());
     }
 
@@ -802,6 +857,21 @@ fn write_predictions(
         )?;
     }
     Ok(())
+}
+
+/// The stderr note for a `--json` predictions result cut by `--limit`, or
+/// `None` when every matching row was shown.
+///
+/// The table view says "most recent N of M" inline; JSON cannot without
+/// breaking the array, so the same words go to stderr. Without it a caller
+/// reading stdout alone (legion-verify witnessing an issue's predictions)
+/// would take a page for the whole set and leave the rest unwitnessed.
+fn json_truncation_note(shown: usize, total: usize) -> Option<String> {
+    (shown < total).then(|| {
+        format!(
+            "[legion uncertainty] most recent {shown} of {total}: pass --limit {total} to see all"
+        )
+    })
 }
 
 /// Parse a duration string like "1h", "30m", "24h" into minutes.
@@ -1396,6 +1466,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.8).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: orphan_after.map(str::to_string),
+            issue_ref: None,
         }
     }
 
@@ -1407,7 +1478,7 @@ mod tests {
         limit: u32,
     ) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        write_predictions(db, &mut buf, surface, state, json, limit).unwrap();
+        write_predictions(db, &mut buf, surface, state, None, json, limit).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -1496,6 +1567,30 @@ mod tests {
     }
 
     #[test]
+    fn predictions_json_truncation_note_only_when_cut() {
+        let db = test_db();
+        for _ in 0..5 {
+            db.insert_prediction(&Prediction::new(input("legion.gate", None)))
+                .unwrap();
+        }
+        // Over the limit: stdout is a full-limit array, and the note names
+        // the cut in the table view's words plus the limit that shows all.
+        let json: String = run(&db, None, None, true, 2);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows.len(), 2);
+        let note: String = json_truncation_note(2, 5).expect("a cut result carries a note");
+        assert!(note.contains("most recent 2 of 5"), "{note}");
+        assert!(note.contains("--limit 5"), "{note}");
+
+        // Within the limit: every row on stdout, no note.
+        let json: String = run(&db, None, None, true, 5);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(json_truncation_note(5, 5), None);
+        assert_eq!(json_truncation_note(3, 3), None);
+    }
+
+    #[test]
     fn predictions_json_rows_carry_the_required_fields() {
         let db = test_db();
         let p = Prediction::new(input("legion.task", Some("2030-01-01T00:00:00+00:00")));
@@ -1544,7 +1639,7 @@ mod tests {
             .execute_batch("DROP TABLE uncertainty_prediction")
             .unwrap();
         let mut buf: Vec<u8> = Vec::new();
-        let err = write_predictions(&db, &mut buf, None, None, false, 50).unwrap_err();
+        let err = write_predictions(&db, &mut buf, None, None, None, false, 50).unwrap_err();
         assert!(matches!(err, error::LegionError::Database(_)), "{err}");
     }
 
@@ -1560,7 +1655,8 @@ mod tests {
     fn predictions_unknown_state_errors_naming_valid_set_even_on_empty_db() {
         let db = test_db();
         let mut buf: Vec<u8> = Vec::new();
-        let err = write_predictions(&db, &mut buf, None, Some("bogus"), false, 50).unwrap_err();
+        let err =
+            write_predictions(&db, &mut buf, None, Some("bogus"), None, false, 50).unwrap_err();
         let msg: String = err.to_string();
         assert!(matches!(err, error::LegionError::WorkSource(_)), "{msg}");
         for valid in ["emitted", "witnessed", "calibrated", "orphaned", "retired"] {
@@ -1568,5 +1664,87 @@ mod tests {
         }
         assert!(msg.contains("bogus"));
         assert!(buf.is_empty(), "nothing may print on an invalid state");
+    }
+
+    #[test]
+    fn predictions_issue_filter_returns_only_that_issue_and_names_it_on_a_miss() {
+        let db = test_db();
+        let mut mine = input("legion.task", None);
+        mine.issue_ref = Some("runlegion/legion#1229".into());
+        let mine = Prediction::new(mine);
+        db.insert_prediction(&mine).unwrap();
+        let mut other = input("legion.task", None);
+        other.issue_ref = Some("runlegion/legion#1227".into());
+        db.insert_prediction(&Prediction::new(other)).unwrap();
+        db.insert_prediction(&Prediction::new(input("legion.task", None)))
+            .unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_predictions(
+            &db,
+            &mut buf,
+            None,
+            None,
+            Some("runlegion/legion#1229"),
+            true,
+            50,
+        )
+        .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], mine.id.as_str());
+
+        // Surface/state narrow the issue's set; a miss names every filter.
+        let mut buf: Vec<u8> = Vec::new();
+        write_predictions(
+            &db,
+            &mut buf,
+            Some("legion.gate"),
+            None,
+            Some("runlegion/legion#1229"),
+            false,
+            50,
+        )
+        .unwrap();
+        let text: String = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("no predictions matched the filters (surface=legion.gate, issue=runlegion/legion#1229)"),
+            "{text}"
+        );
+        assert!(text.contains("3 prediction(s) exist unfiltered"), "{text}");
+    }
+
+    #[test]
+    fn parse_issue_ref_accepts_owner_repo_number() {
+        assert_eq!(
+            parse_issue_ref("runlegion/legion#1229").unwrap(),
+            "runlegion/legion#1229"
+        );
+        assert_eq!(parse_issue_ref("a/b#0").unwrap(), "a/b#0");
+    }
+
+    #[test]
+    fn parse_issue_ref_rejects_malformed_with_expected_form() {
+        for bad in [
+            "",
+            "1229",
+            "#1229",
+            "legion#1229",
+            "runlegion/legion",
+            "runlegion/legion#",
+            "runlegion/legion#12a",
+            "runlegion/legion#-1",
+            "/legion#1",
+            "runlegion/#1",
+            "a/b/c#1",
+            "a/b#1#2",
+            "run legion/legion#1",
+        ] {
+            let err = parse_issue_ref(bad).unwrap_err();
+            assert!(
+                err.contains("<owner>/<repo>#<number>"),
+                "error for {bad:?} must name the expected form, got: {err}"
+            );
+        }
     }
 }

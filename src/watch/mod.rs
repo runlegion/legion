@@ -1906,6 +1906,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.8).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: Some("2020-01-01T00:00:00+00:00".into()),
+            issue_ref: None,
         };
         let prediction = Prediction::new(input);
         db.insert_prediction(&prediction)
@@ -1948,6 +1949,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.8).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: None,
+            issue_ref: None,
         };
         let mut prediction = Prediction::new(input);
         db.insert_prediction(&prediction)

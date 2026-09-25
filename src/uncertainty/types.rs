@@ -231,6 +231,10 @@ pub struct PredictionInput {
     pub claimed_confidence: Confidence,
     pub prediction_payload: serde_json::Value,
     pub orphan_after: Option<String>,
+    /// The issue this prediction is about, as `<owner>/<repo>#<number>`
+    /// (#1258). None for predictions about no single issue (a gate, an sd
+    /// insight). Carried so verify can find what to witness by issue.
+    pub issue_ref: Option<String>,
 }
 
 /// A row of `uncertainty_prediction`.
@@ -258,6 +262,8 @@ pub struct Prediction {
     pub updated_at: String,
     pub witnessed_at: Option<String>,
     pub orphan_after: Option<String>,
+    /// See [`PredictionInput::issue_ref`].
+    pub issue_ref: Option<String>,
 }
 
 impl Prediction {
@@ -291,6 +297,7 @@ impl Prediction {
             updated_at: now,
             witnessed_at: None,
             orphan_after: input.orphan_after,
+            issue_ref: input.issue_ref,
         }
     }
 
@@ -467,6 +474,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.72).unwrap(),
             prediction_payload: serde_json::json!({ "predicted_tokens": 1500 }),
             orphan_after: None,
+            issue_ref: None,
         }
     }
 

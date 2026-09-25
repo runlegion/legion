@@ -633,3 +633,172 @@ fn uncertainty_predictions_unknown_state_exits_nonzero_naming_valid_values() {
         );
     }
 }
+
+/// Emit args shared by the `--issue` tests (#1258); `extra` is appended.
+fn emit_args<'a>(fingerprint: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args: Vec<&str> = vec![
+        "uncertainty",
+        "emit",
+        "--surface",
+        "legion.task",
+        "--feature-key",
+        "scip.refactor",
+        "--input-fingerprint",
+        fingerprint,
+        "--model",
+        "claude-opus-4-7",
+        "--model-version",
+        "4.7",
+        "--claimed-confidence",
+        "0.7",
+        "--payload",
+        r#"{}"#,
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Read one prediction's `issue_ref` straight out of the data dir's DB.
+fn stored_issue_ref(data_dir: &std::path::Path, id: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(data_dir.join("legion.db")).expect("open legion.db");
+    conn.query_row(
+        "SELECT issue_ref FROM uncertainty_prediction WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )
+    .expect("prediction row")
+}
+
+#[test]
+fn uncertainty_emit_with_issue_stores_issue_ref() {
+    // #1258: --issue lands in the issue_ref column verify queries on.
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(emit_args(
+        "fp-issue-1",
+        &["--issue", "runlegion/legion#1229"],
+    )));
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let id = parsed["id"].as_str().unwrap();
+    assert_eq!(
+        stored_issue_ref(dir.path(), id).as_deref(),
+        Some("runlegion/legion#1229")
+    );
+}
+
+#[test]
+fn uncertainty_emit_without_issue_stores_null() {
+    // #1258: every existing caller (no --issue) still inserts, with NULL.
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(legion_cmd(dir.path()).args(emit_args("fp-issue-2", &[])));
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let id = parsed["id"].as_str().unwrap();
+    assert_eq!(stored_issue_ref(dir.path(), id), None);
+}
+
+#[test]
+fn uncertainty_emit_malformed_issue_exits_nonzero() {
+    // #1258: a malformed --issue is a usage error, NOT emit's non-blocking
+    // exit-0 path -- a key verify can never find must fail loudly. Nothing
+    // may be written.
+    for bad in [
+        "1229",
+        "legion#1229",
+        "runlegion/legion",
+        "runlegion/legion#12a",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (stdout, stderr) =
+            run_fail(legion_cmd(dir.path()).args(emit_args("fp-issue-3", &["--issue", bad])));
+        assert!(
+            stdout.trim().is_empty(),
+            "no prediction id for {bad}: {stdout}"
+        );
+        assert!(
+            stderr.contains("<owner>/<repo>#<number>"),
+            "stderr must name the expected form for {bad}, got: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn uncertainty_predictions_issue_filter_returns_that_issue_only() {
+    // #1258: `predictions --issue` is verify's lookup -- the emitted row for
+    // the issue comes back, another issue's row does not, and a malformed
+    // key is a usage error rather than an empty result.
+    let dir = tempfile::tempdir().unwrap();
+    let mine = run_ok(legion_cmd(dir.path()).args(emit_args(
+        "fp-issue-4",
+        &["--issue", "runlegion/legion#1229"],
+    )));
+    let mine: serde_json::Value = serde_json::from_str(mine.trim()).unwrap();
+    run_ok(legion_cmd(dir.path()).args(emit_args(
+        "fp-issue-5",
+        &["--issue", "runlegion/legion#1227"],
+    )));
+
+    let stdout = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--issue",
+        "runlegion/legion#1229",
+        "--json",
+    ]));
+    let rows: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], mine["id"]);
+
+    let none = run_ok(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--issue",
+        "runlegion/legion#9999",
+    ]));
+    assert!(
+        none.contains("no predictions matched the filters (issue=runlegion/legion#9999)"),
+        "{none}"
+    );
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+        "uncertainty",
+        "predictions",
+        "--issue",
+        "legion#1229",
+    ]));
+    assert!(stderr.contains("<owner>/<repo>#<number>"), "{stderr}");
+}
+
+#[test]
+fn uncertainty_predictions_issue_json_notes_truncation_on_stderr() {
+    // #1258 review: verify reads `predictions --issue <ref> --json` with no
+    // --limit, so a cut must be named on stderr (stdout stays a parseable
+    // array of --limit rows), and a result within the limit must stay quiet.
+    let dir = tempfile::tempdir().unwrap();
+    for fp in ["fp-trunc-1", "fp-trunc-2", "fp-trunc-3"] {
+        run_ok(legion_cmd(dir.path()).args(emit_args(fp, &["--issue", "runlegion/legion#1258"])));
+    }
+    let query = |limit: &str| {
+        run_ok_output(legion_cmd(dir.path()).args([
+            "uncertainty",
+            "predictions",
+            "--issue",
+            "runlegion/legion#1258",
+            "--json",
+            "--limit",
+            limit,
+        ]))
+    };
+
+    let cut = query("2");
+    let rows: serde_json::Value = serde_json::from_slice(&cut.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    let stderr = String::from_utf8_lossy(&cut.stderr);
+    assert!(stderr.contains("most recent 2 of 3"), "{stderr}");
+    assert!(stderr.contains("--limit 3"), "{stderr}");
+
+    let whole = query("3");
+    let rows: serde_json::Value = serde_json::from_slice(&whole.stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 3);
+    let stderr = String::from_utf8_lossy(&whole.stderr);
+    assert!(!stderr.contains("most recent"), "{stderr}");
+}

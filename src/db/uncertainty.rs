@@ -4,6 +4,7 @@
 
 use rusqlite::Connection;
 
+use super::Database;
 use crate::error::Result;
 
 /// `uncertainty_prediction` and `uncertainty_calibration_snapshot`
@@ -82,11 +83,30 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_uncertainty_calibration_computed
                 ON uncertainty_calibration_snapshot(computed_at) WHERE deleted_at IS NULL;",
     )?;
+
+    // Migration: issue_ref on uncertainty_prediction (#1258). Nullable --
+    // most emitters (gate trust, sd insights, the TaskCreate hook) predict
+    // about no single issue. When set it is `<owner>/<repo>#<number>`, the
+    // same key `legion verify` records its gate under, so verify can find
+    // every prediction emitted for the work it is witnessing with one
+    // indexed equality lookup instead of searching payload text. A key
+    // inside `prediction_payload` was rejected: the payload schema is
+    // free-form per surface and a JSON key inside TEXT is not indexable
+    // without a per-key expression index. Guarded the same way as
+    // wake_attempts.card_id (src/db/wake.rs) so re-running is a no-op.
+    if !Database::has_column(conn, "uncertainty_prediction", "issue_ref")? {
+        conn.execute_batch(
+            "ALTER TABLE uncertainty_prediction ADD COLUMN issue_ref TEXT;
+             CREATE INDEX IF NOT EXISTS idx_uncertainty_prediction_issue_ref
+                 ON uncertainty_prediction(issue_ref) WHERE deleted_at IS NULL AND issue_ref IS NOT NULL;",
+        )?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::db::Database;
     use crate::db::testutil::test_db;
 
     #[test]
@@ -117,5 +137,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index_count, 1);
+    }
+
+    /// A pre-#1258 database: `uncertainty_prediction` exists without
+    /// `issue_ref` and already holds a row. Running the migration twice must
+    /// succeed both times, add the column and its index once, and leave the
+    /// existing row intact with a NULL `issue_ref`.
+    #[test]
+    fn issue_ref_migration_is_idempotent_on_existing_database() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE uncertainty_prediction (
+                id TEXT PRIMARY KEY,
+                surface TEXT NOT NULL,
+                feature_key TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                model TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                claimed_confidence REAL NOT NULL,
+                prediction_payload TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'emitted',
+                outcome_label TEXT,
+                outcome_payload TEXT,
+                outcome_correctness REAL,
+                cohort_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                witnessed_at TEXT,
+                orphan_after TEXT,
+                deleted_at TEXT
+            );
+            INSERT INTO uncertainty_prediction
+                (id, surface, feature_key, input_fingerprint, model, model_version,
+                 claimed_confidence, prediction_payload, cohort_key, created_at, updated_at)
+            VALUES ('legacy-1', 'legion.task', 'k', 'fp', 'm', 'v', 0.5, '{}', 'c',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');",
+        )
+        .unwrap();
+        assert!(!Database::has_column(&conn, "uncertainty_prediction", "issue_ref").unwrap());
+
+        super::create_tables(&conn).unwrap();
+        super::create_tables(&conn).unwrap();
+
+        assert!(Database::has_column(&conn, "uncertainty_prediction", "issue_ref").unwrap());
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_uncertainty_prediction_issue_ref'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
+        let legacy_ref: Option<String> = conn
+            .query_row(
+                "SELECT issue_ref FROM uncertainty_prediction WHERE id = 'legacy-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_ref, None);
     }
 }

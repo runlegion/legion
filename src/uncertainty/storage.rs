@@ -17,6 +17,20 @@ use super::types::{
     CalibrationSnapshot, Confidence, Correctness, OutcomeLabel, Prediction, PredictionState,
 };
 
+/// `SELECT <every column map_prediction_row reads> FROM uncertainty_prediction `,
+/// as a literal for `concat!`. One list for every prediction reader, so a new
+/// column cannot reach `map_prediction_row` in one query and be missing from
+/// another -- the rows are decoded by position, so a short list fails at read.
+macro_rules! select_prediction {
+    () => {
+        "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
+         claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
+         outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
+         orphan_after, issue_ref \
+         FROM uncertainty_prediction "
+    };
+}
+
 /// One row of the surface-grouped orphan summary.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OrphanSummaryRow {
@@ -47,8 +61,8 @@ impl Database {
             "INSERT INTO uncertainty_prediction \
              (id, surface, feature_key, input_fingerprint, model, model_version, \
               claimed_confidence, prediction_payload, state, cohort_key, \
-              created_at, updated_at, orphan_after) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              created_at, updated_at, orphan_after, issue_ref) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 p.id,
                 p.surface,
@@ -63,6 +77,7 @@ impl Database {
                 p.created_at,
                 p.updated_at,
                 p.orphan_after,
+                p.issue_ref,
             ],
         )?;
         Ok(())
@@ -71,14 +86,10 @@ impl Database {
     /// Fetch one prediction by id. None if the row does not exist or is
     /// soft-deleted.
     pub fn get_prediction(&self, id: &str) -> Result<Option<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after \
-             FROM uncertainty_prediction \
-             WHERE id = ?1 AND deleted_at IS NULL",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE id = ?1 AND deleted_at IS NULL"
+        ))?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
             Ok(Some(map_prediction_row(row)?))
@@ -98,17 +109,13 @@ impl Database {
         surface: &str,
         fingerprint: &str,
     ) -> Result<Option<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after \
-             FROM uncertainty_prediction \
-             WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
-             AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id DESC \
-             LIMIT 1",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE surface = ?1 AND input_fingerprint = ?2 AND state = 'emitted' \
+                 AND deleted_at IS NULL \
+                 ORDER BY created_at DESC, id DESC \
+                 LIMIT 1"
+        ))?;
         let mut rows = stmt.query(params![surface, fingerprint])?;
         if let Some(row) = rows.next()? {
             Ok(Some(map_prediction_row(row)?))
@@ -323,19 +330,30 @@ impl Database {
         surface: Option<&str>,
         state: Option<PredictionState>,
     ) -> crate::error::Result<Vec<Prediction>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, surface, feature_key, input_fingerprint, model, model_version, \
-             claimed_confidence, prediction_payload, state, outcome_label, outcome_payload, \
-             outcome_correctness, cohort_key, created_at, updated_at, witnessed_at, \
-             orphan_after \
-             FROM uncertainty_prediction \
-             WHERE deleted_at IS NULL \
-             AND (?1 IS NULL OR surface = ?1) \
-             AND (?2 IS NULL OR state = ?2) \
-             ORDER BY created_at DESC, id DESC",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE deleted_at IS NULL \
+                 AND (?1 IS NULL OR surface = ?1) \
+                 AND (?2 IS NULL OR state = ?2) \
+                 ORDER BY created_at DESC, id DESC"
+        ))?;
         let state_str: Option<&str> = state.map(|s| s.as_str());
         let rows = stmt.query_map(params![surface, state_str], map_prediction_row)?;
+        let predictions: Vec<Prediction> = rows.collect::<rusqlite::Result<Vec<Prediction>>>()?;
+        Ok(predictions)
+    }
+
+    /// Every live prediction emitted for one issue (`<owner>/<repo>#<N>`),
+    /// in every state, newest first (#1258). The lookup verify uses to find
+    /// what it must witness: an equality match on the indexed `issue_ref`
+    /// column, never a search of payload text. Returns `LegionError` for the
+    /// same reason `list_predictions` does.
+    pub fn predictions_for_issue(&self, issue_ref: &str) -> crate::error::Result<Vec<Prediction>> {
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE issue_ref = ?1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(params![issue_ref], map_prediction_row)?;
         let predictions: Vec<Prediction> = rows.collect::<rusqlite::Result<Vec<Prediction>>>()?;
         Ok(predictions)
     }
@@ -553,6 +571,7 @@ fn map_prediction_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Prediction> {
         updated_at: row.get(14)?,
         witnessed_at: row.get(15)?,
         orphan_after: row.get(16)?,
+        issue_ref: row.get(17)?,
     })
 }
 
@@ -582,6 +601,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(0.7).unwrap(),
             prediction_payload: serde_json::json!({ "predicted_tokens": 1500 }),
             orphan_after: Some("2026-06-12T00:00:00+00:00".into()),
+            issue_ref: None,
         }
     }
 
@@ -596,6 +616,22 @@ mod tests {
         assert_eq!(fetched.state, PredictionState::Emitted);
         assert_eq!(fetched.claimed_confidence.value(), 0.7);
         assert!(fetched.outcome_correctness.is_none());
+    }
+
+    #[test]
+    fn insert_and_get_prediction_round_trips_issue_ref() {
+        let db = test_db();
+        let mut input = fresh_input();
+        input.issue_ref = Some("runlegion/legion#1229".into());
+        let with_ref = Prediction::new(input);
+        db.insert_prediction(&with_ref).unwrap();
+        let without_ref = Prediction::new(fresh_input());
+        db.insert_prediction(&without_ref).unwrap();
+
+        let fetched = db.get_prediction(&with_ref.id).unwrap().unwrap();
+        assert_eq!(fetched.issue_ref.as_deref(), Some("runlegion/legion#1229"));
+        let fetched = db.get_prediction(&without_ref.id).unwrap().unwrap();
+        assert_eq!(fetched.issue_ref, None);
     }
 
     #[test]
@@ -828,6 +864,89 @@ mod tests {
     }
 
     #[test]
+    fn predictions_for_issue_returns_only_that_issue_in_every_state_newest_first() {
+        let db = test_db();
+        let seed = |issue: Option<&str>, created_at: &str, orphaned: bool| -> Prediction {
+            let mut input = fresh_input();
+            input.issue_ref = issue.map(str::to_string);
+            let mut p = Prediction::new(input);
+            p.created_at = created_at.into();
+            p.updated_at = created_at.into();
+            if orphaned {
+                p.orphan(created_at).unwrap();
+            }
+            db.insert_prediction(&p).unwrap();
+            p
+        };
+        let a_old = seed(
+            Some("runlegion/legion#1229"),
+            "2026-06-01T00:00:00+00:00",
+            false,
+        );
+        let a_new = seed(
+            Some("runlegion/legion#1229"),
+            "2026-06-03T00:00:00+00:00",
+            true,
+        );
+        let b = seed(
+            Some("runlegion/legion#1227"),
+            "2026-06-02T00:00:00+00:00",
+            false,
+        );
+        let _no_issue = seed(None, "2026-06-04T00:00:00+00:00", false);
+        // A prefix of another ref must not match: equality, not LIKE.
+        let _prefix = seed(
+            Some("runlegion/legion#122"),
+            "2026-06-05T00:00:00+00:00",
+            false,
+        );
+
+        let ids = |issue: &str| -> Vec<String> {
+            db.predictions_for_issue(issue)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect()
+        };
+        assert_eq!(ids("runlegion/legion#1229"), vec![a_new.id, a_old.id]);
+        assert_eq!(ids("runlegion/legion#1227"), vec![b.id]);
+        assert!(ids("runlegion/legion#9999").is_empty());
+    }
+
+    #[test]
+    fn predictions_for_issue_excludes_soft_deleted_rows() {
+        let db = test_db();
+        let mut input = fresh_input();
+        input.issue_ref = Some("runlegion/legion#1229".into());
+        let gone = Prediction::new(input);
+        db.insert_prediction(&gone).unwrap();
+        db.conn
+            .execute(
+                "UPDATE uncertainty_prediction SET deleted_at = ?1 WHERE id = ?2",
+                params!["2026-06-05T00:00:00+00:00", gone.id],
+            )
+            .unwrap();
+        assert!(
+            db.predictions_for_issue("runlegion/legion#1229")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn predictions_for_issue_db_failure_is_legion_database_error() {
+        let db = test_db();
+        db.conn
+            .execute_batch("DROP TABLE uncertainty_prediction")
+            .unwrap();
+        let err = db.predictions_for_issue("runlegion/legion#1").unwrap_err();
+        assert!(
+            matches!(err, crate::error::LegionError::Database(_)),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn orphan_after_zero_returns_none() {
         assert!(orphan_after_from_ttl(0).is_none());
     }
@@ -900,6 +1019,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: None,
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         db.insert_prediction(&p).unwrap();
@@ -931,6 +1051,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: Some("2026-05-01T00:00:00+00:00".into()),
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         p.orphan("2026-06-01T00:00:00+00:00").unwrap();
@@ -1079,6 +1200,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: None,
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         p.cohort_key = cohort_key.to_string();
@@ -1106,6 +1228,7 @@ mod tests {
             claimed_confidence: Confidence::from_f64(claimed).unwrap(),
             prediction_payload: serde_json::json!({}),
             orphan_after: Some("2026-05-01T00:00:00+00:00".into()),
+            issue_ref: None,
         };
         let mut p = Prediction::new(input);
         p.cohort_key = cohort_key.to_string();
