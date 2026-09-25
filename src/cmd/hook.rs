@@ -53,12 +53,14 @@
 //!
 //! A rewrite the adapter applies is a prediction that the constructed
 //! command will work: [`respond`] emits one `legion.cmd` prediction for it,
-//! keyed by the call's `tool_use_id` (`crate::cmd::prediction`). Before its
-//! own work, each run witnesses this session's earlier rewrites whose
-//! `tool_result` is now in the session transcript, on a worker thread waited
-//! for at most `route.deadline_ms` and abandoned after. Both run outside the
-//! decision, which reads neither: a failure in either is reported on stderr
-//! and never changes the response.
+//! keyed by the call's `tool_use_id` (`crate::cmd::prediction`). Each run
+//! also starts, before its own work, a pass that witnesses this session's
+//! earlier rewrites whose `tool_result` is now in the session transcript. The
+//! pass runs on a worker thread beside the decision: the decision never waits
+//! on it, and after the response it gets only the rest of one
+//! `route.deadline_ms`, then is abandoned. Both run outside the decision,
+//! which reads neither: a failure in either is reported on stderr and never
+//! changes the response.
 //!
 //! # The repo
 //!
@@ -79,7 +81,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use legion_cmd::{
     AskDetails, Context, Deciding, Decision, Lookup, ManagedTarget, Policy, RewriteSpec, Routed,
@@ -194,13 +196,20 @@ enum AdapterError {
 /// prints its own static deny.
 pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     let mut input = String::new();
+    let mut witness: Option<PendingWitness> = None;
     let response: Value = match stdin.read_to_string(&mut input) {
-        Ok(_) => guarded(|| respond(&input)),
+        Ok(_) => guarded(|| respond(&input, &mut witness)),
         Err(e) => deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
     let body: String =
         serde_json::to_string(&response).unwrap_or_else(|_| FALLBACK_DENY_JSON.to_string());
     let _ = writeln!(stdout, "{body}");
+    let _ = stdout.flush();
+    // The response is out. The witness pass gets whatever is left of the one
+    // deadline it started under, then the process exits and takes it along.
+    if let Some(witness) = witness {
+        witness.wait();
+    }
     ExitCode::SUCCESS
 }
 
@@ -226,21 +235,24 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 /// The production path: the policy from the environment, lookups against the
 /// local store, the repo override from `LEGION_REPO`.
 ///
-/// Around the decision, and never able to change it (#1272): first the
-/// pending-witness pass for this session, bounded by the route deadline
-/// ([`respond_after_witness`]), then the prediction for a rewrite the
-/// decision applied. Each runs under [`best_effort`], so a failure or a
-/// panic in either is a line on stderr, not a deny.
-fn respond(input: &str) -> Value {
+/// Beside and after the decision, and never able to change it (#1272): the
+/// pending-witness pass for this session runs concurrently with the decision
+/// ([`respond_beside_witness`]) and is handed back in `witness` for
+/// [`run_hook`] to give the rest of the deadline after the response is
+/// written; the prediction for a rewrite the decision applied is emitted
+/// here. Each runs under [`best_effort`], so a failure or a panic in either
+/// is a line on stderr, not a deny.
+fn respond(input: &str, witness: &mut Option<PendingWitness>) -> Value {
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
     let session_input: String = input.to_string();
-    let applied: Applied = respond_after_witness(
+    let (applied, pending) = respond_beside_witness(
         input,
         read_policy_text(),
         Arc::new(StoreLookups),
         legion_repo,
         move || witness_session(&session_input),
     );
+    *witness = pending;
     if let Some(rewrite) = &applied.rewrite {
         best_effort("rewrite prediction", || {
             let db = crate::cli::util::open_db()?;
@@ -251,34 +263,74 @@ fn respond(input: &str) -> Value {
     applied.response
 }
 
-/// Runs the witness pass, then the decision. The pass runs on a worker
-/// thread through [`decide`] and is waited for at most `route.deadline_ms`
-/// (the default when the policy cannot be read; the decision reports that
-/// itself). A pass still running then is abandoned: the decision proceeds
-/// unchanged, and the predictions it did not reach stay emitted for a later
-/// run. The worker is left running, as `decide` leaves an overrun, and ends
-/// with the one-shot process.
-fn respond_after_witness(
+/// Starts the witness pass on its own worker thread, then runs the decision
+/// as it always runs, under its own deadline. The decision never waits on the
+/// pass. The pass's budget is one `route.deadline_ms` from its start (the
+/// default when the policy cannot be read; the decision reports that
+/// itself), so the call as a whole stays within one deadline plus the
+/// decision's overhead.
+fn respond_beside_witness(
     input: &str,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
     legion_repo: Option<String>,
     witness: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
-) -> Applied {
+) -> (Applied, Option<PendingWitness>) {
     let deadline: Duration = policy_text
         .as_ref()
         .ok()
         .and_then(|text| RouteSettings::from_policy_text(text).ok())
         .unwrap_or_default()
         .deadline;
-    let pass = decide(deadline, move || {
-        best_effort("witness pass", witness);
-        Ok(())
-    });
-    if let Err(e) = pass {
-        eprintln!("[legion cmd-check] witness pass abandoned: {e}");
+    let pending: Option<PendingWitness> = PendingWitness::start(deadline, witness);
+    let applied: Applied = respond_with(input, policy_text, lookups, legion_repo);
+    (applied, pending)
+}
+
+/// A witness pass running on its worker thread, with the instant its budget
+/// ends. Dropping it, or [`PendingWitness::wait`] running out, abandons the
+/// pass: the worker ends with the one-shot process, and the predictions it
+/// did not reach stay emitted for a later run.
+#[derive(Debug)]
+struct PendingWitness {
+    finished: mpsc::Receiver<()>,
+    budget_ends: Instant,
+}
+
+impl PendingWitness {
+    /// Spawns `pass` under [`best_effort`]. `None` when the thread cannot be
+    /// started, which only skips this run's pass.
+    fn start(
+        budget: Duration,
+        pass: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
+    ) -> Option<Self> {
+        let budget_ends: Instant = Instant::now() + budget;
+        let (tx, finished) = mpsc::channel::<()>();
+        let spawned = thread::Builder::new()
+            .name("legion-cmd-witness".to_string())
+            .spawn(move || {
+                best_effort("witness pass", pass);
+                let _ = tx.send(());
+            });
+        match spawned {
+            Ok(_) => Some(Self {
+                finished,
+                budget_ends,
+            }),
+            Err(e) => {
+                eprintln!("[legion cmd-check] witness pass not started: {e}");
+                None
+            }
+        }
     }
-    respond_with(input, policy_text, lookups, legion_repo)
+
+    /// Waits for the pass until its budget ends, and no longer.
+    fn wait(self) {
+        let left: Duration = self.budget_ends.saturating_duration_since(Instant::now());
+        if let Err(mpsc::RecvTimeoutError::Timeout) = self.finished.recv_timeout(left) {
+            eprintln!("[legion cmd-check] witness pass abandoned at the deadline");
+        }
+    }
 }
 
 /// Witnesses this session's rewrites whose results are now in its
@@ -1644,9 +1696,10 @@ mod tests {
     #[test]
     fn a_stuck_transcript_read_never_holds_the_decision_past_the_deadline() {
         // The transcript is a FIFO nobody writes: opening it blocks forever,
-        // the slowest transcript read there is. The witness pass is waited
-        // for at most the route deadline and then abandoned; the decision
-        // proceeds unchanged and the pending prediction stays emitted.
+        // the slowest transcript read there is. The pass runs beside the
+        // decision, which never waits on it; after the response the pass gets
+        // only the rest of the one deadline, then is abandoned with the
+        // pending prediction still emitted.
         let dir = tempfile::tempdir().expect("tempdir");
         let fifo: PathBuf = dir.path().join("session.jsonl");
         // Shells out rather than calling libc::mkfifo: the binary is no-unsafe.
@@ -1670,14 +1723,15 @@ mod tests {
         )
         .expect("emits");
 
-        let policy: String = POLICY.replace(r#""deadline_ms": 2000"#, r#""deadline_ms": 200"#);
+        let deadline = Duration::from_millis(400);
+        let policy: String = POLICY.replace(r#""deadline_ms": 2000"#, r#""deadline_ms": 400"#);
         assert_ne!(
             policy, POLICY,
             "the test policy must carry the short deadline"
         );
         let transcript: PathBuf = fifo.clone();
-        let started = std::time::Instant::now();
-        let applied = respond_after_witness(
+        let started = Instant::now();
+        let (applied, pending) = respond_beside_witness(
             &payload("gh issue list"),
             Ok(policy),
             Arc::new(StubLookups(Lookup::Empty)),
@@ -1687,22 +1741,29 @@ mod tests {
                 Ok(())
             },
         );
-        let elapsed: Duration = started.elapsed();
+        let decided: Duration = started.elapsed();
+        pending.expect("the pass started").wait();
+        let total: Duration = started.elapsed();
 
-        // At least the deadline: the pass really was stuck and waited on,
-        // not finished early by an error.
+        // The decision never waited on the stuck pass.
         assert!(
-            elapsed >= Duration::from_millis(200),
-            "the witness pass ended early ({elapsed:?}); the FIFO did not block"
-        );
-        assert!(
-            elapsed < Duration::from_millis(1500),
-            "the decision waited {elapsed:?} on a stuck witness pass"
+            decided < deadline,
+            "the decision waited {decided:?} on a stuck witness pass"
         );
         assert_eq!(output(&applied.response)["permissionDecision"], "allow");
         assert!(
             applied.rewrite.is_some(),
             "the decision itself is unchanged"
+        );
+        // The whole call fits one deadline, not two. At least the deadline:
+        // the pass really was stuck, not ended early by an error.
+        assert!(
+            total >= deadline,
+            "the witness pass ended early ({total:?}); the FIFO did not block"
+        );
+        assert!(
+            total < deadline + Duration::from_millis(300),
+            "the call took {total:?}, past one deadline"
         );
         // The abandoned worker still holds the FIFO path open for reading.
         std::mem::forget(dir);
