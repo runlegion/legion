@@ -172,7 +172,7 @@ fn operator_output(data_dir: &std::path::Path, args: &[&str]) -> String {
 #[test]
 fn cmd_check_reports_a_deny_with_its_reason_facts_and_elapsed_time() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let text = operator_output(dir.path(), &["--", "rm", "-rf", "build"]);
+    let text = operator_output(dir.path(), &["--", "rm -rf build"]);
     assert!(text.contains("decision: deny"), "{text}");
     assert!(text.contains("unrecoverable"), "{text}");
     assert!(text.contains("instead:"), "{text}");
@@ -221,7 +221,7 @@ fn cmd_check_reports_an_unreadable_policy_as_a_deny_and_exits_0() {
     let out = legion_cmd(dir.path())
         .args(["cmd-check", "--json", "--policy"])
         .arg(&missing)
-        .args(["--", "echo", "hi"])
+        .args(["--", "echo hi"])
         .output()
         .expect("legion runs");
     assert!(out.status.success(), "a deny is a decision, not a failure");
@@ -245,6 +245,47 @@ fn cmd_check_usage_errors_exit_non_zero_with_a_legion_prefix() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.starts_with("[legion]"), "{args:?} stderr: {stderr}");
         assert!(out.stdout.is_empty(), "{args:?} printed a report");
+    }
+}
+
+#[test]
+fn cmd_check_refuses_more_than_one_word_after_the_separator() {
+    // The invoking shell has already removed the words' quoting, so the
+    // command is refused rather than rebuilt: exit 2, the usage message, and
+    // no report (nothing is routed).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = legion_cmd(dir.path())
+        .args(["cmd-check", "--policy"])
+        .arg(shipped_policy_path())
+        .args(["--", "arr[i[0]]=x", "rm", "-rf", "build"])
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        "[legion] error: pass the command as one quoted argument, or use --tool/--input"
+    );
+    assert!(out.stdout.is_empty(), "a refused command printed a report");
+}
+
+#[test]
+fn one_quoted_argument_decides_the_same_as_the_same_string_via_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for command in [
+        "arr[i[0]]=x rm -rf build",
+        "FOO+='a b' rm -rf build",
+        "git commit -m \"a; rm -rf x\"",
+    ] {
+        let positional: Value =
+            serde_json::from_str(&operator_output(dir.path(), &["--json", "--", command]))
+                .expect("JSON report");
+        let input = serde_json::json!({ "command": command }).to_string();
+        let typed: Value = serde_json::from_str(&operator_output(
+            dir.path(),
+            &["--json", "--tool", "Bash", "--input", &input],
+        ))
+        .expect("JSON report");
+        assert_eq!(positional["decision"], typed["decision"], "{command}");
     }
 }
 

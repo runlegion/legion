@@ -1195,8 +1195,10 @@ pub(crate) enum Commands {
     /// without running the command.
     ///
     /// Operator and scripting mode (#1230): `legion cmd-check [--tool TOOL]
-    /// -- <COMMAND>`, or `legion cmd-check --tool TOOL --input <JSON>` for a
-    /// tool other than Bash. Prints the Decision arm, its reason (the proxy
+    /// -- '<COMMAND>'`, or `legion cmd-check --tool TOOL --input <JSON>` for a
+    /// tool other than Bash. The command is one quoted argument, checked
+    /// exactly as typed (`legion cmd-check -- 'git commit -m "a; b"'`); more
+    /// than one word after `--` is refused. Prints the Decision arm, its reason (the proxy
     /// reason, or the deny's command to run instead), the facts route
     /// extracted, the replacement for a rewrite, and the elapsed time;
     /// `--json` prints the same report as JSON. The command is never run.
@@ -1236,7 +1238,8 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "PATH")]
         policy: Option<PathBuf>,
 
-        /// The command to check, after `--`. It is never run.
+        /// The command to check, after `--`, as one quoted argument used
+        /// verbatim. More than one word is a usage error. It is never run.
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
     },

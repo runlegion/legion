@@ -5,7 +5,7 @@
 //! what route decides for one tool call, and why, without running it:
 //!
 //! ```text
-//! legion cmd-check [--repo <REPO>] [--tool <TOOL>] [--json] [--policy <PATH>] -- <COMMAND>
+//! legion cmd-check [--repo <REPO>] [--tool <TOOL>] [--json] [--policy <PATH>] -- '<COMMAND>'
 //! legion cmd-check [--repo <REPO>] --tool <TOOL> --input <JSON> [--json] [--policy <PATH>]
 //! ```
 //!
@@ -30,7 +30,7 @@ use serde_json::Value;
 
 use crate::cmd::hook::{
     AdapterError, LEGION_REPO_ENV, LookupRunner, StoreLookups, command_in, error_deny_text,
-    panic_message, read_policy_text, replacement_for, route_call, run_hook, shell_single_quote,
+    panic_message, read_policy_text, replacement_for, route_call, run_hook,
 };
 use crate::cmd::replacement::rewritable_field;
 use crate::error;
@@ -117,8 +117,9 @@ fn error_decision(err: &AdapterError, command: Option<&str>) -> Decision {
 
 /// Dispatches `legion cmd-check`. The hook mode always exits 0 with a
 /// response. The operator mode exits 0 with a report for every decision,
-/// deny included; only a usage error (no command, invalid `--input` JSON, an
-/// unknown `--tool`) prints a `[legion]` error and exits non-zero.
+/// deny included; only a usage error (no command, more than one word after
+/// `--`, invalid `--input` JSON, an unknown `--tool`) prints a `[legion]`
+/// error and exits 2.
 pub(crate) fn handle_cmd_check(
     hook: bool,
     repo: Option<String>,
@@ -151,9 +152,15 @@ pub(crate) fn handle_cmd_check(
     Ok(())
 }
 
-/// Builds the tool call from the flags: the positional command as a Bash
-/// `tool_input.command` (or under `--tool`), else `--input` as the
-/// `tool_input`. A usage error names what is wrong.
+/// Builds the tool call from the flags: the one positional argument, used
+/// verbatim, as a Bash `tool_input.command` (or under `--tool`), else
+/// `--input` as the `tool_input`. A usage error names what is wrong.
+///
+/// The positional form takes exactly one argument, the command as typed. With
+/// several words the invoking shell has already removed their quoting, and
+/// shell text rebuilt from them is not the command the operator typed: a
+/// quoted `;`, a subscripted assignment prefix, or some other form would be
+/// read differently. So more than one word is refused, never rebuilt.
 fn tool_call(
     tool: Option<String>,
     input: Option<String>,
@@ -171,98 +178,22 @@ fn tool_call(
         Some(raw) => {
             serde_json::from_str(&raw).map_err(|e| format!("--input is not valid JSON: {e}"))?
         }
-        None if command.is_empty() => {
-            return Err(
-                "no command to check: pass it after `--`, or pass --tool with --input".to_string(),
-            );
-        }
-        None => serde_json::json!({ "command": command_line(&command) }),
+        None => match command.as_slice() {
+            [] => {
+                return Err(
+                    "no command to check: pass it after `--`, or pass --tool with --input"
+                        .to_string(),
+                );
+            }
+            [only] => serde_json::json!({ "command": only }),
+            _ => return Err(MULTI_WORD_USAGE.to_string()),
+        },
     };
     Ok(ToolCall { tool, input })
 }
 
-/// The positional words as the command line the operator typed. One word is
-/// used verbatim: it is the whole command, quoted by the invoking shell as a
-/// unit. Several words arrive with the invoking shell's quoting already
-/// removed, so each word that holds a character the shell treats specially
-/// is single-quoted before the join. `-- git commit -m "a; rm -rf x"` is then
-/// checked as `git commit -m 'a; rm -rf x'`, one argument, as typed, never as
-/// a second `rm -rf x` command.
-///
-/// The run of leading assignment words is the exception, as it is to the
-/// shell: in `NAME=value` (or `NAME+=value`, `NAME[sub]=value`,
-/// `NAME[sub]+=value`), only the value is quoted (`FOO='a b'`). Quoting the
-/// whole word would turn the assignment into the command name and the real
-/// command into its argument. The first word that is not an assignment ends
-/// the run.
-fn command_line(words: &[String]) -> String {
-    if let [only] = words {
-        return only.clone();
-    }
-    let mut in_assignments = true;
-    words
-        .iter()
-        .map(|word| {
-            if in_assignments {
-                if let Some((target, value)) = assignment(word) {
-                    return format!("{target}{}", quoted_word(value));
-                }
-                in_assignments = false;
-            }
-            quoted_word(word)
-        })
-        .collect::<Vec<String>>()
-        .join(" ")
-}
-
-/// `word` single-quoted when [`needs_quoting`] says so, else as is.
-fn quoted_word(word: &str) -> String {
-    if needs_quoting(word) {
-        shell_single_quote(word)
-    } else {
-        word.to_string()
-    }
-}
-
-/// Splits `word` into `(target, value)` when it is a bash assignment word.
-/// `target` runs through the `=` and is kept bare. It is an identifier (a
-/// letter or `_`, then letters, digits or `_`), then an optional `[subscript]`
-/// (everything up to the first `]`, taken bare as bash takes it), then an
-/// optional `+`, then `=`. `None` for any other word.
-fn assignment(word: &str) -> Option<(&str, &str)> {
-    let bytes = word.as_bytes();
-    let first = *bytes.first()?;
-    if !(first.is_ascii_alphabetic() || first == b'_') {
-        return None;
-    }
-    let mut at = 1 + bytes[1..]
-        .iter()
-        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
-        .count();
-    if bytes.get(at) == Some(&b'[') {
-        at += 1 + bytes[at + 1..].iter().position(|b| *b == b']')? + 1;
-    }
-    if bytes.get(at) == Some(&b'+') {
-        at += 1;
-    }
-    if bytes.get(at) != Some(&b'=') {
-        return None;
-    }
-    // `at` indexes the ASCII `=`, so `at + 1` is a char boundary even when the
-    // subscript holds multi-byte characters.
-    Some(word.split_at(at + 1))
-}
-
-/// True when `word` would not survive the shell as one literal word: it is
-/// empty, or holds whitespace, a quote, or a shell metacharacter. Letters,
-/// digits and `-_./:,@+=%` pass unquoted, so a plain multi-word command and
-/// an environment prefix such as `FOO=1` keep their typed form.
-fn needs_quoting(word: &str) -> bool {
-    word.is_empty()
-        || !word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:,@+=%".contains(c))
-}
+/// The usage error for more than one word after `--`.
+const MULTI_WORD_USAGE: &str = "pass the command as one quoted argument, or use --tool/--input";
 
 /// The report as text: the Decision arm and its details, the facts, the
 /// replacement for a rewrite, and the elapsed time.
@@ -703,160 +634,57 @@ mod tests {
     // -- usage errors are not decisions ------------------------------------------
 
     #[test]
-    fn the_positional_command_becomes_a_bash_tool_input() {
-        let call = tool_call(None, None, vec!["rm".into(), "-rf".into(), "build".into()])
-            .expect("a valid call");
+    fn the_one_positional_argument_is_the_bash_command_verbatim() {
+        let command = "git commit -m \"a; rm -rf x\"";
+        let call = tool_call(None, None, vec![command.to_string()]).expect("a valid call");
         assert_eq!(call.tool, "Bash");
-        assert_eq!(call.input, serde_json::json!({"command": "rm -rf build"}));
+        assert_eq!(call.input, serde_json::json!({ "command": command }));
     }
 
     #[test]
-    fn a_plain_multi_word_command_and_an_env_prefix_are_joined_unchanged() {
-        let words: Vec<String> = ["FOO=1", "git", "log", "--oneline", "-n", "5", "src/main.rs"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(
-            command_line(&words),
-            "FOO=1 git log --oneline -n 5 src/main.rs"
-        );
-    }
-
-    #[test]
-    fn a_single_positional_argument_is_used_verbatim() {
-        let words = vec!["git commit -m \"a; rm -rf x\"".to_string()];
-        assert_eq!(command_line(&words), "git commit -m \"a; rm -rf x\"");
-    }
-
-    #[test]
-    fn a_quoted_word_is_requoted_so_it_stays_one_argument() {
-        let words: Vec<String> = ["git", "commit", "-m", "a; rm -rf x", "it's", ""]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(
-            command_line(&words),
-            r"git commit -m 'a; rm -rf x' 'it'\''s' ''"
-        );
-    }
-
-    #[test]
-    fn a_leading_assignment_keeps_its_name_bare_and_quotes_only_the_value() {
-        let words: Vec<String> = ["FOO=a b", "BAR=1", "rm", "-rf", "build"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(command_line(&words), "FOO='a b' BAR=1 rm -rf build");
-        let words: Vec<String> = ["FOO=1", "git", "push"].map(String::from).to_vec();
-        assert_eq!(command_line(&words), "FOO=1 git push");
-    }
-
-    #[test]
-    fn an_assignment_shaped_word_after_the_command_is_quoted_whole() {
-        // Past the first non-assignment word the shell reads `X=a b` as an
-        // ordinary argument, and so does the requoting.
-        let words: Vec<String> = ["echo", "X=a b"].map(String::from).to_vec();
-        assert_eq!(command_line(&words), "echo 'X=a b'");
-        // A name that is not an identifier is not an assignment either.
-        let words: Vec<String> = ["1X=a b", "ls"].map(String::from).to_vec();
-        assert_eq!(command_line(&words), "'1X=a b' ls");
-    }
-
-    #[test]
-    fn a_positional_assignment_prefix_decides_the_same_as_the_typed_command() {
-        // The re-review's case: quoting `FOO=a b` whole made `rm` an argument
-        // and allowed it; the typed `FOO="a b" rm -rf build` denies.
-        let positional = tool_call(
-            None,
-            None,
-            ["FOO=a b", "rm", "-rf", "build"].map(String::from).to_vec(),
-        )
-        .expect("a valid call");
-        let typed = tool_call(
-            Some("Bash".to_string()),
-            Some(r#"{"command": "FOO=\"a b\" rm -rf build"}"#.to_string()),
-            Vec::new(),
-        )
-        .expect("a valid call");
-        let from_positional = check_policy(positional, POLICY);
-        let from_typed = check_policy(typed, POLICY);
-        assert_eq!(from_positional.decision, from_typed.decision);
-        assert_eq!(deny_reason(&from_positional), "unrecoverable");
-    }
-
-    #[test]
-    fn every_bash_assignment_form_keeps_its_target_bare() {
-        for (word, expected) in [
-            ("FOO+=a b", "FOO+='a b'"),
-            ("arr[0]=a b", "arr[0]='a b'"),
-            ("arr[0]+=a b", "arr[0]+='a b'"),
-            ("arr[k=v]=x", "arr[k=v]=x"),
-            ("FOO+=1", "FOO+=1"),
-            ("arr[0]=1", "arr[0]=1"),
+    fn one_quoted_argument_decides_the_same_as_the_string_via_input() {
+        // Every case the review found in the earlier requoting design: the
+        // command passed as one argument is the typed string, so it decides
+        // exactly as the same string given with --input.
+        for (command, expected) in [
+            (
+                "git commit -m \"a; rm -rf x\"",
+                Decision::Allow { note: None },
+            ),
+            (
+                "FOO+='a b' rm -rf build",
+                Decision::deny("unrecoverable", "trash it").expect("valid deny"),
+            ),
+            (
+                "arr[i[0]]=x rm -rf build",
+                Decision::deny("unrecoverable", "trash it").expect("valid deny"),
+            ),
         ] {
-            let words: Vec<String> = vec![word.to_string(), "ls".to_string()];
-            assert_eq!(command_line(&words), format!("{expected} ls"), "{word}");
-        }
-        // Not assignments: an unclosed subscript, `+` without `=`, no name.
-        for word in ["arr[0=a b", "FOO+a b", "=a b"] {
-            let words: Vec<String> = vec![word.to_string(), "ls".to_string()];
-            assert_eq!(
-                command_line(&words),
-                format!("{} ls", shell_single_quote(word)),
-                "{word}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_assignment_prefix_form_decides_the_same_as_the_typed_command() {
-        // The re-review's cases: each positional prefix must report the
-        // Decision the typed string gets via --input, the rm-rf deny.
-        for (positional, typed) in [
-            (vec!["FOO+=a b"], r#"FOO+="a b""#),
-            (vec!["arr[0]=a b"], r#"arr[0]="a b""#),
-            (vec!["arr[0]+=a b"], r#"arr[0]+="a b""#),
-            (vec!["FOO+=x", "BAR=a b"], r#"FOO+=x BAR="a b""#),
-        ] {
-            let mut words: Vec<String> = positional.iter().map(|w| w.to_string()).collect();
-            words.extend(["rm", "-rf", "build"].map(String::from));
-            let from_positional =
-                check_policy(tool_call(None, None, words).expect("a valid call"), POLICY);
-            let input = serde_json::json!({ "command": format!("{typed} rm -rf build") });
-            let from_typed = check_policy(
-                tool_call(
-                    Some("Bash".to_string()),
-                    Some(input.to_string()),
-                    Vec::new(),
-                )
-                .expect("a valid call"),
+            let positional = check_policy(
+                tool_call(None, None, vec![command.to_string()]).expect("a valid call"),
                 POLICY,
             );
-            assert_eq!(from_positional.decision, from_typed.decision, "{typed}");
-            assert_eq!(deny_reason(&from_positional), "unrecoverable", "{typed}");
+            let input = serde_json::json!({ "command": command }).to_string();
+            let typed = check_policy(
+                tool_call(Some("Bash".to_string()), Some(input), Vec::new()).expect("a valid call"),
+                POLICY,
+            );
+            assert_eq!(positional.decision, typed.decision, "{command}");
+            assert_eq!(positional.decision, expected, "{command}");
         }
     }
 
     #[test]
-    fn positional_words_decide_the_same_as_the_typed_command_via_input() {
-        // The review's case: the invoking shell stripped the quotes around
-        // `a; rm -rf x`. Joined bare, the `rm -rf` family would see its own
-        // invocation and deny; requoted, the report matches the typed string.
-        let positional = tool_call(
-            None,
-            None,
-            ["git", "commit", "-m", "a; rm -rf x"]
-                .map(String::from)
-                .to_vec(),
-        )
-        .expect("a valid call");
-        let typed = tool_call(
-            Some("Bash".to_string()),
-            Some(r#"{"command": "git commit -m \"a; rm -rf x\""}"#.to_string()),
-            Vec::new(),
-        )
-        .expect("a valid call");
-        let from_positional = check_policy(positional, POLICY);
-        let from_typed = check_policy(typed, POLICY);
-        assert_eq!(from_positional.decision, from_typed.decision);
-        assert_eq!(from_positional.decision, Decision::Allow { note: None });
+    fn more_than_one_positional_word_is_a_usage_error() {
+        for words in [
+            vec!["rm", "-rf", "build"],
+            vec!["git", "commit", "-m", "a; rm -rf x"],
+            vec!["arr[i[0]]=x", "rm", "-rf", "build"],
+        ] {
+            let err = tool_call(None, None, words.iter().map(|w| w.to_string()).collect())
+                .expect_err("several words are refused, never rebuilt");
+            assert_eq!(err, MULTI_WORD_USAGE, "{words:?}");
+        }
     }
 
     #[test]
