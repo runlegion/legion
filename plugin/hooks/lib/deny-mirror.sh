@@ -82,7 +82,9 @@ legion_merge_deny_patterns() {
     return 1
   fi
   if [ -f "$settings" ]; then
-    chmod "$(stat -f '%Lp' "$settings" 2>/dev/null || stat -c '%a' "$settings")" "$tmp" 2>/dev/null || true
+    # GNU stat first: on GNU coreutils `stat -f` reports the filesystem, not
+    # the file. BSD stat rejects `-c`, so it falls through to `-f`.
+    chmod "$(stat -c '%a' "$settings" 2>/dev/null || stat -f '%Lp' "$settings")" "$tmp" 2>/dev/null || true
   fi
   mv "$tmp" "$settings"
 }

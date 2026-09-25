@@ -23,7 +23,9 @@ WORK=$(mktemp -d)
 # shellcheck disable=SC2064
 trap "rm -rf '$WORK'" EXIT
 
-inode() { stat -f %i "$1" 2>/dev/null || stat -c %i "$1"; }
+# GNU stat first (`stat -f` is filesystem status there); BSD falls through.
+inode() { stat -c %i "$1" 2>/dev/null || stat -f %i "$1"; }
+mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 PATTERNS='["Bash(rm -rf /)","Bash(rm -rf \"$HOME\")","Bash(mkfs *)"]'
 
@@ -39,8 +41,10 @@ cat > "$SETTINGS" <<'JSON'
   "hooks": {"Stop": []}
 }
 JSON
+chmod 600 "$SETTINGS"
 legion_merge_deny_patterns "$SETTINGS" "$PATTERNS" 2>/dev/null
 assert_rc "merge succeeds" 0 "$?"
+assert_eq "the file mode is kept across the rename" "$(mode "$SETTINGS")" "600"
 assert_eq "deny keeps the operator's entries first, adds only the missing" \
   "$(jq -c '.permissions.deny' "$SETTINGS")" \
   '["Bash(grep *)","Bash(mkfs *)","Bash(rm -rf /)","Bash(rm -rf \"$HOME\")"]'

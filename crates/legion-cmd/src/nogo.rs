@@ -53,10 +53,11 @@ pub enum NoGoPredicate {
         prefixes: Vec<String>,
         suffixes: Vec<String>,
     },
-    /// Some operand is a forced refspec -- it starts with `+` -- whose source
-    /// or destination (either side of its first `:`) equals one of `names`.
-    /// `+main`, `+HEAD:main` and `+main:refs/heads/main` all force-write the
-    /// ref they name, with or without a force flag.
+    /// Some operand is a forced refspec -- it starts with `+` -- whose
+    /// destination equals one of `names`: the part after its first `:`, or
+    /// the whole refspec when it has no `:`. `+main`, `+HEAD:main` and
+    /// `+feature:refs/heads/main` force-write main, with or without a force
+    /// flag; `+main:backup` force-writes backup, so it does not match.
     ForcedRefspec { names: Vec<String> },
 }
 
@@ -108,8 +109,10 @@ impl NoGoPredicate {
             }),
             NoGoPredicate::ForcedRefspec { names } => operands.iter().any(|word| {
                 word.strip_prefix('+').is_some_and(|refspec| {
-                    let (source, destination) = refspec.split_once(':').unwrap_or((refspec, ""));
-                    names.iter().any(|n| n == source || n == destination)
+                    let destination = refspec
+                        .split_once(':')
+                        .map_or(refspec, |(_, destination)| destination);
+                    names.iter().any(|n| n == destination)
                 })
             }),
         }
@@ -619,7 +622,7 @@ mod tests {
             "git push origin +master",
             "git push origin +HEAD:main",
             "git push origin +feature:refs/heads/master",
-            "git push origin +main:backup",
+            "git push origin +feature:main",
             "git push origin feature +refs/heads/main",
         ] {
             let hit = matched(command);
@@ -633,9 +636,13 @@ mod tests {
             matched("git push origin +main").as_deref(),
             Some(FORCE_REFSPEC_MAIN)
         );
+        // Only the destination counts: `+main:backup` force-writes backup,
+        // which is a forced push to another branch (FR-CMD-025).
         for command in [
             "git push origin +feature",
             "git push origin +HEAD:feature",
+            "git push origin +main:backup",
+            "git push -f origin +main:backup",
             "git push origin main",
             "git push origin HEAD:main",
             "git fetch origin +main:main",

@@ -795,6 +795,11 @@ mod tests {
             "true && rm -rf /",
             "true; rm -rf /",
             "FOO=1 rm -rf /",
+            "git push origin +main",
+            "sudo git push origin +main",
+            "sh -c 'git push origin +HEAD:main'",
+            "echo hi | git push origin +main",
+            "true && git push origin +master",
         ] {
             assert_no_go(&route(&p, &bash(command), &Context::default()), command);
         }
