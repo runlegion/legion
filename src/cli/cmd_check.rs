@@ -83,8 +83,8 @@ fn check_with(
     let started = Instant::now();
     let original: Value = call.input.clone();
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let routed = route_call(policy_text, call, lookups, legion_repo, cwd)?;
-        let replacement = replacement_for(&routed, &original)?;
+        let (routed, policy) = route_call(policy_text, call, lookups, legion_repo, cwd)?;
+        let replacement = replacement_for(&routed, &policy, &original)?;
         Ok((routed, replacement))
     }))
     .unwrap_or_else(|payload| Err(AdapterError::Panic(panic_message(&payload))));
@@ -313,13 +313,20 @@ mod tests {
         }
     }
 
-    /// One rule per arm: `rm -rf` denies, `gh issue list` rewrites, `gh pr`
-    /// asks, `xxd` proxies, `ls` allows with a note, `git push` needs recall
-    /// and consult, and an Explore spawn rewrites its `subagent_type`.
+    /// One rule per arm: `rm -rf` denies, `gh issue list` rewrites, `gh
+    /// issue view` rewrites under a rule declaring translatable arguments,
+    /// `gh pr` asks, `xxd` proxies, `ls` allows with a note, `git push` needs
+    /// recall and consult, and an Explore spawn rewrites its `subagent_type`.
     const POLICY: &str = r#"{
         "route": {"deadline_ms": 2000},
         "tools": {
             "Bash": {"families": {
+                "gh issue view": {"rules": [
+                    {"id": "gh-issue-view",
+                     "outcome": {"kind": "rewrite", "target": "legion issue view",
+                                 "reason": "legion tracks issues",
+                                 "translatable": {"flags": ["--web"], "operands": ["integer"]}}}
+                ]},
                 "rm": {"rules": [
                     {"id": "rm-rf", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
                      "outcome": {"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}}
@@ -579,6 +586,34 @@ mod tests {
         };
         let report = check_policy(call, policy);
         assert!(deny_reason(&report).contains("replacement:"));
+        assert!(report.replacement.is_none());
+    }
+
+    #[test]
+    fn a_rewrite_under_a_rule_declaring_translatable_arguments_reports_the_hook_deny() {
+        // #1267 through the shared core: route returns Rewrite for the
+        // covered `7 --web`, the replacement builder refuses because the rule
+        // declares translatable arguments, and cmd-check reports exactly the
+        // reason and instead the hook's deny_for_error renders.
+        let command = "gh issue view 7 --web";
+        let report = check_policy(bash(command), POLICY);
+        let Decision::Deny(details) = &report.decision else {
+            panic!("expected a deny, got {:?}", report.decision);
+        };
+        let expected_error = AdapterError::Replacement(
+            crate::cmd::replacement::ReplacementError::ArgumentsNotCarried(
+                "gh-issue-view".to_string(),
+            )
+            .to_string(),
+        );
+        let (reason, instead) = error_deny_text(&expected_error, Some(command));
+        assert_eq!(details.reason(), reason);
+        assert_eq!(details.instead(), instead);
+        assert!(
+            details.reason().contains("rewrite rule 'gh-issue-view'"),
+            "{}",
+            details.reason()
+        );
         assert!(report.replacement.is_none());
     }
 
