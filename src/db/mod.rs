@@ -10,6 +10,7 @@ mod audit;
 mod autonomy;
 mod board;
 pub(crate) mod card_criteria;
+pub(crate) mod cmd_confirmations;
 pub mod css_symbols;
 mod defer;
 mod documents;
@@ -34,6 +35,7 @@ mod wake;
 
 pub use audit::AuditInput;
 pub use board::{INBOX_CURSOR_SUFFIX, RedeliveryOutcome};
+pub use cmd_confirmations::CmdConfirmation;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::validate_hhmm;
 
@@ -145,6 +147,7 @@ impl Database {
         inventory::create_tables(conn)?;
         module_edges::create_tables(conn)?;
         css_symbols::create_tables(conn)?;
+        cmd_confirmations::create_tables(conn)?;
         tx.commit()?;
 
         reflections::migrate(conn)?;

@@ -218,6 +218,95 @@ pub fn append_witness_conflict(record: &WitnessConflictRecord) -> Result<()> {
     append_jsonl(&witness_conflict_log_path(), record)
 }
 
+/// The kind of a legion-cmd incident record (FR-CMD-027, #1237).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CmdIncidentKind {
+    /// A command matched a no-go entry and was refused (FR-CMD-025).
+    NoGo,
+    /// A command was asked: refused with a question to the agent (FR-CMD-006).
+    Ask,
+    /// The agent confirmed an asked command (FR-CMD-026).
+    Confirmation,
+    /// An ask with no confirmation within 10 minutes of it, or a
+    /// confirmation that expired unused.
+    Drop,
+}
+
+/// One row in `cmd-incidents.jsonl`: a legion-cmd no-go hit, ask,
+/// confirmation, or drop, recorded in full the way a failed sudo is
+/// (FR-CMD-027). Sibling of `bypass.jsonl` in legion's local telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CmdIncidentRecord {
+    /// UUIDv7. A confirmation's id is its confirmation-store row id; a drop
+    /// names the record it drops in `drop_of`.
+    pub id: String,
+    pub ts: DateTime<Utc>,
+    pub kind: CmdIncidentKind,
+    /// The command as issued.
+    pub command: String,
+    pub agent: String,
+    pub repo: String,
+    pub session_id: String,
+    /// The working directory the command was issued from.
+    pub cwd: String,
+    /// The policy or no-go entry matched, when one was.
+    pub entry: Option<String>,
+    /// The command's parsed key (`legion_cmd::CommandKey`), the join between
+    /// an ask and the confirmation that answers it.
+    pub command_key: Option<String>,
+    /// A confirmation's reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// A no-go hit's count within its session and entry: 1 on the first hit,
+    /// one more on each repeat (FR-CMD-027).
+    #[serde(default)]
+    pub hit_count: Option<u64>,
+    /// A drop's dropped ask or confirmation id.
+    #[serde(default)]
+    pub drop_of: Option<String>,
+}
+
+/// Resolve the canonical legion-cmd incident log path (sibling of
+/// `bypass.jsonl`).
+pub fn cmd_incident_log_path() -> PathBuf {
+    bypass_log_dir().join("cmd-incidents.jsonl")
+}
+
+/// Append one incident record. Unlike the other logs here this is NOT
+/// best-effort at the call site: a record that cannot be written refuses the
+/// command (FR-CMD-027), so the caller turns this error into a deny.
+pub fn append_cmd_incident(path: &std::path::Path, record: &CmdIncidentRecord) -> Result<()> {
+    append_jsonl(path, record)
+}
+
+/// Read every incident record at `path`, oldest first. A missing file is an
+/// empty log; a malformed line is skipped with a stderr breadcrumb, the same
+/// as `list_bypasses`.
+pub fn list_cmd_incidents(path: &std::path::Path) -> Result<Vec<CmdIncidentRecord>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut records = Vec::new();
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<CmdIncidentRecord>(&line) {
+            Ok(record) => records.push(record),
+            Err(e) => eprintln!(
+                "[legion] skipping malformed incident row {} in {}: {e}",
+                index + 1,
+                path.display()
+            ),
+        }
+    }
+    Ok(records)
+}
+
 /// Append one serializable record as a single JSONL line, creating parent
 /// dirs and the file on first use.
 ///

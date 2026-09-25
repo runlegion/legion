@@ -356,6 +356,7 @@ fn run() -> error::Result<()> {
             json,
         } => cli::ops::handle_health(history, all_hosts, json)?,
         Commands::CmdCheck { hook } => cli::cmd_check::handle_cmd_check(hook)?,
+        Commands::Cmd { action } => cli::cmd_confirm::handle_cmd(action)?,
     }
 
     Ok(())

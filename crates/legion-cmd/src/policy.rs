@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 
 use crate::decision::{ManagedTarget, ProxyReason};
+use crate::nogo::{self, NoGoEntry, NoGoPredicate};
+use crate::splitter::Position;
 
 /// The tool a set of rules governs. The policy is organized by tool kind first
 /// (FR-CMD-011), then, within Bash, by managed-binary family.
@@ -107,8 +109,7 @@ pub struct Family {
 /// no per-family code (FR-CMD-011).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
-    /// Unique across the whole policy (the ledger records it; #1237 keys
-    /// confirmations by it).
+    /// Unique across the whole policy: the incident records name it (#1237).
     pub id: String,
     /// All must hold for the rule to match.
     pub predicates: Vec<Predicate>,
@@ -197,8 +198,8 @@ pub enum RuleOutcome {
         question: String,
         reason: String,
         /// Whether the command needs the operator after the agent confirms
-        /// (FR-CMD-006). route never copies this into its output in this
-        /// issue; #1237 adds the path that reads it.
+        /// (FR-CMD-006). route acts on it only once a confirmation answers the
+        /// ask (#1237).
         needs_operator: bool,
     },
     /// Route this command to the named sym job.
@@ -288,8 +289,8 @@ pub enum FallbackDecision {
     Ask {
         question: String,
         reason: String,
-        /// Carried like [`RuleOutcome::Ask`]'s mark; route never copies it
-        /// into its output (FR-CMD-006).
+        /// Carried like [`RuleOutcome::Ask`]'s mark; route acts on it only once
+        /// a confirmation answers the ask (FR-CMD-006, FR-CMD-026).
         needs_operator: bool,
     },
 }
@@ -354,6 +355,10 @@ pub struct Policy {
     pub wrappers: Vec<Wrapper>,
     pub interpreters: Vec<Interpreter>,
     pub script_carriers: Vec<ScriptCarrier>,
+    /// No-go entries the policy file adds (FR-CMD-025). They extend the
+    /// built-in list and can never remove or weaken it: see
+    /// [`Policy::no_go_entries`].
+    pub no_go: Vec<NoGoEntry>,
 }
 
 impl Policy {
@@ -394,6 +399,16 @@ impl Policy {
     /// The sym job with this id, if any.
     pub fn sym_job(&self, id: &str) -> Option<&SymJob> {
         self.sym_jobs.iter().find(|j| j.id == id)
+    }
+
+    /// Every no-go entry route checks (FR-CMD-025): the built-in entries
+    /// first, then the entries this policy adds. The built-ins are not
+    /// policy data, so no policy file can remove one; listing them first
+    /// means an added entry that reuses a built-in id never takes its place.
+    pub fn no_go_entries(&self) -> Vec<NoGoEntry> {
+        let mut entries = nogo::builtin_no_go();
+        entries.extend(self.no_go.iter().cloned());
+        entries
     }
 }
 
@@ -458,6 +473,12 @@ pub enum PolicyError {
     #[error("{pointer}: sym job id is empty")]
     EmptySymJobId { pointer: String },
 
+    #[error("{pointer}: unknown command position '{position}'")]
+    UnknownPosition { pointer: String, position: String },
+
+    #[error("{pointer}: no-go entry must name at least one binary or binary prefix")]
+    NoGoWithoutBinary { pointer: String },
+
     #[error("{pointer}: duplicate rule id '{id}', first defined at {first}")]
     DuplicateRuleId {
         pointer: String,
@@ -492,12 +513,13 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
             "interpreters",
             "script_carriers",
             "route",
+            "no_go",
         ],
     )?;
 
     // Ids are unique across the whole policy -- rule ids and sym-job ids share
-    // one namespace, because the ledger records the id and #1237 keys
-    // confirmations by it, and `Deciding::Rule.id` carries either kind.
+    // one namespace, because an incident record names the id (#1237) and
+    // `Deciding::Rule.id` carries either kind.
     let mut seen_ids: HashMap<String, String> = HashMap::new();
 
     // Sym jobs first, so an action's sym-job reference can be validated.
@@ -525,12 +547,18 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         None => BTreeMap::new(),
     };
 
+    let no_go = match root.get("no_go") {
+        Some(value) => parse_no_go(value, "/no_go")?,
+        None => Vec::new(),
+    };
+
     Ok(Policy {
         tools,
         sym_jobs,
         wrappers,
         interpreters,
         script_carriers,
+        no_go,
     })
 }
 
@@ -1191,6 +1219,146 @@ fn parse_sym_jobs(
         });
     }
     Ok(jobs)
+}
+
+/// Parses the policy file's `no_go` entries (FR-CMD-025): the same predicate
+/// shape as the built-in entries. Each entry is validated like every other
+/// policy entry -- an unknown field is an error, never a silently weaker
+/// entry.
+fn parse_no_go(value: &Value, pointer: &str) -> Result<Vec<NoGoEntry>, PolicyError> {
+    let array = as_array(value, pointer)?;
+    let mut entries = Vec::with_capacity(array.len());
+    for (index, entry_value) in array.iter().enumerate() {
+        let entry_pointer = child_pointer(pointer, &index.to_string());
+        let map = as_object(entry_value, &entry_pointer)?;
+        check_known_keys(
+            map,
+            &entry_pointer,
+            &[
+                "id",
+                "binaries",
+                "binary_prefixes",
+                "position",
+                "predicates",
+            ],
+        )?;
+        let id = require_string(map, "id", &entry_pointer)?;
+        if id.is_empty() {
+            return Err(PolicyError::EmptyRuleId {
+                pointer: child_pointer(&entry_pointer, "id"),
+                id,
+            });
+        }
+        let binaries = optional_string_array(map, "binaries", &entry_pointer)?;
+        let binary_prefixes = optional_string_array(map, "binary_prefixes", &entry_pointer)?;
+        if binaries.is_empty() && binary_prefixes.is_empty() {
+            return Err(PolicyError::NoGoWithoutBinary {
+                pointer: entry_pointer,
+            });
+        }
+        let position = match map.get("position") {
+            Some(raw) => {
+                let position_pointer = child_pointer(&entry_pointer, "position");
+                let name = as_string(raw, &position_pointer)?;
+                Some(parse_position(&name).ok_or(PolicyError::UnknownPosition {
+                    pointer: position_pointer,
+                    position: name,
+                })?)
+            }
+            None => None,
+        };
+        let predicates = match map.get("predicates") {
+            Some(raw) => parse_no_go_predicates(raw, &child_pointer(&entry_pointer, "predicates"))?,
+            None => Vec::new(),
+        };
+        entries.push(NoGoEntry {
+            id,
+            binaries,
+            binary_prefixes,
+            position,
+            predicates,
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_no_go_predicates(value: &Value, pointer: &str) -> Result<Vec<NoGoPredicate>, PolicyError> {
+    let array = as_array(value, pointer)?;
+    let mut predicates = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let item_pointer = child_pointer(pointer, &index.to_string());
+        let map = as_object(item, &item_pointer)?;
+        let kind = require_string(map, "kind", &item_pointer)?;
+        let predicate = match kind.as_str() {
+            "flag" => {
+                check_known_keys(map, &item_pointer, &["kind", "short", "long"])?;
+                let short_pointer = child_pointer(&item_pointer, "short");
+                let mut short = Vec::new();
+                for (i, flag) in optional_string_array(map, "short", &item_pointer)?
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut chars = flag.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => short.push(c),
+                        _ => {
+                            return Err(PolicyError::WrongType {
+                                pointer: child_pointer(&short_pointer, &i.to_string()),
+                                expected: "a one-character flag".to_string(),
+                            });
+                        }
+                    }
+                }
+                NoGoPredicate::Flag {
+                    short,
+                    long: optional_string_array(map, "long", &item_pointer)?,
+                }
+            }
+            "operand" => {
+                check_known_keys(
+                    map,
+                    &item_pointer,
+                    &["kind", "equals", "prefixes", "suffixes"],
+                )?;
+                NoGoPredicate::Operand {
+                    equals: optional_string_array(map, "equals", &item_pointer)?,
+                    prefixes: optional_string_array(map, "prefixes", &item_pointer)?,
+                    suffixes: optional_string_array(map, "suffixes", &item_pointer)?,
+                }
+            }
+            _ => {
+                return Err(PolicyError::UnknownPredicateKind {
+                    pointer: child_pointer(&item_pointer, "kind"),
+                    kind,
+                });
+            }
+        };
+        predicates.push(predicate);
+    }
+    Ok(predicates)
+}
+
+fn optional_string_array(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    pointer: &str,
+) -> Result<Vec<String>, PolicyError> {
+    match map.get(key) {
+        Some(value) => parse_string_array(value, &child_pointer(pointer, key)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// A [`Position`] by its kebab-case wire name.
+fn parse_position(name: &str) -> Option<Position> {
+    match name {
+        "first" => Some(Position::First),
+        "after-operator" => Some(Position::AfterOperator),
+        "after-assignment" => Some(Position::AfterAssignment),
+        "substitution" => Some(Position::Substitution),
+        "function-body" => Some(Position::FunctionBody),
+        _ => None,
+    }
 }
 
 fn parse_string_array(value: &Value, pointer: &str) -> Result<Vec<String>, PolicyError> {

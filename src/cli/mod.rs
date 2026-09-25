@@ -3,6 +3,7 @@
 
 pub(crate) mod autonomy;
 pub(crate) mod cmd_check;
+pub(crate) mod cmd_confirm;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
@@ -1198,6 +1199,13 @@ pub(crate) enum Commands {
         /// hook response (JSON) on stdout. Always exits 0 with a response.
         #[arg(long)]
         hook: bool,
+    },
+
+    /// legion-cmd verbs an agent runs itself (#1237): `legion cmd confirm`
+    /// answers an ask with the reason the command should run.
+    Cmd {
+        #[command(subcommand)]
+        action: self::cmd_confirm::CmdAction,
     },
 }
 
