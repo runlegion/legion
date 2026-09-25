@@ -242,6 +242,41 @@ pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
     winner.unwrap_or_else(allow_default)
 }
 
+/// Refuses a rewrite that won a command which is not exactly one simple
+/// command (FR-CMD-008). A rewrite replaces the whole command, so keeping it
+/// would drop every other command, operator, or construct the line carries;
+/// the deny names the rule and says so, keeping the part's `deciding` and
+/// `verb`. Any other outcome is returned unchanged.
+pub(crate) fn refuse_compound_rewrite(part: PartOutcome) -> PartOutcome {
+    let Decision::Rewrite { target, .. } = &part.decision else {
+        return part;
+    };
+    let rule = rewrite_rule_label(&part.deciding);
+    let decision = deny(
+        format!(
+            "{rule} rewrites one command in this compound command to `{}`; replacing the \
+             command would drop the rest of it, so it is not rewritten",
+            target.as_str()
+        ),
+        format!(
+            "run `{}` as its own command, and the other commands separately",
+            target.as_str()
+        ),
+    );
+    PartOutcome { decision, ..part }
+}
+
+/// How a refused rewrite's deny names the rule that produced it. Every rewrite
+/// comes from `resolve_rule`, which always names its rule, so the fallback arm
+/// cannot fire today; it keeps the deny readable if a rewrite is ever produced
+/// without one.
+fn rewrite_rule_label(deciding: &Deciding) -> String {
+    match deciding {
+        Deciding::Rule { id, .. } => format!("rule '{id}'"),
+        _ => "a rewrite rule".to_string(),
+    }
+}
+
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
 /// (FR-CMD-016), the sym action (FR-CMD-007), and a rewrite's argument
 /// coverage (FR-CMD-008). `args` are the invocation's arguments and
@@ -424,13 +459,7 @@ pub fn refuse_rewrite_dropping_shell_words(
         (false, true) => "its environment-assignment prefix",
         (false, false) => return part,
     };
-    // Every rewrite comes from `resolve_rule`, which always names its rule,
-    // so the fallback arm cannot fire today; it keeps the deny readable if a
-    // rewrite is ever produced without one.
-    let rule = match &part.deciding {
-        Deciding::Rule { id, .. } => format!("rule '{id}'"),
-        _ => "a rewrite rule".to_string(),
-    };
+    let rule = rewrite_rule_label(&part.deciding);
     let decision = deny(
         format!(
             "{rule} rewrites this command to `{}`, and {dropped} would have been dropped, \

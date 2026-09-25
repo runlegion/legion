@@ -149,6 +149,10 @@ pub struct Unreduced {
 pub struct Scan {
     pub invocations: Vec<Invocation>,
     pub unreduced: Vec<Unreduced>,
+    /// True only when the parse is structurally exactly one simple command
+    /// with a command word and no substitution anywhere in it. See
+    /// [`is_one_simple_command`].
+    pub single_simple: bool,
 }
 
 /// Errors raised when `scan`'s own top-level parse of the given command
@@ -276,13 +280,114 @@ fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
             seen_first = true;
         }
     }
+    scan.single_simple = is_one_simple_command(&program, depth);
     Ok(scan)
+}
+
+/// True when `program` is exactly one simple command that names a command
+/// word: one complete command holding one list item, run synchronously, with
+/// no `&&`/`||`, one pipeline stage, no `!` negation, and no `time`, and whose
+/// every word and redirect is plain (see [`is_plain_item`]). A pipe, a list
+/// operator, `&`, a subshell, a brace group, `[[ ]]`, `(( ))`, a function
+/// definition, a line with no command word (`X=1`, `> out.txt`), and any
+/// command or process substitution anywhere in the command all fail it. This
+/// is the shape a rewrite can replace without dropping anything else the line
+/// runs (FR-CMD-008). It is decided from the parse tree alone, never from
+/// what the walk happened to record.
+fn is_one_simple_command(program: &ast::Program, depth: u8) -> bool {
+    let [list] = program.complete_commands.as_slice() else {
+        return false;
+    };
+    let [ast::CompoundListItem(and_or, separator)] = list.0.as_slice() else {
+        return false;
+    };
+    if !matches!(separator, ast::SeparatorOperator::Sequence) || !and_or.additional.is_empty() {
+        return false;
+    }
+    let pipeline = &and_or.first;
+    if pipeline.bang || pipeline.timed.is_some() {
+        return false;
+    }
+    let [Command::Simple(simple)] = pipeline.seq.as_slice() else {
+        return false;
+    };
+    let Some(command_word) = &simple.word_or_name else {
+        return false;
+    };
+    let items = simple
+        .prefix
+        .iter()
+        .flat_map(|prefix| &prefix.0)
+        .chain(simple.suffix.iter().flat_map(|suffix| &suffix.0));
+    is_plain_word(command_word, depth) && items.into_iter().all(|item| is_plain_item(item, depth))
+}
+
+/// An allow-list over one prefix or suffix item: a word or assignment whose
+/// word is plain, or a file, fd-duplicate, here-string or `&>` redirect whose
+/// target word is plain. A process substitution, whether an argument or a
+/// redirect target, and a here-document (whose body may expand) are not.
+fn is_plain_item(item: &CommandPrefixOrSuffixItem, depth: u8) -> bool {
+    match item {
+        CommandPrefixOrSuffixItem::Word(word)
+        | CommandPrefixOrSuffixItem::AssignmentWord(_, word) => is_plain_word(word, depth),
+        CommandPrefixOrSuffixItem::ProcessSubstitution(..) => false,
+        CommandPrefixOrSuffixItem::IoRedirect(redirect) => match redirect {
+            IoRedirect::File(_, _, target) => match target {
+                IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
+                    is_plain_word(word, depth)
+                }
+                IoFileRedirectTarget::Fd(_) => true,
+                IoFileRedirectTarget::ProcessSubstitution(..) => false,
+            },
+            IoRedirect::HereString(_, word) | IoRedirect::OutputAndError(word, _) => {
+                is_plain_word(word, depth)
+            }
+            IoRedirect::HereDocument(..) => false,
+        },
+    }
+}
+
+/// An allow-list over a word's pieces: literal text, quoting, escapes, a tilde,
+/// and a bare parameter reference (`$X`, `${X}`, `$1`, `$@`). A command
+/// substitution (`$(...)` or backquotes), an arithmetic expansion, and every
+/// parameter expansion that carries embedded shell text (a default value, a
+/// pattern, an array subscript) or is indirect (`${!x}`) are not, since each
+/// can run a command.
+fn is_plain_word(word: &ast::Word, depth: u8) -> bool {
+    parse_word_pieces(&word.value, depth)
+        .is_ok_and(|pieces| pieces.iter().all(|piece| is_plain_piece(&piece.piece)))
+}
+
+fn is_plain_piece(piece: &WordPiece) -> bool {
+    match piece {
+        WordPiece::Text(_)
+        | WordPiece::SingleQuotedText(_)
+        | WordPiece::AnsiCQuotedText(_)
+        | WordPiece::EscapeSequence(_)
+        | WordPiece::TildeExpansion(_) => true,
+        WordPiece::DoubleQuotedSequence(pieces)
+        | WordPiece::GettextDoubleQuotedSequence(pieces) => {
+            pieces.iter().all(|p| is_plain_piece(&p.piece))
+        }
+        // An indirect reference (`${!x}`) dereferences the runtime value as
+        // parameter syntax, whose subscript can run a command substitution, so
+        // it is never plain -- the same as a literal subscript.
+        WordPiece::ParameterExpansion(word::ParameterExpr::Parameter {
+            parameter,
+            indirect,
+        }) => !indirect && !matches!(parameter, word::Parameter::NamedWithIndex { .. }),
+        WordPiece::ParameterExpansion(_)
+        | WordPiece::CommandSubstitution(_)
+        | WordPiece::BackquotedCommandSubstitution(_)
+        | WordPiece::ArithmeticExpression(_) => false,
+    }
 }
 
 fn too_deep(text: &str, depth: u8) -> Scan {
     Scan {
         invocations: Vec::new(),
         unreduced: vec![too_deep_unreduced(text, depth)],
+        single_simple: false,
     }
 }
 
@@ -2043,6 +2148,50 @@ mod tests {
             }
             let text = String::from_utf8_lossy(&bytes).to_string();
             let _ = scan(&text);
+        }
+    }
+
+    #[test]
+    fn single_simple_is_true_only_for_exactly_one_simple_command() {
+        for text in [
+            "git push",
+            "git push origin main",
+            "FOO=1 git push",
+            "git push origin \"$BRANCH\"",
+            "git push origin ${x}",
+            "git push > out.txt",
+        ] {
+            assert!(scan(text).expect("parses").single_simple, "`{text}`");
+        }
+        for text in [
+            "git push | head",
+            "git push && echo done",
+            "git push; echo done",
+            "git push &",
+            "! git push",
+            "time git push",
+            "(git push)",
+            "{ git push; }",
+            "[[ -f x ]]",
+            "(( 0 ))",
+            "X=1",
+            "> out.txt",
+            "",
+            "git push $(echo main)",
+            "git push `echo main`",
+            "git push \"$(echo main)\"",
+            "git push ${X:-$(echo main)}",
+            "echo ${!x}",
+            "${!x} foo",
+            "git push $((1 + 2))",
+            "FOO=$(> out.txt) git push",
+            "git push > \"$(> out.txt)\"",
+            "git push <<< \"$(> out.txt)\"",
+            "git push > >(> out.txt)",
+            "git push <(echo x)",
+            "f() { git push; }",
+        ] {
+            assert!(!scan(text).expect("parses").single_simple, "`{text}`");
         }
     }
 }
