@@ -39,7 +39,17 @@ fn mirror_policy() -> Policy {
              "value_options": ["-p", "--package", "-w", "--workspace"]},
             {"binary": "pnpm", "required_subcommand": "exec",
              "flags": ["-r", "--recursive", "--parallel", "--report-summary", "-w", "--workspace-root"],
-             "value_options": ["--resume-from", "-C", "--dir", "-F", "--filter"]}
+             "value_options": ["--resume-from", "-C", "--dir", "-F", "--filter"]},
+            {"binary": "npm", "required_subcommand": "x",
+             "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
+             "value_options": ["-p", "--package", "-w", "--workspace", "--prefix"]},
+            {"binary": "bun", "required_subcommand": "x",
+             "flags": ["--bun", "--silent", "--verbose", "--no-install"],
+             "value_options": ["-p", "--package"]},
+            {"binary": "yarn", "required_subcommand": "exec",
+             "flags": ["--silent", "--verbose"],
+             "value_options": ["--cwd"],
+             "selectors": ["workspace", "workspaces"]}
         ],
         "interpreters": [
             {"binary": "sh", "flag": "-c", "body": "shell"},
@@ -120,6 +130,16 @@ fn shipped_wrapper_declarations_reach_the_wrapped_command() {
         ("yarn --cwd web exec eslint .", "eslint"),
         ("yarn dlx -q cowsay hi", "cowsay"),
         ("bunx --silent --no-install cowsay hi", "cowsay"),
+        // A subcommand alias is its own entry (#1293).
+        ("npm x grep foo .", "grep"),
+        ("npm x -w web -- grep foo .", "grep"),
+        ("bun x grep foo .", "grep"),
+        ("bun --bun x grep foo .", "grep"),
+        // A workspace selector is the runner's own words (#1293).
+        ("yarn workspace web exec grep foo .", "grep"),
+        ("yarn workspaces foreach exec grep foo .", "grep"),
+        ("yarn --cwd packages workspace web exec grep foo .", "grep"),
+        ("yarn workspace web dlx -q cowsay hi", "cowsay"),
     ] {
         let (args, start) = shipped_payload_start(&policy, command);
         let start =
@@ -144,11 +164,27 @@ fn shipped_wrapper_declarations_reach_the_wrapped_command() {
         "pnpm -r -- exec grep foo .",
         "npm -- exec grep foo .",
         "yarn -- exec grep foo .",
+        // `workspaces foreach`'s own options are undeclared (#1293).
+        "yarn workspaces foreach -A exec grep foo .",
     ] {
         assert_eq!(
             shipped_payload_start(&policy, command).1,
             None,
             "`{command}`"
+        );
+    }
+
+    // A script run through a selector names no runner subcommand, so no
+    // wrapper claims it: an ordinary invocation, like bare `yarn <script>`.
+    for command in ["yarn workspace web grep", "yarn workspace web build"] {
+        let args: Vec<String> = command
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect();
+        assert!(
+            policy.matching_wrapper("yarn", &args).is_none(),
+            "`{command}` stays ordinary"
         );
     }
 }
@@ -214,6 +250,35 @@ fn mirror_policy_re_enters_a_js_runner_and_a_shell_interpreter() {
             other => panic!("`{command}` should route to sym, got {other:?}"),
         }
     }
+}
+
+/// A runner reached through a subcommand alias or a workspace selector routes
+/// like its declared form (#1293); an undeclared shape proxies opaque, and a
+/// script run through a selector stays ordinary.
+#[test]
+fn mirror_policy_routes_runner_aliases_and_workspace_selectors() {
+    let policy = mirror_policy();
+    for command in [
+        "npm x grep foo .",
+        "bun x grep foo .",
+        "yarn workspace web exec grep foo .",
+        "yarn workspaces foreach exec grep foo .",
+    ] {
+        match decide(&policy, command) {
+            Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
+            other => panic!("`{command}` should route as grep, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        decide(&policy, "yarn workspaces foreach -A exec grep foo ."),
+        Decision::Proxy {
+            reason: ProxyReason::Opaque
+        }
+    );
+    assert_eq!(
+        decide(&policy, "yarn workspace web grep"),
+        Decision::Allow { note: None }
+    );
 }
 
 #[test]
