@@ -655,7 +655,7 @@ fn quoted_command(command: Option<&str>) -> String {
 /// Single-quotes `text` for a shell command line, closing and reopening the
 /// quote around every embedded single quote (`'\''`), so a command carrying
 /// quotes or metacharacters stays one word.
-fn shell_single_quote(text: &str) -> String {
+pub(crate) fn shell_single_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 

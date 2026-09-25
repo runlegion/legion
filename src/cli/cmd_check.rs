@@ -30,7 +30,7 @@ use serde_json::Value;
 
 use crate::cmd::hook::{
     AdapterError, LEGION_REPO_ENV, LookupRunner, StoreLookups, command_in, error_deny_text,
-    panic_message, read_policy_text, replacement_for, route_call, run_hook,
+    panic_message, read_policy_text, replacement_for, route_call, run_hook, shell_single_quote,
 };
 use crate::cmd::replacement::rewritable_field;
 use crate::error;
@@ -176,9 +176,44 @@ fn tool_call(
                 "no command to check: pass it after `--`, or pass --tool with --input".to_string(),
             );
         }
-        None => serde_json::json!({ "command": command.join(" ") }),
+        None => serde_json::json!({ "command": command_line(&command) }),
     };
     Ok(ToolCall { tool, input })
+}
+
+/// The positional words as the command line the operator typed. One word is
+/// used verbatim: it is the whole command, quoted by the invoking shell as a
+/// unit. Several words arrive with the invoking shell's quoting already
+/// removed, so each word that holds a character the shell treats specially
+/// is single-quoted before the join. `-- git commit -m "a; rm -rf x"` is then
+/// checked as `git commit -m 'a; rm -rf x'`, one argument, as typed, never as
+/// a second `rm -rf x` command.
+fn command_line(words: &[String]) -> String {
+    match words {
+        [only] => only.clone(),
+        _ => words
+            .iter()
+            .map(|word| {
+                if needs_quoting(word) {
+                    shell_single_quote(word)
+                } else {
+                    word.clone()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(" "),
+    }
+}
+
+/// True when `word` would not survive the shell as one literal word: it is
+/// empty, or holds whitespace, a quote, or a shell metacharacter. Letters,
+/// digits and `-_./:,@+=%` pass unquoted, so a plain multi-word command and
+/// an environment prefix such as `FOO=1` keep their typed form.
+fn needs_quoting(word: &str) -> bool {
+    word.is_empty()
+        || !word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:,@+=%".contains(c))
 }
 
 /// The report as text: the Decision arm and its details, the facts, the
@@ -625,6 +660,59 @@ mod tests {
             .expect("a valid call");
         assert_eq!(call.tool, "Bash");
         assert_eq!(call.input, serde_json::json!({"command": "rm -rf build"}));
+    }
+
+    #[test]
+    fn a_plain_multi_word_command_and_an_env_prefix_are_joined_unchanged() {
+        let words: Vec<String> = ["FOO=1", "git", "log", "--oneline", "-n", "5", "src/main.rs"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            command_line(&words),
+            "FOO=1 git log --oneline -n 5 src/main.rs"
+        );
+    }
+
+    #[test]
+    fn a_single_positional_argument_is_used_verbatim() {
+        let words = vec!["git commit -m \"a; rm -rf x\"".to_string()];
+        assert_eq!(command_line(&words), "git commit -m \"a; rm -rf x\"");
+    }
+
+    #[test]
+    fn a_quoted_word_is_requoted_so_it_stays_one_argument() {
+        let words: Vec<String> = ["git", "commit", "-m", "a; rm -rf x", "it's", ""]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            command_line(&words),
+            r"git commit -m 'a; rm -rf x' 'it'\''s' ''"
+        );
+    }
+
+    #[test]
+    fn positional_words_decide_the_same_as_the_typed_command_via_input() {
+        // The review's case: the invoking shell stripped the quotes around
+        // `a; rm -rf x`. Joined bare, the `rm -rf` family would see its own
+        // invocation and deny; requoted, the report matches the typed string.
+        let positional = tool_call(
+            None,
+            None,
+            ["git", "commit", "-m", "a; rm -rf x"]
+                .map(String::from)
+                .to_vec(),
+        )
+        .expect("a valid call");
+        let typed = tool_call(
+            Some("Bash".to_string()),
+            Some(r#"{"command": "git commit -m \"a; rm -rf x\""}"#.to_string()),
+            Vec::new(),
+        )
+        .expect("a valid call");
+        let from_positional = check_policy(positional, POLICY);
+        let from_typed = check_policy(typed, POLICY);
+        assert_eq!(from_positional.decision, from_typed.decision);
+        assert_eq!(from_positional.decision, Decision::Allow { note: None });
     }
 
     #[test]
