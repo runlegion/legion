@@ -722,6 +722,14 @@ mod tests {
                 "`{command}`"
             );
         }
+        for command in ["gh pr list", "env gh pr list", "sh -c 'gh pr list'"] {
+            match route_rewrite_policy(command).decision {
+                Decision::Rewrite { target, .. } => {
+                    assert_eq!(target.as_str(), "legion pr list", "`{command}`")
+                }
+                other => panic!("`{command}`: expected rewrite, got {other:?}"),
+            }
+        }
     }
 
     /// A line that is not one simple command but reaches no rewrite is not
@@ -777,6 +785,12 @@ mod tests {
             ("(( 0 )) && gh pr list", "pr-list"),
             ("(X=1) || gh pr list", "pr-list"),
             ("{ X=1; } || gh pr list", "pr-list"),
+            // A substitution anywhere in the one command runs something the
+            // rewrite would drop -- here, truncating out.txt.
+            ("FOO=$(> out.txt) gh pr list", "pr-list"),
+            ("gh pr list > \"$(> out.txt)\"", "pr-list"),
+            ("gh pr list <<< \"$(> out.txt)\"", "pr-list"),
+            ("gh pr list > >(> out.txt)", "pr-list"),
         ] {
             let routed = route_rewrite_policy(command);
             match &routed.decision {
