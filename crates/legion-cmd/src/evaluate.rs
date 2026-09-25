@@ -251,10 +251,7 @@ pub(crate) fn refuse_compound_rewrite(part: PartOutcome) -> PartOutcome {
     let Decision::Rewrite { target, .. } = &part.decision else {
         return part;
     };
-    let rule = match &part.deciding {
-        Deciding::Rule { id, .. } => format!("rule '{id}'"),
-        _ => "a rewrite rule".to_string(),
-    };
+    let rule = rewrite_rule_label(&part.deciding);
     let decision = deny(
         format!(
             "{rule} rewrites one command in this compound command to `{}`; replacing the \
@@ -267,6 +264,17 @@ pub(crate) fn refuse_compound_rewrite(part: PartOutcome) -> PartOutcome {
         ),
     );
     PartOutcome { decision, ..part }
+}
+
+/// How a refused rewrite's deny names the rule that produced it. Every rewrite
+/// comes from `resolve_rule`, which always names its rule, so the fallback arm
+/// cannot fire today; it keeps the deny readable if a rewrite is ever produced
+/// without one.
+fn rewrite_rule_label(deciding: &Deciding) -> String {
+    match deciding {
+        Deciding::Rule { id, .. } => format!("rule '{id}'"),
+        _ => "a rewrite rule".to_string(),
+    }
 }
 
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
@@ -451,13 +459,7 @@ pub fn refuse_rewrite_dropping_shell_words(
         (false, true) => "its environment-assignment prefix",
         (false, false) => return part,
     };
-    // Every rewrite comes from `resolve_rule`, which always names its rule,
-    // so the fallback arm cannot fire today; it keeps the deny readable if a
-    // rewrite is ever produced without one.
-    let rule = match &part.deciding {
-        Deciding::Rule { id, .. } => format!("rule '{id}'"),
-        _ => "a rewrite rule".to_string(),
-    };
+    let rule = rewrite_rule_label(&part.deciding);
     let decision = deny(
         format!(
             "{rule} rewrites this command to `{}`, and {dropped} would have been dropped, \
