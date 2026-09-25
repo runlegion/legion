@@ -97,11 +97,18 @@ pub struct Invocation {
     pub position: Position,
     /// 0 at the top of the text being split; never above [`MAX_DEPTH`].
     pub depth: u8,
-    /// True when the command carries a redirect of its own, in its prefix or
-    /// its suffix (`> out.txt`, `2>/dev/null`, `>&2`, `<<< x`). The redirect
-    /// words are never in `args`, so this is the one place a caller learns the
-    /// command was redirected.
+    /// True when a redirect applies to the command: one in its own prefix or
+    /// suffix (`> out.txt`, `2>/dev/null`, `>&2`, `<<< x`), or one on an
+    /// enclosing subshell or group (`(cmd) > out.txt`, `{ cmd; } 2>/dev/null`).
+    /// The redirect words are never in `args`, so this is the one place a
+    /// caller learns the command was redirected. The router also sets it on a
+    /// command it re-enters from a redirected wrapper or interpreter.
     pub redirected: bool,
+    /// True when an environment assignment applies to the command: one in its
+    /// own prefix (`FOO=1 cmd`, the case [`Position::AfterAssignment`] names),
+    /// or, set by the router, one on a wrapper or interpreter it re-entered
+    /// the command from (`FOO=1 env cmd`).
+    pub assigned: bool,
 }
 
 /// Why a region was not reduced to a command (FR-CMD-007). Closed set.
@@ -606,8 +613,14 @@ fn walk_command(
             walk_simple_command(text, simple, depth, tag, seq_position, scan)
         }
         Command::Compound(compound, redirects) => {
+            let first_inner = scan.invocations.len();
             walk_compound_command_tagged(text, compound, depth, tag, seq_position, scan);
             if let Some(redirects) = redirects {
+                // A redirect on a subshell or group applies to every command
+                // inside it, so each is marked redirected.
+                for invocation in &mut scan.invocations[first_inner..] {
+                    invocation.redirected = true;
+                }
                 walk_redirect_list(text, redirects, depth, scan);
             }
         }
@@ -715,6 +728,7 @@ fn walk_simple_command(
                     position,
                     depth,
                     redirected,
+                    assigned: has_assignment,
                 });
             }
         }
@@ -1352,7 +1366,7 @@ mod tests {
     }
 
     #[test]
-    fn a_redirect_in_the_prefix_or_suffix_marks_its_own_command_redirected() {
+    fn a_redirect_on_the_command_or_its_enclosing_group_marks_it_redirected() {
         for command in [
             "gh pr list > out.txt",
             "gh pr list 2>/dev/null",
@@ -1363,6 +1377,10 @@ mod tests {
             let scan = scan(command).expect("parses");
             assert!(scan.invocations[0].redirected, "`{command}`");
             assert_eq!(scan.invocations[0].args, vec!["pr", "list"], "`{command}`");
+        }
+        for command in ["(gh pr list) > out.txt", "{ gh pr list; } 2>/dev/null"] {
+            let scan = scan(command).expect("parses");
+            assert!(scan.invocations[0].redirected, "`{command}`");
         }
         let scan = scan("gh pr list | tee out.txt > /dev/null").expect("parses");
         assert!(

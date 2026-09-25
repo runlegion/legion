@@ -151,6 +151,7 @@ fn expand(
 
 fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
     let next_depth = invocation.depth.saturating_add(1);
+    let first_inner = out.invocations.len();
 
     if let Some(wrapper) = policy.matching_wrapper(&invocation.binary, &invocation.args) {
         let skip = usize::from(wrapper.required_subcommand.is_some());
@@ -166,6 +167,7 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
                 .collect::<Vec<_>>()
                 .join(" ");
             reenter_text(policy, &text, next_depth, out);
+            inherit_shell_words(&invocation, &mut out.invocations[first_inner..]);
         }
         return;
     }
@@ -185,6 +187,7 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
         match interpreter.body {
             BodyLanguage::Shell => {
                 reenter_text(policy, body, next_depth, out);
+                inherit_shell_words(&invocation, &mut out.invocations[first_inner..]);
             }
             BodyLanguage::Foreign => {
                 out.regions.push(Unreduced {
@@ -209,6 +212,17 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
     }
 
     out.invocations.push(invocation);
+}
+
+/// Marks every invocation re-entered from `outer` with the redirect and the
+/// assignment prefix `outer` carries: `env gh pr list > out.txt` redirects the
+/// command `env` runs, and `FOO=1 env gh pr list` hands it `FOO`. Each
+/// invocation keeps whatever it already carries of its own.
+fn inherit_shell_words(outer: &Invocation, inner: &mut [Invocation]) {
+    for invocation in inner {
+        invocation.redirected |= outer.redirected;
+        invocation.assigned |= outer.assigned;
+    }
 }
 
 /// Re-enters `text` as a shell command. A payload the splitter rejects is
@@ -575,10 +589,13 @@ mod tests {
     }
 
     /// A rewrite rule for `gh pr list` whose target carries no arguments, so
-    /// the bare command is lossless and reaches the rewrite.
+    /// the bare command is lossless and reaches the rewrite, with `env` as a
+    /// wrapper and `sh -c` as a shell interpreter to re-enter it through.
     fn gh_pr_list_policy() -> Policy {
         policy(
-            r#"{"tools": {"Bash": {"families": {
+            r#"{"wrappers": [{"binary": "env"}],
+            "interpreters": [{"binary": "sh", "flag": "-c", "body": "shell"}],
+            "tools": {"Bash": {"families": {
                 "gh pr list": {"rules": [
                     {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
                      "reason": "legion tracks PRs", "translatable": {}}}
@@ -589,14 +606,14 @@ mod tests {
 
     #[test]
     fn a_rewrite_without_a_redirect_or_assignment_routes_as_its_rule_says() {
-        let routed = route(
-            &gh_pr_list_policy(),
-            &bash("gh pr list"),
-            &Context::default(),
-        );
-        match routed.decision {
-            Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion pr list"),
-            other => panic!("expected rewrite, got {other:?}"),
+        for command in ["gh pr list", "env gh pr list", "sh -c 'gh pr list'"] {
+            let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
+            match routed.decision {
+                Decision::Rewrite { target, .. } => {
+                    assert_eq!(target.as_str(), "legion pr list", "`{command}`")
+                }
+                other => panic!("`{command}`: expected rewrite, got {other:?}"),
+            }
         }
     }
 
@@ -610,6 +627,14 @@ mod tests {
             ("gh pr list 2>/dev/null", "redirect"),
             ("gh pr list >&2", "redirect"),
             ("GIT_TRACE=1 gh pr list", "environment-assignment prefix"),
+            // On an enclosing wrapper, interpreter, subshell or group: the
+            // redirect or assignment applies to the command inside it.
+            ("env gh pr list > out.txt", "redirect"),
+            ("FOO=1 env gh pr list", "environment-assignment prefix"),
+            ("env FOO=1 gh pr list", "environment-assignment prefix"),
+            ("sh -c 'gh pr list' > out.txt", "redirect"),
+            ("(gh pr list) > out.txt", "redirect"),
+            ("{ gh pr list; } 2>/dev/null", "redirect"),
         ] {
             let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
             match &routed.decision {
