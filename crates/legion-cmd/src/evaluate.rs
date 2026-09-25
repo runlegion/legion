@@ -18,7 +18,7 @@ use crate::policy::{
     ArgSpec, FallbackDecision, Family, OperandShape, Policy, Predicate, Rule, RuleOutcome,
     ToolKind, ToolRules,
 };
-use crate::splitter::{Unreduced, UnreducedReason};
+use crate::splitter::{Invocation, Unreduced, UnreducedReason};
 use crate::{Context, Lookup};
 
 /// One part's routing result, before the parts are folded into one Decision.
@@ -242,6 +242,41 @@ pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
     winner.unwrap_or_else(allow_default)
 }
 
+/// Refuses a rewrite that won a command which is not exactly one simple
+/// command (FR-CMD-008). A rewrite replaces the whole command, so keeping it
+/// would drop every other command, operator, or construct the line carries;
+/// the deny names the rule and says so, keeping the part's `deciding` and
+/// `verb`. Any other outcome is returned unchanged.
+pub(crate) fn refuse_compound_rewrite(part: PartOutcome) -> PartOutcome {
+    let Decision::Rewrite { target, .. } = &part.decision else {
+        return part;
+    };
+    let rule = rewrite_rule_label(&part.deciding);
+    let decision = deny(
+        format!(
+            "{rule} rewrites one command in this compound command to `{}`; replacing the \
+             command would drop the rest of it, so it is not rewritten",
+            target.as_str()
+        ),
+        format!(
+            "run `{}` as its own command, and the other commands separately",
+            target.as_str()
+        ),
+    );
+    PartOutcome { decision, ..part }
+}
+
+/// How a refused rewrite's deny names the rule that produced it. Every rewrite
+/// comes from `resolve_rule`, which always names its rule, so the fallback arm
+/// cannot fire today; it keeps the deny readable if a rewrite is ever produced
+/// without one.
+fn rewrite_rule_label(deciding: &Deciding) -> String {
+    match deciding {
+        Deciding::Rule { id, .. } => format!("rule '{id}'"),
+        _ => "a rewrite rule".to_string(),
+    }
+}
+
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
 /// (FR-CMD-016), the sym action (FR-CMD-007), and a rewrite's argument
 /// coverage (FR-CMD-008). `args` are the invocation's arguments and
@@ -400,6 +435,43 @@ fn fallback(otherwise: &FallbackDecision, arg: &str, target: &ManagedTarget) -> 
             question, reason, ..
         } => ask(question, reason),
     }
+}
+
+/// Refuses a rewrite of an invocation that carries a redirect or an
+/// environment-assignment prefix (FR-CMD-008: nothing is silently dropped).
+/// A rewrite replaces the whole command with its target, so the redirect or
+/// the assignment would not survive it. Both facts come from the
+/// [`Invocation`] route already holds -- `redirected` and `assigned`, set on
+/// the command itself or inherited from an enclosing group, wrapper or
+/// interpreter -- so no caller scans the command for them (FR-CMD-017). The
+/// deny keeps the part's `deciding` and `verb`; any other outcome is returned
+/// unchanged.
+pub fn refuse_rewrite_dropping_shell_words(
+    part: PartOutcome,
+    invocation: &Invocation,
+) -> PartOutcome {
+    let Decision::Rewrite { target, .. } = &part.decision else {
+        return part;
+    };
+    let dropped = match (invocation.redirected, invocation.assigned) {
+        (true, true) => "its redirect and environment-assignment prefix",
+        (true, false) => "its redirect",
+        (false, true) => "its environment-assignment prefix",
+        (false, false) => return part,
+    };
+    let rule = rewrite_rule_label(&part.deciding);
+    let decision = deny(
+        format!(
+            "{rule} rewrites this command to `{}`, and {dropped} would have been dropped, \
+             so it is not rewritten",
+            target.as_str()
+        ),
+        format!(
+            "run `{}` without the redirect or assignment",
+            target.as_str()
+        ),
+    );
+    PartOutcome { decision, ..part }
 }
 
 /// A [`PartOutcome`] naming `rule` as the deciding entry, with the operator
