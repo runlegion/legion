@@ -1,5 +1,197 @@
 # Legion Changelog
 
+## 0.41.0
+
+The router-and-witness release. Two lines of work land together. The first rebuilds
+legion-cmd from the issues as written, after 0.40.0 reverted the drifted route and rewrite
+code and left the crate with only its splitter. Route now reads one declarative
+`policy.json` through one evaluator. `legion cmd-check --hook` answers a PreToolUse payload
+with a Decision under a decision deadline that fails closed. The shipped policy covers the
+tool-field hooks as case classes checked against what each hook does, and a Bash rewrite
+fires only when every argument translates. All of it is built and tested, and none of it is
+live yet: `plugin/hooks/legion-cmd.sh` is not registered in `hooks.json`, the twelve shell
+command hooks still make every decision, and the cutover is #1236. The second line gives
+predictions an owner. `legion uncertainty predictions` is the first read that shows raw
+prediction rows rather than a derived view. A prediction can now carry the issue it belongs
+to (`emit --issue`), and `legion-verify` fetches the predictions it must witness by that key
+instead of searching emission text.
+
+Minor release: new command surface in the binary -- a top-level `legion cmd-check` verb,
+`legion uncertainty predictions`, and `--issue` on `uncertainty emit` -- plus a schema
+migration. The migration adds a nullable `uncertainty_prediction.issue_ref TEXT` column and a
+partial index `idx_uncertainty_prediction_issue_ref`. It runs on open, is guarded by
+`Database::has_column` so a re-run does nothing, and leaves every existing row with a NULL
+`issue_ref`. No wire-format change to any existing verb.
+
+### New
+
+- **legion-cmd route: policy as data, one evaluator, visible defaults** (PR #1253, #1227).
+  `crates/legion-cmd` gains `policy.rs`, `evaluate.rs` and `route.rs`, and the plugin ships
+  its first `plugin/legion-cmd/policy.json`. `parse_policy` is a hand-walked parser that
+  names the failing entry by JSON pointer. It rejects unknown fields, unknown outcome arms,
+  unknown predicate kinds, duplicate rule ids, empty or duplicate sym-job ids, and dangling
+  sym references, so a typo in the policy is an error rather than a silently ignored rule.
+  Route splits the command with the 0.40.0 splitter and re-enters wrapper and shell-interpreter
+  payloads (`env`, `sudo`, `xargs`, `sh -c` and the rest) at depth+1, so nested `sh -c`
+  terminates at the splitter's `MAX_DEPTH`. It records foreign interpreter bodies and script
+  files as opaque and extracts the facts the evaluator judges. The wrapper, interpreter and
+  script-carrier names live only in the policy data; the evaluator holds none. Per-part
+  decisions fold in strictest order (deny, ask, proxy, rewrite, allow). `Routed` now carries
+  its deciding entry: a matched rule with its operator mark, a parse error, or the default.
+  The FR-CMD-016 defaults: an empty policy denies, every ask carries the operator mark unset,
+  a deny or ask that cannot be built falls back to `Proxy(Opaque)` rather than allow, and a
+  command no rule governs is allowed. Two fail-opens found in review are closed. Arguments
+  are dequoted before family and predicate matching, so `git "push"` and `git push "--force"`
+  no longer slip past a family key or a flag predicate. Operands skip option tokens instead
+  of stopping at them, so `git --no-pager push` and `git --git-dir=x push` still match the
+  `git push` family.
+
+- **`legion cmd-check --hook`: a PreToolUse adapter with a fail-closed decision deadline**
+  (PR #1256, #1229). The new `legion cmd-check` verb reads one PreToolUse payload on stdin and
+  writes one hook response on stdout. It loads the policy file, runs the recall and consult
+  lookups the matched rules require, and calls route once on a worker thread under
+  `route.deadline_ms` (default 7000). The adapter works out which lookups it needs from
+  route's own expansion and rule selection (`legion_cmd::required_lookups`). The repo is
+  derived and validated once and only scopes recall; nothing splices it into a command. Every
+  failure becomes a deny that names the error and the command to run instead: a deadline
+  overrun, a lookup or replacement failure, an unreadable payload or policy, or a panic
+  anywhere. Nothing falls through to running the raw command, and the verb always exits 0
+  with a response. A command no rule governs is allowed with a fixed `additionalContext`
+  note, so the default is visible to the agent rather than byte-identical to no hook at all.
+  A rewrite is refused (and denied) when the tool input has no field the target can replace,
+  which closes a path where a rewrite of an Edit or Write call patched a field the tool
+  ignores and the explicit allow then granted the untouched original.
+  `plugin/hooks/legion-cmd.sh` is the thin shell wrapper for the eventual registration. It
+  resolves the binary (`LEGION_BIN`, then `${CLAUDE_PLUGIN_ROOT}/bin/legion`, then `PATH`),
+  deliberately skips `lib/prelude.sh` and its fail-open `|| exit 0`, and prints a static deny
+  when the binary is missing, fails, hangs past `LEGION_CMD_HOOK_TIMEOUT_SECS`, or prints
+  nothing. `legion cmd-check` without `--hook` returns a not-implemented error; the operator
+  and scripting mode ships in its own issue.
+
+- **The shipped policy accounts for the tool-field hooks, case by case** (PR #1259, #1233).
+  Ten matchers from the six tool-field hooks become `Fields` tool kinds in `policy.json`,
+  each routing on its own `tool_input` fields: Grep, Glob, Read, Write, Edit, MultiEdit,
+  Agent, Task, WebFetch and WebSearch. The schema gains field predicates for them
+  (`field-present`, `field-absent`, `field-equals`, `field-contains`, `field-ends-with`,
+  `field-greater-than`). The parser allows those only on `Fields` tools and allows arg
+  predicates only on Bash. A predicate that reads a field the call does not carry is the
+  FR-CMD-016 deny for an unresolvable managed rule, never a panic. The hooks are not
+  transcribed into rules. Instead, `crates/legion-cmd/tests/fixtures/hook_cases.json` records
+  one row per case class of each hook: the hook's behavior beside route's Decision against
+  the shipped policy. `tests/hook_parity.rs` asserts every row and prints the disagreement
+  list for the operator. "Agrees" means the agent sees the same thing: on the allow arm, a
+  silent hook agrees only with a silent route, and a hook that injects context agrees only
+  with a route note. The fixture stands at 80 rows and 37 disagreements. Where the two
+  differ, route is the stricter side, for example in the order-sensitive substring globs of
+  `pre-script-search.sh` and the memory-path checks. The adapter also learns to patch
+  `subagent_type` for the Explore rewrite. `rewritable_field` names the one field a target
+  replaces (`command` for Bash, `subagent_type` for an Agent or Task spawn), and both
+  `build_replacement` and the rewrite message read it, so the patch and the message cannot
+  name different fields.
+
+- **legion-cmd rewrites only when the arguments translate losslessly** (PR #1265, #1228). A
+  Bash rewrite rule now carries a `RewriteSpec`, which holds three things: the managed
+  target, an `ArgSpec` of the arguments the target expresses exactly (flags, valued flags,
+  and positional operand shapes `any` or `integer`), and a `FallbackDecision` for any
+  invocation that carries an argument outside that declaration. The evaluator judges every
+  argument past the family's own subcommand words. One verb can therefore be rewritten for
+  translatable arguments and get a different Decision for the rest (FR-CMD-008). The default
+  fallback is a deny that names the untranslatable argument and gives the target as the
+  command to run instead (FR-CMD-005). A rule may name allow, proxy or ask instead.
+  `parse_policy` rejects a Bash rewrite with no `translatable` declaration. A `Fields`
+  rewrite needs none, because it patches one field and keeps the rest, and declaring one
+  there is rejected as an unknown field. A review fix pairs each valued flag with its true
+  adjacent raw argument. Before it, `gh pr --json view my-branch` rewrote with the operand
+  swallowed as `--json`'s value and never checked.
+
+- **`legion uncertainty predictions`: a read-only view of raw prediction state** (PR #1266,
+  #902). `legion uncertainty predictions [--surface] [--state] [--json] [--limit 50]` prints
+  a (surface, state) summary with uncapped counts, then the most recent `--limit` rows: id,
+  surface, state, claimed confidence, correctness, `created_at` and `orphan_after`. `--json`
+  emits an array of the same fields. An empty result says which kind of empty it is: nothing
+  stored at all, or filters that matched nothing, in which case it also gives the unfiltered
+  total. An unknown `--state` exits non-zero and names all five lifecycle states. It is
+  checked before any query, so it fails even on an empty database. The command never sweeps
+  orphans or rolls calibration, and a test proves prediction rows are byte-identical before
+  and after a call. The query is `Database::list_predictions` in
+  `src/uncertainty/storage.rs`.
+
+- **Predictions carry an indexed `issue_ref`, queryable by issue** (PR #1269, #1258).
+  `legion uncertainty emit --issue <owner>/<repo>#<N>` stores the issue a prediction belongs
+  to, in the same key form `legion verify` records its gate under. A clap value parser
+  validates the key, so a malformed ref is a usage error with a non-zero exit rather than
+  emit's non-blocking exit-0 path. Existing emitters (gate trust, the TaskCreate hook, the sd
+  skills) and any call without `--issue` store NULL. `legion uncertainty predictions --issue
+  <ref>` reads through `Database::predictions_for_issue`. That is an equality match on the
+  indexed column, returning every non-deleted prediction for the issue in every state,
+  newest first. `--surface` and `--state` narrow that set, and a zero-row result names
+  `issue=...` in its filter-miss message. When `--json` output is cut at `--limit`, stderr
+  says "most recent N of M: pass --limit M to see all" and stdout stays a parseable array of
+  unchanged shape. Before this, an issue with more than 50 predictions read as complete. The
+  18-column prediction SELECT is now one `select_prediction!()` macro shared by all four
+  readers, after the rebase left `list_predictions` on the old 17-column list, which would
+  have failed at read.
+
+### Changed
+
+- **`legion-verify` fetches predictions by issue ref, not by searching text** (PR #1269,
+  #1258). `plugin/agents/legion-verify.md` and `plugin/skills/legion-verify/SKILL.md` now
+  run `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` and witness each
+  row it returns. When the query returns zero rows, verify reports "no predictions carry
+  issue_ref ..." and never reads that as all witnessed. On the stderr truncation note it
+  re-runs with `--limit M`.
+
+### Config
+
+- **`route.deadline_ms` in `policy.json`** (#1229). This is the adapter's decision deadline,
+  default 7000 ms. It lives in the policy file so the operator edits one document, but route
+  never reads it. It is separate from precog's budget: route's deadline fails closed, and
+  precog's fails silent. An unknown key under `route` or a value that is not a non-negative
+  integer is a deny, never a silent fallback to the default.
+- **`LEGION_CMD_POLICY`** (#1229). This names the policy file directly. When it is unset,
+  the adapter reads `${CLAUDE_PLUGIN_ROOT}/legion-cmd/policy.json`. When neither is set, it
+  denies.
+- **`LEGION_CMD_HOOK_TIMEOUT_SECS`** (#1229), default 9. This is how long
+  `plugin/hooks/legion-cmd.sh` waits for the binary before it prints its static deny. Three
+  numbers must stay ordered: the adapter deadline (7000 ms), then this timeout, then the
+  `hooks.json` entry timeout the cutover will set. Today's Bash hook entries use 5 and 6
+  seconds.
+
+None of these three settings affects a session until the adapter is registered (#1236).
+
+### Before you upgrade
+
+- **The `issue_ref` migration runs on first open.** It adds the nullable
+  `uncertainty_prediction.issue_ref` column and its partial index, once. Existing rows keep
+  NULL (#1258).
+- **Verify no longer finds predictions by their text.** Predictions emitted before 0.41.0,
+  and any emitted since without `--issue`, have a NULL `issue_ref`. The verify docs no longer
+  search emission text, so `predictions --issue` does not return those rows. Expect verify
+  to report zero rows for work in flight across the upgrade (#1258).
+- **`legion cmd-check` is a new top-level verb.** It appears in `legion --help`. Without
+  `--hook` it returns a not-implemented error (#1229).
+
+### Known gaps, named rather than implied
+
+- **legion-cmd is built, not cut over.** `plugin/hooks/legion-cmd.sh` is not in
+  `plugin/hooks/hooks.json`, which this release does not touch. Every Bash and tool call is
+  still decided by the existing shell hooks, and no agent's call passes through route or the
+  adapter. Registering the adapter, setting its timeout above the deadline, and retiring the
+  hooks it replaces is #1236. That waits on the operator's review of the 37 parity
+  disagreements.
+- **No emitter passes `--issue` yet.** The TaskCreate hook, gate trust and the sd skills
+  emit without it. `plugin/agents/issue-writer.md` still tells the caller to name the issue
+  in the prediction text "until #902". Until the emitters set it, verify's issue-scoped
+  query returns zero rows for real work, and its "none emitted on work of this size is a
+  finding" rule fires on nearly every issue. Verify can witness by issue only once the
+  emitters pass the key.
+- **A global option with a separate value hides the subcommand.** In `git -C /tmp push`,
+  the `/tmp` stays in the operand run, so the command misses the `git push` family and
+  reaches the allow default. Telling a value from a subcommand needs per-binary option
+  metadata the policy does not carry (documented in `evaluate.rs`). The shipped policy has
+  no subcommand-keyed Bash family (its Bash families are `grep`, `rg`, `rm`, `curl` and
+  `xxd`), so the gap is exposed only in operator or test policies today.
+
 ## 0.40.0
 
 The first-diamond release. Service design changes what it produces and where it stops.
