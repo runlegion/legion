@@ -223,18 +223,10 @@ pub fn decide_region(policy: &Policy, region: &Unreduced) -> PartOutcome {
 /// part wins, so this is not made command-faithful; #1237 must not assume it is
 /// when it keys confirmations off `deciding.id`. An empty part list is the
 /// allow default (nothing to route).
-///
-/// A rewrite replaces the whole command, so it is kept only when the command
-/// is that one part. When a rewrite wins a fold of more than one part, the
-/// command is refused instead (FR-CMD-008: nothing is silently dropped): the
-/// deny names the rewrite rule and says the rest of the command would have
-/// been dropped. The count is of route's own parts, so no caller scans the
-/// command to tell a compound from a single invocation (FR-CMD-017).
 pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
     if let Some(sym) = parts.iter().find(|p| p.is_sym) {
         return sym.clone();
     }
-    let compound = parts.len() > 1;
     // `min_by_key` keeps the last element on a tie; the fold order breaks ties
     // by command order, so keep the first strictest part instead.
     let mut winner: Option<PartOutcome> = None;
@@ -247,17 +239,15 @@ pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
             winner = Some(part);
         }
     }
-    match winner {
-        Some(part) if compound => refuse_compound_rewrite(part),
-        Some(part) => part,
-        None => allow_default(),
-    }
+    winner.unwrap_or_else(allow_default)
 }
 
-/// Turns a rewrite that won a compound command's fold into a deny naming the
-/// rule, keeping the part's `deciding` and `verb`; any other outcome is
-/// returned unchanged.
-fn refuse_compound_rewrite(part: PartOutcome) -> PartOutcome {
+/// Refuses a rewrite that won a command which is not exactly one simple
+/// command (FR-CMD-008). A rewrite replaces the whole command, so keeping it
+/// would drop every other command, operator, or construct the line carries;
+/// the deny names the rule and says so, keeping the part's `deciding` and
+/// `verb`. Any other outcome is returned unchanged.
+pub(crate) fn refuse_compound_rewrite(part: PartOutcome) -> PartOutcome {
     let Decision::Rewrite { target, .. } = &part.decision else {
         return part;
     };
@@ -493,7 +483,7 @@ fn sym_outcome_with_verb(job_id: &str, sym_command: &str, verb: Option<String>) 
     }
 }
 
-pub(crate) fn allow_default() -> PartOutcome {
+fn allow_default() -> PartOutcome {
     PartOutcome {
         decision: Decision::Allow { note: None },
         deciding: Deciding::Default,

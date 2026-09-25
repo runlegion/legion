@@ -78,14 +78,14 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     for region in &expanded.regions {
         parts.push(evaluate::decide_region(policy, region));
     }
-    // An inert invocation routes nothing, but it is still a command the shell
-    // runs: it counts as an allow part, so a list or pipe holding one is
-    // compound and a rewrite never replaces it away (FR-CMD-008).
-    for _ in 0..expanded.inert {
-        parts.push(evaluate::allow_default());
-    }
 
-    let winner = evaluate::combine(parts);
+    let mut winner = evaluate::combine(parts);
+    // A rewrite replaces the whole command, so it is kept only for exactly one
+    // simple command (FR-CMD-008); the shape comes from route's own parse, so
+    // the adapter never scans the command (FR-CMD-017).
+    if !expanded.single_simple {
+        winner = evaluate::refuse_compound_rewrite(winner);
+    }
     let facts = extract_facts(&expanded.invocations, winner.verb.clone());
     Routed {
         decision: winner.decision,
@@ -114,18 +114,10 @@ fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> 
 pub(crate) struct Expanded {
     pub(crate) invocations: Vec<Invocation>,
     regions: Vec<Unreduced>,
-    /// Wrapper and shell-interpreter invocations whose re-entered text reduced
-    /// to nothing routable (a bare `env`, `env X=1`, `sh -c ''`): each routes
-    /// nothing but is still a command the shell runs.
-    inert: usize,
-}
-
-impl Expanded {
-    /// Every part route will fold: invocations, unreduced regions, and inert
-    /// invocations.
-    fn part_count(&self) -> usize {
-        self.invocations.len() + self.regions.len() + self.inert
-    }
+    /// True when the command is exactly one simple command, optionally behind
+    /// declared wrappers or inside a shell interpreter body that is itself
+    /// exactly one simple command, the same rule applied at every re-entry.
+    single_simple: bool,
 }
 
 /// Splits `command` and re-enters every wrapper and interpreter payload the
@@ -135,7 +127,10 @@ impl Expanded {
 /// the command (FR-CMD-003, FR-CMD-017).
 pub(crate) fn expand_command(policy: &Policy, command: &str) -> Result<Expanded, ScanError> {
     let scan = splitter::scan(command)?;
-    let mut expanded = Expanded::default();
+    let mut expanded = Expanded {
+        single_simple: scan.single_simple,
+        ..Expanded::default()
+    };
     expand(policy, scan.invocations, scan.unreduced, &mut expanded);
     Ok(expanded)
 }
@@ -175,15 +170,17 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
         let skip = usize::from(wrapper.required_subcommand.is_some());
         let payload: Vec<&String> = invocation.args.iter().skip(skip).collect();
         // A wrapper with no payload words (a bare `env`, `pnpm exec` with
-        // nothing after it) re-enters empty text; `reenter_text` counts it as
-        // an inert invocation that reaches the allow default -- not an opaque
+        // nothing after it) wraps no command: there is nothing to route, so it
+        // contributes no part and reaches the allow default -- not an opaque
         // proxy, which is reserved for a command route genuinely cannot read.
-        let text = payload
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        reenter_text(policy, &text, next_depth, out);
+        if !payload.is_empty() {
+            let text = payload
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            reenter_text(policy, &text, next_depth, out);
+        }
         return;
     }
 
@@ -233,23 +230,23 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
 /// an ask (FR-CMD-007): re-entering it changes who called `scan_at`, not what
 /// the region is.
 ///
-/// The wrapper or interpreter being re-entered is itself a command the shell
-/// runs. When its text reduces to nothing routable -- a bare `env`, `env X=1`,
-/// `sh -c ''`, a comment-only body -- it is counted as one inert invocation, so
-/// a list or pipe holding it stays compound and a sibling rewrite never
-/// replaces it away (FR-CMD-008).
+/// The command stays one simple command only if the re-entered text is itself
+/// one simple command; anything else -- a list, an empty or assignment-only
+/// body, a payload the splitter rejects -- makes it compound (FR-CMD-008).
 fn reenter_text(policy: &Policy, text: &str, depth: u8, out: &mut Expanded) {
-    let before = out.part_count();
     match splitter::scan_at(text, depth) {
-        Ok(scan) => expand(policy, scan.invocations, scan.unreduced, out),
-        Err(_) => out.regions.push(Unreduced {
-            text: text.to_string(),
-            reason: UnreducedReason::Unparsed,
-            depth,
-        }),
-    }
-    if out.part_count() == before {
-        out.inert += 1;
+        Ok(scan) => {
+            out.single_simple &= scan.single_simple;
+            expand(policy, scan.invocations, scan.unreduced, out)
+        }
+        Err(_) => {
+            out.single_simple = false;
+            out.regions.push(Unreduced {
+                text: text.to_string(),
+                reason: UnreducedReason::Unparsed,
+                depth,
+            });
+        }
     }
 }
 
@@ -664,10 +661,10 @@ mod tests {
         assert_eq!(routed.facts, Facts::default());
     }
 
-    /// Rewrite rules for `git push`, `git add`, `git commit` and `gh pr view`,
-    /// each covering the arguments the compound-command tests pass it, with
-    /// `env` and `sudo` declared as wrappers as the shipped policy declares
-    /// them.
+    /// Rewrite rules for `git push`, `git add`, `git commit`, `gh pr view` and
+    /// `gh pr list`, each covering the arguments the tests pass it, with `env`
+    /// and `sudo` declared as wrappers as the shipped policy declares them and
+    /// `sh`/`bash` as shell interpreters.
     fn rewrite_policy() -> Policy {
         policy(
             r#"{"wrappers": [{"binary": "env"}, {"binary": "sudo"}],
@@ -691,17 +688,25 @@ mod tests {
                 "gh pr view": {"rules": [
                     {"id": "pr-view", "outcome": {"kind": "rewrite", "target": "legion pr view",
                      "reason": "legion tracks PRs", "translatable": {"operands": ["integer"]}}}
+                ]},
+                "gh pr list": {"rules": [
+                    {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
+                     "reason": "legion tracks PRs", "translatable": {}}}
                 ]}
             }}}}"#,
         )
     }
 
+    fn route_rewrite_policy(command: &str) -> Routed {
+        route(&rewrite_policy(), &bash(command), &Context::default())
+    }
+
+    /// Exactly one simple command -- bare, behind a declared wrapper, or as the
+    /// whole body of a shell interpreter -- is rewritten as its rule says.
     #[test]
-    fn a_single_invocation_rewrite_routes_as_its_rule_says() {
-        // A declared wrapper is re-entered, not counted as a second command:
-        // `env git push` is still the one invocation `git push`.
-        for command in ["git push", "env git push"] {
-            let routed = route(&rewrite_policy(), &bash(command), &Context::default());
+    fn a_single_simple_command_rewrite_routes_as_its_rule_says() {
+        for command in ["git push", "env git push", "sh -c 'git push'"] {
+            let routed = route_rewrite_policy(command);
             match routed.decision {
                 Decision::Rewrite { target, .. } => {
                     assert_eq!(target.as_str(), "legion push", "`{command}`")
@@ -719,12 +724,19 @@ mod tests {
         }
     }
 
+    /// A line that is not one simple command but reaches no rewrite is not
+    /// refused: the shape only matters when a rewrite wins.
     #[test]
-    fn a_lone_inert_wrapper_or_shell_body_still_reaches_the_allow_default() {
-        // Counting an inert invocation as a part changes nothing on its own:
-        // it is one allow part, the same allow default it reached before.
-        for command in ["env", "env X=1", "sh -c ''"] {
-            let routed = route(&rewrite_policy(), &bash(command), &Context::default());
+    fn a_lone_command_with_no_rewrite_still_reaches_the_allow_default() {
+        for command in [
+            "X=1",
+            "> out.txt",
+            "[[ -f nope ]]",
+            "(( 0 ))",
+            "env",
+            "sh -c ''",
+        ] {
+            let routed = route_rewrite_policy(command);
             assert_eq!(
                 routed.decision,
                 Decision::Allow { note: None },
@@ -734,9 +746,9 @@ mod tests {
         }
     }
 
-    /// FR-CMD-008: a rewrite replaces the whole command, so a compound command
-    /// whose Decision would be a rewrite is refused, naming the rule, rather
-    /// than rewritten with its other parts dropped.
+    /// FR-CMD-008: a rewrite replaces the whole command, so a command that is
+    /// not exactly one simple command, and whose Decision would be a rewrite,
+    /// is refused naming the rule rather than rewritten with the rest dropped.
     #[test]
     fn a_compound_command_whose_decision_is_a_rewrite_is_refused() {
         for (command, rule) in [
@@ -744,21 +756,29 @@ mod tests {
             ("git add -A && git commit -m x", "add-rewrite"),
             ("gh pr view 42 | head", "pr-view"),
             ("git commit -m x; gh pr view 42", "commit-rewrite"),
-            // A bare wrapper routes nothing but is still a command the rewrite
-            // would drop (bare `env` prints the environment).
+            // A bare wrapper is still a command the rewrite would drop.
             ("git push && env", "push-rewrite"),
             ("env && git push", "push-rewrite"),
             ("git push && sudo", "push-rewrite"),
-            // A wrapper or shell body that reduces to nothing routable is
-            // still a command; `sh -c '' || git push` would never push at all.
+            // A wrapper payload or shell body that is not one simple command.
             ("env X=1 && git push", "push-rewrite"),
             ("git push && env X=1", "push-rewrite"),
             ("sh -c '' && git push", "push-rewrite"),
             ("bash -c '# comment' && git push", "push-rewrite"),
             ("sh -c 'X=1 Y=2' && git push", "push-rewrite"),
             ("sh -c '' || git push", "push-rewrite"),
+            ("sh -c 'git push && echo done'", "push-rewrite"),
+            // List members with no command word, and compound constructs.
+            ("X=1 || gh pr list", "pr-list"),
+            ("X=1 Y=2 && gh pr list", "pr-list"),
+            ("> out.txt && gh pr list", "pr-list"),
+            ("> out.txt || gh pr list", "pr-list"),
+            ("[[ -f nope ]] || gh pr list", "pr-list"),
+            ("(( 0 )) && gh pr list", "pr-list"),
+            ("(X=1) || gh pr list", "pr-list"),
+            ("{ X=1; } || gh pr list", "pr-list"),
         ] {
-            let routed = route(&rewrite_policy(), &bash(command), &Context::default());
+            let routed = route_rewrite_policy(command);
             match &routed.decision {
                 Decision::Deny(details) => {
                     assert!(

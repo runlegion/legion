@@ -137,6 +137,10 @@ pub struct Unreduced {
 pub struct Scan {
     pub invocations: Vec<Invocation>,
     pub unreduced: Vec<Unreduced>,
+    /// True only when the text is structurally exactly one simple command
+    /// with a command word, and the walk reduced it to exactly that one
+    /// invocation. See [`is_one_simple_command`].
+    pub single_simple: bool,
 }
 
 /// Errors raised when `scan`'s own top-level parse of the given command
@@ -264,13 +268,46 @@ fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
             seen_first = true;
         }
     }
+    // A substitution in an argument or redirect walks to further invocations
+    // or regions, so the one-simple-command shape also requires the walk to
+    // have produced that one invocation and nothing else.
+    scan.single_simple =
+        is_one_simple_command(&program) && scan.invocations.len() == 1 && scan.unreduced.is_empty();
     Ok(scan)
+}
+
+/// True when `program` is exactly one simple command that names a command
+/// word: one complete command holding one list item, run synchronously, with
+/// no `&&`/`||`, one pipeline stage, no `!` negation, and no `time`. A pipe,
+/// a list operator, `&`, a subshell, a brace group, `[[ ]]`, `(( ))`, a
+/// function definition, and a line with no command word (`X=1`, `> out.txt`)
+/// all fail it. This is the shape a rewrite can replace without dropping
+/// anything else the line runs (FR-CMD-008).
+fn is_one_simple_command(program: &ast::Program) -> bool {
+    let [list] = program.complete_commands.as_slice() else {
+        return false;
+    };
+    let [ast::CompoundListItem(and_or, separator)] = list.0.as_slice() else {
+        return false;
+    };
+    if !matches!(separator, ast::SeparatorOperator::Sequence) || !and_or.additional.is_empty() {
+        return false;
+    }
+    let pipeline = &and_or.first;
+    if pipeline.bang || pipeline.timed.is_some() {
+        return false;
+    }
+    matches!(
+        pipeline.seq.as_slice(),
+        [Command::Simple(simple)] if simple.word_or_name.is_some()
+    )
 }
 
 fn too_deep(text: &str, depth: u8) -> Scan {
     Scan {
         invocations: Vec::new(),
         unreduced: vec![too_deep_unreduced(text, depth)],
+        single_simple: false,
     }
 }
 
@@ -1973,6 +2010,32 @@ mod tests {
             }
             let text = String::from_utf8_lossy(&bytes).to_string();
             let _ = scan(&text);
+        }
+    }
+
+    #[test]
+    fn single_simple_is_true_only_for_exactly_one_simple_command() {
+        for text in ["git push", "git push origin main", "FOO=1 git push"] {
+            assert!(scan(text).expect("parses").single_simple, "`{text}`");
+        }
+        for text in [
+            "git push | head",
+            "git push && echo done",
+            "git push; echo done",
+            "git push &",
+            "! git push",
+            "time git push",
+            "(git push)",
+            "{ git push; }",
+            "[[ -f x ]]",
+            "(( 0 ))",
+            "X=1",
+            "> out.txt",
+            "",
+            "git push $(echo main)",
+            "f() { git push; }",
+        ] {
+            assert!(!scan(text).expect("parses").single_simple, "`{text}`");
         }
     }
 }
