@@ -842,7 +842,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion push",
-    "note": "a bare push carries no argument beyond the family's own subcommand word, so every argument translates and route names legion push."
+    "note": "a bare push carries no argument beyond the family's own subcommand word, so every argument translates and route names legion push. Adapter (#1274): the rule declares translatable arguments and the replacement carries none forward, so src/cmd/replacement.rs refuses this rewrite with a deny naming the rule."
   },
   {
     "hook": "no-git-push.sh",
@@ -853,7 +853,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion push",
-    "note": "-u/--set-upstream is declared translatable: legion push always sets upstream. -q/-v/--progress are declared too, as the hook treats them as benign."
+    "note": "-u/--set-upstream is declared translatable: legion push always sets upstream. -q/-v/--progress are declared too, as the hook treats them as benign. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-git-push.sh",
@@ -864,7 +864,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion push",
-    "note": "both resolve git by basename."
+    "note": "both resolve git by basename. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-git-push.sh",
@@ -966,10 +966,10 @@
     "tool": "Bash",
     "input": { "command": "git push && echo done" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion push",
-    "note": "#883: the hook denies every composed push, because updatedInput replaces the WHOLE command string. route folds the parts: echo reaches the allow default, the push rewrites, and rewrite outranks allow. The adapter (src/cmd/replacement.rs) then replaces the whole command with the target, dropping `echo done`, which is the #883 hazard. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion push",
+    "note": "#883: the hook denies every composed push, because updatedInput replaces the WHOLE command string. Since #1277, route refuses a rewrite that would drop the rest of a compound command: the push part's rewrite becomes a deny naming the rule and legion push."
   },
   {
     "hook": "no-git-push.sh",
@@ -977,10 +977,9 @@
     "tool": "Bash",
     "input": { "command": "git push | tee /tmp/log" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion push",
-    "note": "#883: as push-composed-and. route's facts carry /tmp/log as a path, so today's adapter refuses the replacement (PathOperandsNotCarried) and denies. That is an accident of the path shape, not a compound guard. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "note": "#883: as push-composed-and. Since #1277 route denies a rewrite inside a pipeline rather than dropping `| tee /tmp/log`."
   },
   {
     "hook": "no-git-push.sh",
@@ -988,10 +987,9 @@
     "tool": "Bash",
     "input": { "command": "git status && git push" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion push",
-    "note": "#886: the hook denies a push anywhere in a chain. route sees the push after the operator (FR-CMD-007) and rewrites it; the adapter would drop `git status`. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "note": "#886: the hook denies a push anywhere in a chain. route sees the push after the operator (FR-CMD-007), and since #1277 refuses its rewrite because replacing the command would drop `git status`."
   },
   {
     "hook": "no-git-push.sh",
@@ -1002,7 +1000,7 @@
     "route": "rewrite",
     "agrees": false,
     "target": "legion push",
-    "note": "#883: the hook's whitespace tokenizer reads `push;` as one word and denies the compound. route's parser reads a plain `git push` followed by an empty list terminator and rewrites it, which is lossless here. DISAGREEMENT: hook deny, route rewrite."
+    "note": "#883: the hook's whitespace tokenizer reads `push;` as one word and denies the compound. route's parser reads a plain `git push` followed by an empty list terminator and rewrites it, which is lossless here; #1277 does not treat a trailing terminator as a compound. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments, so the agent sees a deny either way. DISAGREEMENT: hook deny, route rewrite."
   },
   {
     "hook": "no-git-push.sh",
@@ -1073,7 +1071,7 @@
     "route": "rewrite",
     "agrees": false,
     "target": "legion push",
-    "note": "the hook passes every command in a repo legion does not cover (#353). route's Context carries the repo but no rule predicate reads coverage, so the rewrite applies everywhere. DISAGREEMENT: hook allow, route rewrite."
+    "note": "the hook passes every command in a repo legion does not cover (#353). route's Context carries the repo but no rule predicate reads coverage, so the rewrite applies everywhere. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments. DISAGREEMENT: hook allow, route rewrite."
   },
 
   {
@@ -1085,7 +1083,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion commit",
-    "note": "-m and its value are declared translatable (valued flag). The hook writes the message to a tempfile for --message-file; route names the target and returns the message among its facts for the adapter."
+    "note": "-m and its value are declared translatable (valued flag). The hook writes the message to a tempfile for --message-file; route names the target and returns the message among its facts for the adapter. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments and the replacement does not carry the message."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1096,7 +1094,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion commit",
-    "note": "--message is declared as a valued flag."
+    "note": "--message is declared as a valued flag. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1107,7 +1105,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion commit",
-    "note": "-F/--file is declared as a valued flag."
+    "note": "-F/--file is declared as a valued flag. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1118,7 +1116,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion commit",
-    "note": "both resolve git by basename."
+    "note": "both resolve git by basename. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1129,7 +1127,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion commit",
-    "note": "single quotes are inert, so the hook rewrites; route's parser reads one quoted word and finds no substitution."
+    "note": "single quotes are inert, so the hook rewrites; route's parser reads one quoted word and finds no substitution. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1253,7 +1251,7 @@
     "route": "rewrite",
     "agrees": false,
     "target": "legion commit",
-    "note": "the hook denies more than one -m because its lexer takes exactly one value. route's valued-flag declaration covers each -m and its value, so the arguments translate. Carrying both paragraphs is left to the adapter. DISAGREEMENT: hook deny, route rewrite."
+    "note": "the hook denies more than one -m because its lexer takes exactly one value. route's valued-flag declaration covers each -m and its value, so the arguments translate. Carrying both paragraphs is left to the adapter, which since #1274 refuses this rewrite because the rule declares translatable arguments, so the agent sees a deny either way. DISAGREEMENT: hook deny, route rewrite."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1261,10 +1259,9 @@
     "tool": "Bash",
     "input": { "command": "git commit -m \"release $(date +%F)\"" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion commit",
-    "note": "the hook denies a live $(...) inside a double-quoted message because the rewrite replaces the shell that would have evaluated it. route resolves `date` inside the substitution (allow default), and the -m value translates, so it rewrites. The message's facts hold unevaluated source text. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook denies a live $(...) inside a double-quoted message because the rewrite replaces the shell that would have evaluated it. route resolves `date` inside the substitution as a second command, so since #1277 the commit's rewrite is refused as one command of a compound. Same arm, different reason."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1272,10 +1269,9 @@
     "tool": "Bash",
     "input": { "command": "git commit -m done&&true" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion commit",
-    "note": "the hook denies an unquoted && inside the value. route's parser reads it as a list: the commit rewrites, `true` reaches the allow default, and rewrite outranks allow; the adapter would drop `true`. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook denies an unquoted && inside the value. route's parser reads it as a list of the commit and `true`, and since #1277 refuses the commit's rewrite rather than dropping `true`."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1283,10 +1279,10 @@
     "tool": "Bash",
     "input": { "command": "git add -A && git commit -m fix" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion commit",
-    "note": "#886: the hook denies a commit anywhere in a chain. route rewrites the commit and allows `git add`, the fold picks rewrite, and the adapter would replace the whole command, dropping the `git add -A` the commit depends on. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit",
+    "note": "#886: the hook denies a commit anywhere in a chain. Since #1277 route refuses the commit's rewrite, because replacing the command would drop the `git add -A` the commit depends on."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1338,7 +1334,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion pr view",
-    "note": "one integer operand is declared translatable; the number travels in route's facts for the adapter to place."
+    "note": "one integer operand is declared translatable; the number travels in route's facts for the adapter to place. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments and the replacement does not carry the number."
   },
   {
     "hook": "no-gh.sh",
@@ -1349,7 +1345,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion pr view",
-    "note": "both resolve gh by basename."
+    "note": "both resolve gh by basename. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-gh.sh",
@@ -1360,7 +1356,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion pr checks",
-    "note": "one integer operand is declared translatable."
+    "note": "one integer operand is declared translatable. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-gh.sh",
@@ -1382,7 +1378,7 @@
     "route": "rewrite",
     "agrees": true,
     "target": "legion issue view",
-    "note": "one integer operand is declared translatable."
+    "note": "one integer operand is declared translatable. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
   },
   {
     "hook": "no-gh.sh",
@@ -1415,7 +1411,7 @@
     "route": "rewrite",
     "agrees": false,
     "target": "legion pr view",
-    "note": "gh resolves an omitted number from the branch and legion has no equivalent, so the hook denies. The rule's operands are an upper bound, and the policy language has no predicate that requires an operand, so route rewrites. legion pr view without --number then fails loudly with a usage error. DISAGREEMENT: hook deny, route rewrite."
+    "note": "gh resolves an omitted number from the branch and legion has no equivalent, so the hook denies. The rule's operands are an upper bound, and the policy language has no predicate that requires an operand, so route rewrites. The adapter refuses it since #1274 (the rule declares translatable arguments), so the agent sees a deny either way. DISAGREEMENT: hook deny, route rewrite."
   },
   {
     "hook": "no-gh.sh",
@@ -1612,10 +1608,9 @@
     "tool": "Bash",
     "input": { "command": "gh pr view 42 | head -5" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion pr view",
-    "note": "the hook denies any composed command that mentions gh. route rewrites the gh stage, allows head, and the fold picks rewrite; the adapter would replace the whole pipeline and drop `| head -5`. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook denies any composed command that mentions gh. Since #1277 route refuses the gh stage's rewrite rather than dropping `| head -5`."
   },
   {
     "hook": "no-gh.sh",
@@ -1874,7 +1869,7 @@
     "route": "deny",
     "agrees": false,
     "instead_contains": "legion sym etc find-content",
-    "note": "#1264: a grep over a file the harness saved under ~/.claude/projects/*/*/tool-results/ searches legion's overflowed output, not the repository. The hook passes it when the pattern does not resolve to a local symbol (the path argument is unclassifiable to its rewrite tier). #1264 asks that it be allowed. Matching the directory needs a substring or prefix predicate on an argument (arg-contains), which the policy language does not have. DISAGREEMENT: hook allow, route deny."
+    "note": "#1264: a grep over a file the harness saved under ~/.claude/projects/*/*/tool-results/ searches legion's overflowed output, not the repository. Since #1273 the hook lets it through outright when every file argument is an existing regular file under that directory. #1264 asks that it be allowed. Matching the directory needs a substring or prefix predicate on an argument (arg-contains), which the policy language does not have. DISAGREEMENT: hook allow, route deny."
   },
   {
     "hook": "pre-bash-grep.sh",
@@ -2349,10 +2344,10 @@
     "tool": "Bash",
     "input": { "command": "git add -A && git commit -m fix && git push" },
     "hook_behavior": "deny",
-    "route": "rewrite",
-    "agrees": false,
-    "target": "legion commit",
-    "note": "#886, the land-work chain from test-no-git-commit.sh: the hook denies a commit anywhere in a composed command. Two parts rewrite here (commit to legion commit, push to legion push) and `git add` allows. The fold ties the two rewrites at the same rank and keeps the first in evaluation order, the commit. The adapter would replace the whole chain with the commit target, dropping both `git add -A` and the push. DISAGREEMENT: hook deny, route rewrite."
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit",
+    "note": "#886, the land-work chain from test-no-git-commit.sh: the hook denies a commit anywhere in a composed command. Two parts would rewrite (commit to legion commit, push to legion push) beside `git add`. Since #1277 route refuses a rewrite that would drop the rest of the chain, and the deny names the first rewrite in evaluation order, the commit."
   },
   {
     "hook": "no-git-push.sh",
