@@ -97,6 +97,18 @@ pub struct Invocation {
     pub position: Position,
     /// 0 at the top of the text being split; never above [`MAX_DEPTH`].
     pub depth: u8,
+    /// True when a redirect applies to the command: one in its own prefix or
+    /// suffix (`> out.txt`, `2>/dev/null`, `>&2`, `<<< x`), or one on an
+    /// enclosing subshell or group (`(cmd) > out.txt`, `{ cmd; } 2>/dev/null`).
+    /// The redirect words are never in `args`, so this is the one place a
+    /// caller learns the command was redirected. The router also sets it on a
+    /// command it re-enters from a redirected wrapper or interpreter.
+    pub redirected: bool,
+    /// True when an environment assignment applies to the command: one in its
+    /// own prefix (`FOO=1 cmd`, the case [`Position::AfterAssignment`] names),
+    /// or, set by the router, one on a wrapper or interpreter it re-entered
+    /// the command from (`FOO=1 env cmd`).
+    pub assigned: bool,
 }
 
 /// Why a region was not reduced to a command (FR-CMD-007). Closed set.
@@ -601,8 +613,10 @@ fn walk_command(
             walk_simple_command(text, simple, depth, tag, seq_position, scan)
         }
         Command::Compound(compound, redirects) => {
+            let first_inner = scan.invocations.len();
             walk_compound_command_tagged(text, compound, depth, tag, seq_position, scan);
             if let Some(redirects) = redirects {
+                mark_redirected(&mut scan.invocations[first_inner..]);
                 walk_redirect_list(text, redirects, depth, scan);
             }
         }
@@ -656,6 +670,12 @@ fn walk_simple_command(
             walk_prefix_or_suffix_item(text, item, depth, scan);
         }
     }
+    let redirected = simple
+        .prefix
+        .iter()
+        .flat_map(|prefix| &prefix.0)
+        .chain(simple.suffix.iter().flat_map(|suffix| &suffix.0))
+        .any(|item| matches!(item, CommandPrefixOrSuffixItem::IoRedirect(_)));
 
     let position = if has_assignment {
         Position::AfterAssignment
@@ -703,6 +723,8 @@ fn walk_simple_command(
                     args,
                     position,
                     depth,
+                    redirected,
+                    assigned: has_assignment,
                 });
             }
         }
@@ -1124,6 +1146,7 @@ fn walk_process_substitution(text: &str, subshell: &SubshellCommand, depth: u8, 
 }
 
 fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mut Scan) {
+    let first_inner = scan.invocations.len();
     walk_compound_command_tagged(
         text,
         &body.0,
@@ -1133,7 +1156,18 @@ fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mu
         scan,
     );
     if let Some(redirects) = &body.1 {
+        // `f() { cmd; } > out.txt` redirects every call of `f`, so each
+        // command in the body is marked the same as in a redirected group.
+        mark_redirected(&mut scan.invocations[first_inner..]);
         walk_redirect_list(text, redirects, depth, scan);
+    }
+}
+
+/// Marks every invocation walked inside a compound command or function body
+/// that carries a redirect: the redirect applies to each command inside it.
+fn mark_redirected(inner: &mut [Invocation]) {
+    for invocation in inner {
+        invocation.redirected = true;
     }
 }
 
@@ -1337,6 +1371,42 @@ mod tests {
         let scan = scan("cat x | FOO=1 grep y").expect("parses");
         assert_eq!(positions(&scan, "grep"), vec![Position::AfterAssignment]);
         assert_eq!(positions(&scan, "cat"), vec![Position::First]);
+    }
+
+    #[test]
+    fn a_redirect_on_the_command_or_its_enclosing_group_marks_it_redirected() {
+        for command in [
+            "gh pr list > out.txt",
+            "gh pr list 2>/dev/null",
+            "gh pr list >&2",
+            "gh pr list <<< x",
+            ">out.txt gh pr list",
+        ] {
+            let scan = scan(command).expect("parses");
+            assert!(scan.invocations[0].redirected, "`{command}`");
+            assert_eq!(scan.invocations[0].args, vec!["pr", "list"], "`{command}`");
+        }
+        for command in [
+            "gh pr list <<EOF\nx\nEOF",
+            "gh pr list 3>&1",
+            "(gh pr list) > out.txt",
+            "{ gh pr list; } 2>/dev/null",
+            "( { gh pr list; } ) > out.txt",
+            "f() { gh pr list; } > out.txt",
+        ] {
+            let scan = scan(command).expect("parses");
+            assert!(scan.invocations[0].redirected, "`{command}`");
+        }
+        // A redirect on a group wrapping a pipeline applies to every stage.
+        let grouped = scan("{ gh pr list | head; } > out.txt").expect("parses");
+        assert_eq!(grouped.invocations.len(), 2);
+        assert!(grouped.invocations.iter().all(|i| i.redirected));
+        let scan = scan("gh pr list | tee out.txt > /dev/null").expect("parses");
+        assert!(
+            !scan.invocations[0].redirected,
+            "gh has no redirect of its own"
+        );
+        assert!(scan.invocations[1].redirected, "tee carries the redirect");
     }
 
     #[test]
