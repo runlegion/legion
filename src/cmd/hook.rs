@@ -49,6 +49,16 @@
 //! (FR-CMD-014); the only process it may spawn is `git`, to name the repo a
 //! recall lookup is scoped to, and that runs inside the deadline.
 //!
+//! # The rewrite prediction (#1272, FR-CMD-015)
+//!
+//! A rewrite the adapter applies is a prediction that the constructed
+//! command will work: [`respond`] emits one `legion.cmd` prediction for it,
+//! keyed by the call's `tool_use_id` (`crate::cmd::prediction`). Before its
+//! own work, each run witnesses this session's earlier rewrites whose
+//! `tool_result` is now in the session transcript. Both run outside the
+//! decision, which reads neither: a failure in either is reported on stderr
+//! and never changes the response.
+//!
 //! # The repo
 //!
 //! `Context::repo` is derived once, in [`repo_for`], and validated there:
@@ -78,6 +88,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::cmd::config::RouteSettings;
+use crate::cmd::prediction::{self, AppliedRewrite};
 use crate::cmd::replacement::{build_replacement, rewritable_field};
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
@@ -113,9 +124,9 @@ const DEFAULT_ALLOW_NOTE: &str =
     "legion-cmd: no policy rule governs this command; it runs under the default allow";
 
 /// The PreToolUse payload fields the adapter acts on. Unknown fields are
-/// ignored, not rejected: the harness may add fields, and `session_id` and
-/// `tool_use_id` are present in the payload but nothing in this slice
-/// consumes them (the confirmation store and the ledger will).
+/// ignored, not rejected: the harness may add fields. `tool_use_id`,
+/// `session_id` and `transcript_path` serve only the rewrite prediction and
+/// its witness (#1272); no decision reads them.
 #[derive(Debug, Deserialize)]
 struct HookPayload {
     tool_name: String,
@@ -123,6 +134,12 @@ struct HookPayload {
     tool_input: Value,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 impl HookPayload {
@@ -207,14 +224,57 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 
 /// The production path: the policy from the environment, lookups against the
 /// local store, the repo override from `LEGION_REPO`.
+///
+/// Around the decision, and never able to change it (#1272): first the
+/// pending-witness pass for this session, then the prediction for a rewrite
+/// the decision applied. Each runs under [`best_effort`], so a failure or a
+/// panic in either is a line on stderr, not a deny.
 fn respond(input: &str) -> Value {
+    best_effort("witness pass", || witness_session(input));
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
-    respond_with(
+    let applied: Applied = respond_with(
         input,
         read_policy_text(),
         Arc::new(StoreLookups),
         legion_repo,
-    )
+    );
+    if let Some(rewrite) = &applied.rewrite {
+        best_effort("rewrite prediction", || {
+            let db = crate::cli::util::open_db()?;
+            prediction::emit_rewrite_prediction(&db, rewrite)?;
+            Ok(())
+        });
+    }
+    applied.response
+}
+
+/// Witnesses this session's rewrites whose results are now in its
+/// transcript. A payload with no session or transcript has nothing to
+/// witness; the decision's own parse reports a malformed payload.
+fn witness_session(input: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(payload) = serde_json::from_str::<HookPayload>(input) else {
+        return Ok(());
+    };
+    let (Some(session_id), Some(transcript)) = (payload.session_id, payload.transcript_path) else {
+        return Ok(());
+    };
+    let db = crate::cli::util::open_db()?;
+    prediction::witness_pending(&db, &session_id, Path::new(&transcript))?;
+    Ok(())
+}
+
+/// Runs work that must never touch the decision: an error or a panic is
+/// reported on stderr (never stdout, which carries the response) and
+/// swallowed.
+fn best_effort(what: &str, work: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>) {
+    let message: Option<String> = match panic::catch_unwind(AssertUnwindSafe(work)) {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(payload) => Some(format!("panic: {}", panic_message(&payload))),
+    };
+    if let Some(message) = message {
+        eprintln!("[legion cmd-check] {what} failed: {message}");
+    }
 }
 
 /// The adapter over injected sources, so a test drives every branch without
@@ -226,25 +286,25 @@ fn respond_with(
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
     legion_repo: Option<String>,
-) -> Value {
+) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(payload) => payload,
-        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None),
+        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None).into(),
     };
     let policy_text: String = match policy_text {
         Ok(text) => text,
-        Err(e) => return deny_for_error(&e, Some(&payload)),
+        Err(e) => return deny_for_error(&e, Some(&payload)).into(),
     };
     let settings: RouteSettings = match RouteSettings::from_policy_text(&policy_text) {
         Ok(settings) => settings,
         Err(e) => {
-            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload));
+            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload)).into();
         }
     };
     let policy: Policy = match parse_policy(&policy_text) {
         Ok(policy) => policy,
         Err(e) => {
-            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload));
+            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload)).into();
         }
     };
 
@@ -260,7 +320,25 @@ fn respond_with(
     });
     match outcome {
         Ok(routed) => apply(&routed, &payload),
-        Err(e) => deny_for_error(&e, Some(&payload)),
+        Err(e) => deny_for_error(&e, Some(&payload)).into(),
+    }
+}
+
+/// One hook response, and the rewrite it applied if it applied one -- the
+/// only thing the rewrite prediction is emitted from, so a rewrite that
+/// became a deny (a replacement that could not be built) emits nothing.
+#[derive(Debug)]
+struct Applied {
+    response: Value,
+    rewrite: Option<AppliedRewrite>,
+}
+
+impl From<Value> for Applied {
+    fn from(response: Value) -> Self {
+        Self {
+            response,
+            rewrite: None,
+        }
     }
 }
 
@@ -439,19 +517,26 @@ fn is_safe_repo_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Applies route's Decision to the hook response (FR-CMD-017).
-fn apply(routed: &Routed, payload: &HookPayload) -> Value {
-    match &routed.decision {
+/// Applies route's Decision to the hook response (FR-CMD-017). A rewrite
+/// whose replacement was built is also returned as the [`AppliedRewrite`]
+/// its prediction records (#1272).
+fn apply(routed: &Routed, payload: &HookPayload) -> Applied {
+    let response: Value = match &routed.decision {
         Decision::Allow { note } => match (&routed.deciding, note.as_deref()) {
             (Deciding::Default, None | Some("")) => pass_through(Some(DEFAULT_ALLOW_NOTE)),
             (_, note) => pass_through(note),
         },
         Decision::Proxy { .. } => pass_through(None),
         Decision::Rewrite { target, reason } => {
-            match build_replacement(target, &routed.facts, &payload.tool_input) {
-                Ok(updated) => rewrite_response(payload.rewritten_value(), target, reason, updated),
-                Err(e) => deny_for_error(&AdapterError::Replacement(e.to_string()), Some(payload)),
-            }
+            return match build_replacement(target, &routed.facts, &payload.tool_input) {
+                Ok(updated) => Applied {
+                    response: rewrite_response(payload.rewritten_value(), target, reason, updated),
+                    rewrite: Some(applied_rewrite(payload, target)),
+                },
+                Err(e) => {
+                    deny_for_error(&AdapterError::Replacement(e.to_string()), Some(payload)).into()
+                }
+            };
         }
         Decision::Deny(details) => deny_response(&format!(
             "{} -- instead: {}",
@@ -459,6 +544,25 @@ fn apply(routed: &Routed, payload: &HookPayload) -> Value {
             details.instead()
         )),
         Decision::Ask(details) => ask_response(details, &routed.deciding, payload),
+    };
+    response.into()
+}
+
+/// The rewrite as its prediction records it: the call's ids, the value as
+/// issued and as constructed, and whether the call runs in the background
+/// (whose transcript result records only that it started).
+fn applied_rewrite(payload: &HookPayload, target: &ManagedTarget) -> AppliedRewrite {
+    AppliedRewrite {
+        tool_use_id: payload.tool_use_id.clone(),
+        session_id: payload.session_id.clone(),
+        tool_name: payload.tool_name.clone(),
+        issued: payload.rewritten_value().map(str::to_string),
+        constructed: target.as_str().to_string(),
+        background: payload
+            .tool_input
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -689,6 +793,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             None,
         )
+        .response
     }
 
     fn output(response: &Value) -> &Value {
@@ -770,7 +875,8 @@ mod tests {
             )),
             Arc::new(StubLookups(Lookup::Empty)),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("policy: /nowhere/policy.json: missing"));
         assert!(reason(&response).ends_with("instead: legion cmd-check -- 'echo hi'"));
@@ -839,7 +945,7 @@ mod tests {
                 needs_operator: false,
             },
         };
-        let response = apply(&routed, &parsed_payload("ls"));
+        let response = apply(&routed, &parsed_payload("ls")).response;
         assert!(output(&response).get("additionalContext").is_none());
     }
 
@@ -865,7 +971,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let response = apply(&routed, &payload);
+        let response = apply(&routed, &payload).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
     }
@@ -892,7 +998,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let out = apply(&routed, &payload)["hookSpecificOutput"].clone();
+        let out = apply(&routed, &payload).response["hookSpecificOutput"].clone();
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
             out["updatedInput"],
@@ -964,7 +1070,7 @@ mod tests {
                 needs_operator: false,
             },
         };
-        let response = apply(&routed, &parsed_payload("gh issue list src/"));
+        let response = apply(&routed, &parsed_payload("gh issue list src/")).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
         assert!(reason(&response).contains("path operand"));
@@ -1026,7 +1132,7 @@ mod tests {
 
     #[test]
     fn an_unmarked_ask_never_prompts_the_operator() {
-        let response = apply(&ask_routed(false), &parsed_payload("gh pr merge 7"));
+        let response = apply(&ask_routed(false), &parsed_payload("gh pr merge 7")).response;
         assert_denied(&response);
         assert!(reason(&response).contains("merge it?"));
     }
@@ -1035,7 +1141,7 @@ mod tests {
     fn a_marked_ask_prompts_the_operator_through_the_harness_with_the_reason() {
         // The only path that prompts the operator: the harness's own
         // permission prompt, carrying the reason.
-        let response = apply(&ask_routed(true), &parsed_payload("gh pr merge 7"));
+        let response = apply(&ask_routed(true), &parsed_payload("gh pr merge 7")).response;
         let out = output(&response);
         assert_eq!(out["permissionDecision"], "ask");
         assert_eq!(out["permissionDecisionReason"], "the agent said: hotfix");
@@ -1049,7 +1155,7 @@ mod tests {
             facts: Facts::default(),
             deciding: Deciding::Default,
         };
-        let response = apply(&routed, &parsed_payload("forbidden"));
+        let response = apply(&routed, &parsed_payload("forbidden")).response;
         assert_denied(&response);
         assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
     }
@@ -1063,7 +1169,8 @@ mod tests {
             Ok(POLICY.to_string()),
             Arc::new(FailingLookups),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("lookup:"));
         assert!(reason(&response).contains("db unavailable"));
@@ -1098,7 +1205,8 @@ mod tests {
             Ok(POLICY.to_string()),
             lookups.clone(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert_eq!(
             lookups.calls(),
@@ -1120,7 +1228,8 @@ mod tests {
             Ok(POLICY.to_string()),
             lookups.clone(),
             Some("other-repo".to_string()),
-        );
+        )
+        .response;
         assert_eq!(lookups.calls()[0].0, "recall:other-repo");
     }
 
@@ -1146,7 +1255,7 @@ mod tests {
     fn a_slow_lookup_overruns_the_configured_deadline_end_to_end() {
         let slow = RecordingLookups::new(Duration::from_millis(400));
         let policy = POLICY.replacen("\"deadline_ms\": 2000", "\"deadline_ms\": 20", 1);
-        let response = respond_with(&payload("git push"), Ok(policy), slow, None);
+        let response = respond_with(&payload("git push"), Ok(policy), slow, None).response;
         assert_denied(&response);
         assert!(reason(&response).contains("no decision within 20 ms"));
     }
@@ -1214,7 +1323,7 @@ mod tests {
             "cwd": "/tmp/legion; touch pwned"
         })
         .to_string();
-        let response = respond_with(&input, Ok(POLICY.to_string()), lookups.clone(), None);
+        let response = respond_with(&input, Ok(POLICY.to_string()), lookups.clone(), None).response;
         assert_denied(&response);
         assert!(lookups.calls().is_empty());
     }
@@ -1268,5 +1377,105 @@ mod tests {
             Some(&parsed_payload("echo 'a'; touch pwned")),
         );
         assert!(reason(&response).ends_with(r"legion cmd-check -- 'echo '\''a'\''; touch pwned'"));
+    }
+
+    fn respond_applied(input: &str) -> Applied {
+        respond_with(
+            input,
+            Ok(POLICY.to_string()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            None,
+        )
+    }
+
+    #[test]
+    fn an_applied_rewrite_is_returned_once_with_issued_and_constructed() {
+        // #1272: the prediction is emitted from this, so it must carry the
+        // call's ids, the command as issued and the command constructed.
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue list"},
+            "session_id": "s1",
+            "tool_use_id": "toolu_1",
+            "transcript_path": "/tmp/s1.jsonl",
+            "cwd": REPO_CWD
+        })
+        .to_string();
+        let applied = respond_applied(&input);
+        assert_eq!(
+            applied.rewrite,
+            Some(AppliedRewrite {
+                tool_use_id: Some("toolu_1".to_string()),
+                session_id: Some("s1".to_string()),
+                tool_name: "Bash".to_string(),
+                issued: Some("gh issue list".to_string()),
+                constructed: "legion issue list".to_string(),
+                background: false,
+            })
+        );
+        assert_eq!(output(&applied.response)["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn a_backgrounded_rewrite_is_marked_background() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue list", "run_in_background": true},
+            "tool_use_id": "toolu_bg",
+            "cwd": REPO_CWD
+        })
+        .to_string();
+        let rewrite = respond_applied(&input).rewrite.expect("a rewrite");
+        assert!(rewrite.background);
+    }
+
+    #[test]
+    fn no_decision_but_an_applied_rewrite_yields_a_prediction() {
+        // Allow, deny, proxy, ask, and a route-level refusal of a rewrite.
+        for command in [
+            "ls -la",
+            "rm -rf build",
+            "xxd file.bin",
+            "gh pr merge 7",
+            "gh issue list src/",
+        ] {
+            let applied = respond_applied(&payload(command));
+            assert!(applied.rewrite.is_none(), "{command} yielded a rewrite");
+        }
+    }
+
+    #[test]
+    fn a_rewrite_whose_replacement_fails_yields_no_prediction() {
+        let routed = Routed {
+            decision: Decision::Rewrite {
+                target: ManagedTarget::new("legion issue list"),
+                reason: "legion tracks issues".to_string(),
+            },
+            facts: Facts {
+                paths: vec!["src/".to_string()],
+                ..Facts::default()
+            },
+            deciding: Deciding::Rule {
+                id: "gh-issue-list".to_string(),
+                needs_operator: false,
+            },
+        };
+        let applied = apply(&routed, &parsed_payload("gh issue list src/"));
+        assert_denied(&applied.response);
+        assert!(applied.rewrite.is_none());
+    }
+
+    #[test]
+    fn best_effort_swallows_errors_and_panics() {
+        best_effort("error", || Err("boom".into()));
+        best_effort("panic", || panic!("boom"));
+        best_effort("ok", || Ok(()));
+    }
+
+    #[test]
+    fn the_witness_pass_has_nothing_to_do_without_a_session_or_transcript() {
+        // Neither case opens the store: there is nothing to witness.
+        assert!(witness_session("not json").is_ok());
+        assert!(witness_session(&payload("ls")).is_ok());
     }
 }

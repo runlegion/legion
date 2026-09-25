@@ -8,4 +8,5 @@
 
 pub(crate) mod config;
 pub(crate) mod hook;
+pub(crate) mod prediction;
 pub(crate) mod replacement;
