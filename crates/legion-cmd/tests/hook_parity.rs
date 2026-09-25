@@ -3,7 +3,8 @@
 //! disagree, route's Decision is authoritative absent an operator ruling.
 //!
 //! `tests/fixtures/hook_cases.json` carries one row per case class of each
-//! hook, enumerated from the hook script's branches and its test suite. The
+//! hook -- the tool-field hooks (#1233) and the seven Bash hooks (#1232) --
+//! enumerated from the hook script's branches and its test suite. The
 //! hooks are accounted for as cases, not transcribed as rules: a row records
 //! what the hook does today (`hook_behavior`) beside what route does against
 //! the SHIPPED `plugin/legion-cmd/policy.json` (`route`), and `agrees` says
@@ -57,6 +58,23 @@ const TOOL_FIELD_HOOKS: [&str; 6] = [
     "no-harness-explore.sh",
     "recall-first.sh",
 ];
+
+/// The Bash hooks this battery accounts for (#1232), by script name as
+/// registered in `plugin/hooks/hooks.json`. `pre-script-search.sh` is in both
+/// lists: it is registered under the Bash matcher and the Write/Edit matchers.
+const BASH_HOOKS: [&str; 7] = [
+    "no-gh.sh",
+    "no-direct-db.sh",
+    "pre-bash-grep.sh",
+    "no-git-push.sh",
+    "no-git-commit.sh",
+    "pre-script-search.sh",
+    "pre-bash-ls.sh",
+];
+
+/// The Bash hooks that rewrite today and deny the flags they cannot
+/// translate. Their rows must carry both kinds of case (#1232).
+const REWRITING_BASH_HOOKS: [&str; 2] = ["no-git-push.sh", "no-git-commit.sh"];
 
 /// The matchers those hooks are registered under, which the shipped policy
 /// must carry as Fields tool kinds.
@@ -261,6 +279,40 @@ fn every_tool_field_hook_and_matcher_has_at_least_one_row() {
 }
 
 #[test]
+fn every_bash_hook_has_at_least_one_bash_row() {
+    // FR-CMD-010 for the Bash hooks: a row per hook, each exercising the Bash
+    // tool the hook is registered under.
+    let cases = load_cases();
+    let missing: Vec<&str> = BASH_HOOKS
+        .into_iter()
+        .filter(|hook| !cases.iter().any(|c| c.hook == *hook && c.tool == "Bash"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "no Bash row in hook_cases.json names hook(s) {missing:?}"
+    );
+}
+
+#[test]
+fn rewriting_bash_hooks_carry_rewrite_and_deny_rows() {
+    // no-git-push.sh and no-git-commit.sh rewrite today and deny the flags
+    // they cannot translate; the battery must show route's Decision on both.
+    let cases = load_cases();
+    let mut missing = Vec::new();
+    for hook in REWRITING_BASH_HOOKS {
+        for behavior in ["rewrite", "deny"] {
+            if !cases
+                .iter()
+                .any(|c| c.hook == hook && c.tool == "Bash" && c.hook_behavior == behavior)
+            {
+                missing.push(format!("{hook}: no Bash row with hook_behavior {behavior}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
 fn shipped_policy_carries_a_fields_entry_for_every_tool_field_kind() {
     let policy = shipped_policy();
     for kind in TOOL_FIELD_KINDS {
@@ -442,6 +494,36 @@ fn a_call_missing_a_field_its_rule_reads_is_denied_not_a_panic() {
             other => panic!("{tool} without file_path must deny, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn a_bash_family_policy_error_reports_its_json_pointer() {
+    // The Bash side of the same Error Handling: a field predicate under a
+    // Bash family, and a rewrite with no declared translatable arguments,
+    // each fail with the exact pointer of the entry at fault.
+    let field_under_bash = r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
+        {"id": "p", "predicates": [{"kind": "field-present", "field": "command"}], "outcome": {"kind": "allow"}}
+    ]}}}}}"#;
+    let err =
+        parse_policy(field_under_bash).expect_err("a field predicate under Bash must not parse");
+    assert!(
+        err.to_string()
+            .starts_with("/tools/Bash/families/git push/rules/0/predicates/0/kind: "),
+        "got {err}"
+    );
+
+    let verb_only_rewrite = r#"{"tools": {"Bash": {"families": {"gh pr view": {"rules": [
+        {"id": "v", "outcome": {"kind": "rewrite", "target": "legion pr view", "reason": "audit"}}
+    ]}}}}}"#;
+    let err =
+        parse_policy(verb_only_rewrite).expect_err("a rewrite with no translatable must not parse");
+    assert_eq!(
+        err,
+        PolicyError::MissingField {
+            pointer: "/tools/Bash/families/gh pr view/rules/0/outcome".to_string(),
+            field: "translatable".to_string(),
+        }
+    );
 }
 
 #[test]

@@ -244,19 +244,25 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
     let first_inner = out.invocations.len();
 
     if let Some(wrapper) = policy.matching_wrapper(&invocation.binary, &invocation.args) {
-        let skip = usize::from(wrapper.required_subcommand.is_some());
-        let payload: Vec<&String> = invocation.args.iter().skip(skip).collect();
+        // The wrapper's own options and operands are consumed by its
+        // declaration (#1286). Words the declaration cannot account for leave
+        // route unable to say where the wrapped command starts, so the
+        // invocation is proxied opaque -- never allowed as unmanaged.
+        let Some(start) = wrapper.payload_start(&invocation.args) else {
+            out.regions.push(Unreduced {
+                text: invocation.args.join(" "),
+                reason: UnreducedReason::WrapperPayload,
+                depth: invocation.depth,
+            });
+            return;
+        };
+        let payload = &invocation.args[start..];
         // A wrapper with no payload words (a bare `env`, `pnpm exec` with
         // nothing after it) wraps no command: there is nothing to route, so it
         // contributes no part and reaches the allow default -- not an opaque
         // proxy, which is reserved for a command route genuinely cannot read.
         if !payload.is_empty() {
-            let text = payload
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            reenter_text(policy, &text, next_depth, out);
+            reenter_text(policy, &payload.join(" "), next_depth, out);
             inherit_shell_words(&invocation, &mut out.invocations[first_inner..]);
         }
         return;
@@ -678,6 +684,139 @@ mod tests {
     fn a_bare_wrapper_with_no_payload_is_allowed_not_proxied() {
         // `env` alone wraps no command: nothing to route -> allow, not opaque.
         assert_eq!(decide("env").decision, Decision::Allow { note: None });
+    }
+
+    /// Wrappers declaring their own options and operands the way the shipped
+    /// policy does, plus deny families for the commands the review of #1283
+    /// reached through them, so a wrapped command that slipped past its
+    /// wrapper would show as an allow rather than pass vacuously (#1286).
+    fn wrapper_args_policy() -> Policy {
+        policy(
+            r#"{
+            "sym_jobs": [
+                {"id": "find-content", "sym_command": "legion sym find-content"}
+            ],
+            "wrappers": [
+                {"binary": "pnpm", "required_subcommand": "exec",
+                 "flags": ["-r", "--recursive"], "value_options": ["-C", "--filter"]},
+                {"binary": "timeout", "flags": ["--foreground", "-v"],
+                 "value_options": ["-k", "--kill-after", "-s", "--signal"], "operands": 1},
+                {"binary": "stdbuf", "value_options": ["-i", "-o", "-e", "--output"]},
+                {"binary": "xargs", "flags": ["-0", "-r", "-t"],
+                 "value_options": ["-I", "-n", "-P"]},
+                {"binary": "sudo", "flags": ["-E", "-n"], "value_options": ["-u", "--user", "-g"]},
+                {"binary": "env", "flags": ["-", "-i"], "value_options": ["-u"]}
+            ],
+            "tools": {"Bash": {"families": {
+                "grep": {"rules": [
+                    {"id": "grep-search", "outcome": {"kind": "sym", "job": "find-content"}}
+                ]},
+                "chmod": {"rules": [
+                    {"id": "chmod-recursive", "predicates": [{"kind": "arg-present", "arg": "-R"}],
+                     "outcome": {"kind": "deny", "reason": "recursive mode change", "instead": "name the paths"}}
+                ]},
+                "mkfs.ext4": {"rules": [
+                    {"id": "mkfs", "outcome": {"kind": "deny", "reason": "formats a device", "instead": "do not"}}
+                ]},
+                "git push": {"rules": [
+                    {"id": "git-push", "outcome": {"kind": "ask", "question": "push?",
+                     "reason": "push publishes history", "needs_operator": true}}
+                ]}
+            }}}
+        }"#,
+        )
+    }
+
+    fn decide_wrapped(command: &str) -> Decision {
+        route(&wrapper_args_policy(), &bash(command), &Context::default()).decision
+    }
+
+    #[test]
+    fn a_command_behind_a_wrapper_with_its_own_arguments_routes_as_the_command_alone() {
+        // #1286: each command the review of #1283 found allowed receives the
+        // Decision the wrapped command alone receives -- here, the deny.
+        for (wrapped, alone) in [
+            ("timeout 5 chmod -R 777 /", "chmod -R 777 /"),
+            (
+                "timeout -s KILL 5 mkfs.ext4 /dev/sda1",
+                "mkfs.ext4 /dev/sda1",
+            ),
+            ("stdbuf -oL mkfs.ext4 /dev/sda1", "mkfs.ext4 /dev/sda1"),
+            ("xargs -I{} mkfs.ext4 {}", "mkfs.ext4 {}"),
+            ("sudo -u root mkfs.ext4 /dev/sda1", "mkfs.ext4 /dev/sda1"),
+            ("sudo -u root git push", "git push"),
+            ("timeout --signal=KILL -k 1 5 mkfs.ext4 x", "mkfs.ext4 x"),
+            ("xargs -0rt -n 1 mkfs.ext4", "mkfs.ext4"),
+            (
+                "sudo \"-u\" root mkfs.ext4 /dev/sda1",
+                "mkfs.ext4 /dev/sda1",
+            ),
+            ("env -i -u HOME FOO=1 mkfs.ext4 x", "mkfs.ext4 x"),
+            ("sudo -- mkfs.ext4 x", "mkfs.ext4 x"),
+            // A runner's options precede its subcommand.
+            ("pnpm -r exec grep foo .", "grep foo ."),
+            ("pnpm -C pkg --filter web exec mkfs.ext4 x", "mkfs.ext4 x"),
+        ] {
+            let expected = decide_wrapped(alone);
+            assert!(
+                !matches!(expected, Decision::Allow { .. }),
+                "`{alone}` must be managed for the comparison to mean anything"
+            );
+            assert_eq!(
+                decide_wrapped(wrapped),
+                expected,
+                "`{wrapped}` must route as `{alone}` does"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapper_whose_own_words_the_declaration_cannot_consume_proxies_opaque() {
+        // #1286: an option the wrapper does not declare, a value option with
+        // no value, or a missing operand leaves route unable to say where the
+        // wrapped command starts -- proxied opaque, never allowed as unmanaged.
+        for command in [
+            "timeout --bogus 5 mkfs.ext4 /dev/sda1",
+            "sudo -Z mkfs.ext4 /dev/sda1",
+            "xargs -0q mkfs.ext4",
+            "sudo -u",
+            "timeout",
+            "timeout -s",
+            "env -S 'mkfs.ext4 /dev/sda1'",
+            "pnpm --bogus exec mkfs.ext4 x",
+            // A `--` before a runner's subcommand is a shape the declaration
+            // does not model: stricter (opaque), never the allow default.
+            "pnpm -- exec grep foo .",
+            "pnpm -r -- exec grep foo .",
+        ] {
+            assert_eq!(
+                decide_wrapped(command),
+                Decision::Proxy {
+                    reason: ProxyReason::Opaque
+                },
+                "`{command}` must proxy opaque"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapper_whose_own_words_consume_to_nothing_wraps_no_command() {
+        // A declared option with no command after it wraps nothing: the
+        // allow default, as for a bare `env`.
+        assert_eq!(decide_wrapped("sudo -n"), Decision::Allow { note: None });
+        assert_eq!(decide_wrapped("env -i"), Decision::Allow { note: None });
+    }
+
+    #[test]
+    fn a_runner_binary_without_its_subcommand_in_position_stays_ordinary() {
+        // `pnpm grep` names no runner; in `pnpm run exec` the word `exec` is
+        // run's script name, not pnpm's subcommand. Both stay ordinary pnpm
+        // invocations, which nothing manages here.
+        assert_eq!(decide_wrapped("pnpm grep"), Decision::Allow { note: None });
+        assert_eq!(
+            decide_wrapped("pnpm run exec"),
+            Decision::Allow { note: None }
+        );
     }
 
     #[test]

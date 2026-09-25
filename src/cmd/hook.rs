@@ -13,6 +13,13 @@
 //! policy, and a panic anywhere into a deny with a reason. Nothing here
 //! falls through to running the raw command.
 //!
+//! The operator mode (`legion cmd-check -- <command>`, #1230,
+//! `crate::cli::cmd_check`) runs the same core: [`read_policy_text`] and
+//! [`route_call`] (policy loading, the settings, the repo, the lookup
+//! pre-pass, route, all under the deadline), [`replacement_for`], and the
+//! error deny from [`error_deny_text`]. Only the rendering differs: this
+//! module writes a hook response, the operator mode a report.
+//!
 //! # The response shapes (Claude Code hook contract)
 //!
 //! `hookSpecificOutput.permissionDecision` is `allow`, `deny` or `ask`; its
@@ -49,6 +56,19 @@
 //! (FR-CMD-014); the only process it may spawn is `git`, to name the repo a
 //! recall lookup is scoped to, and that runs inside the deadline.
 //!
+//! # The rewrite prediction (#1272, FR-CMD-015)
+//!
+//! A rewrite the adapter applies is a prediction that the constructed
+//! command will work: [`respond`] emits one `legion.cmd` prediction for it,
+//! keyed by the call's `tool_use_id` (`crate::cmd::prediction`). Each run
+//! also starts, before its own work, a pass that witnesses this session's
+//! earlier rewrites whose `tool_result` is now in the session transcript. The
+//! pass runs on a worker thread beside the decision: the decision never waits
+//! on it, and after the response it gets only the rest of one
+//! `route.deadline_ms`, then is abandoned. Both run outside the decision,
+//! which reads neither: a failure in either is reported on stderr and never
+//! changes the response.
+//!
 //! # The repo
 //!
 //! `Context::repo` is derived once, in [`repo_for`], and validated there:
@@ -68,7 +88,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use legion_cmd::{
@@ -82,6 +102,7 @@ use serde_json::{Map, Value, json};
 use crate::cmd::config::RouteSettings;
 use crate::cmd::confirm::{live_confirmations, use_confirmation, was_used};
 use crate::cmd::incident::{IncidentLog, Origin};
+use crate::cmd::prediction::{self, AppliedRewrite};
 use crate::cmd::replacement::{build_replacement, rewritable_field};
 use crate::db::Database;
 use crate::error;
@@ -121,7 +142,9 @@ const DEFAULT_ALLOW_NOTE: &str =
 /// The PreToolUse payload fields the adapter acts on. Unknown fields are
 /// ignored, not rejected: the harness may add fields. `session_id` binds the
 /// confirmations the adapter reads and the incident records it writes to the
-/// session (#1237).
+/// session (#1237). `tool_use_id`, `transcript_path` and `session_id` also
+/// serve the rewrite prediction and its witness (#1272), which no decision
+/// reads.
 #[derive(Debug, Deserialize)]
 struct HookPayload {
     tool_name: String,
@@ -130,17 +153,18 @@ struct HookPayload {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
+    tool_use_id: Option<String>,
+    #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 impl HookPayload {
     /// The Bash command this payload carries, if any. Every message that
     /// names the command back to the agent goes through here.
     fn command(&self) -> Option<&str> {
-        self.tool_input
-            .get("command")
-            .and_then(Value::as_str)
-            .filter(|command| !command.is_empty())
+        command_in(&self.tool_input)
     }
 
     /// The value a rewrite replaces -- the Bash command, or an Agent/Task
@@ -156,10 +180,19 @@ impl HookPayload {
     }
 }
 
+/// The Bash command a `tool_input` carries, if any, for a message that names
+/// the command back to its reader. Reads the one field; never scans it.
+pub(crate) fn command_in(tool_input: &Value) -> Option<&str> {
+    tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
+}
+
 /// Every way the adapter itself fails, each closed (FR-CMD-009). The deny
 /// the agent sees names the variant and its detail.
 #[derive(Debug, thiserror::Error)]
-enum AdapterError {
+pub(crate) enum AdapterError {
     #[error("payload: {0}")]
     Payload(String),
     #[error("policy: {0}")]
@@ -191,13 +224,20 @@ enum AdapterError {
 /// prints its own static deny.
 pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     let mut input = String::new();
+    let mut witness: Option<PendingWitness> = None;
     let response: Value = match stdin.read_to_string(&mut input) {
-        Ok(_) => guarded(|| respond(&input)),
+        Ok(_) => guarded(|| respond(&input, &mut witness)),
         Err(e) => deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
     let body: String =
         serde_json::to_string(&response).unwrap_or_else(|_| FALLBACK_DENY_JSON.to_string());
     let _ = writeln!(stdout, "{body}");
+    let _ = stdout.flush();
+    // The response is out. The witness pass gets whatever is left of the one
+    // deadline it started under, then the process exits and takes it along.
+    if let Some(witness) = witness {
+        witness.wait();
+    }
     ExitCode::SUCCESS
 }
 
@@ -210,7 +250,7 @@ fn guarded(build: impl FnOnce() -> Value) -> Value {
     }
 }
 
-fn panic_message(payload: &Box<dyn Any + Send>) -> String {
+pub(crate) fn panic_message(payload: &Box<dyn Any + Send>) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
         return (*text).to_string();
     }
@@ -222,15 +262,147 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 
 /// The production path: the policy from the environment, lookups against the
 /// local store, the repo override from `LEGION_REPO`.
-fn respond(input: &str) -> Value {
+///
+/// Beside and after the decision, and never able to change it (#1272): the
+/// pending-witness pass for this session runs concurrently with the decision
+/// ([`respond_beside_witness`]) and is handed back in `witness` for
+/// [`run_hook`] to give the rest of the deadline after the response is
+/// written; the prediction for a rewrite the decision applied is emitted
+/// here. Each runs under [`best_effort`], so a failure or a panic in either
+/// is a line on stderr, not a deny.
+///
+/// The store is opened once, here, before the pass starts: `Database::open`
+/// runs the migration chain, and two connections migrating a fresh store at
+/// once collide. The emit uses this handle; the pass and the decision's
+/// lookups open their own connections only after it, when migration is done.
+/// A store that cannot be opened skips the pass and the emit.
+fn respond(input: &str, witness: &mut Option<PendingWitness>) -> Value {
+    let mut store: Option<Database> = None;
+    best_effort("store open", || {
+        store = Some(crate::cli::util::open_db()?);
+        Ok(())
+    });
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
-    respond_with(
+    let session_input: Option<String> = store.as_ref().map(|_| input.to_string());
+    let (applied, pending) = respond_beside_witness(
         input,
-        read_policy_text(),
+        read_policy_text(None),
         Arc::new(StoreLookups),
         Arc::new(LocalCmdStore),
         legion_repo,
-    )
+        move || match session_input {
+            Some(session_input) => witness_session(&session_input),
+            None => Ok(()),
+        },
+    );
+    *witness = pending;
+    if let (Some(rewrite), Some(db)) = (&applied.rewrite, &store) {
+        best_effort("rewrite prediction", || {
+            prediction::emit_rewrite_prediction(db, rewrite)?;
+            Ok(())
+        });
+    }
+    applied.response
+}
+
+/// Starts the witness pass on its own worker thread, then runs the decision
+/// as it always runs, under its own deadline. The decision never waits on the
+/// pass. The pass's budget is one `route.deadline_ms` from its start (the
+/// default when the policy cannot be read; the decision reports that
+/// itself), so the call as a whole stays within one deadline plus the
+/// decision's overhead.
+fn respond_beside_witness(
+    input: &str,
+    policy_text: Result<String, AdapterError>,
+    lookups: Arc<dyn LookupRunner>,
+    store: Arc<dyn CmdStore>,
+    legion_repo: Option<String>,
+    witness: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
+) -> (Applied, Option<PendingWitness>) {
+    let deadline: Duration = policy_text
+        .as_ref()
+        .ok()
+        .and_then(|text| RouteSettings::from_policy_text(text).ok())
+        .unwrap_or_default()
+        .deadline;
+    let pending: Option<PendingWitness> = PendingWitness::start(deadline, witness);
+    let applied: Applied = respond_with(input, policy_text, lookups, store, legion_repo);
+    (applied, pending)
+}
+
+/// A witness pass running on its worker thread, with the instant its budget
+/// ends. Dropping it, or [`PendingWitness::wait`] running out, abandons the
+/// pass: the worker ends with the one-shot process, and the predictions it
+/// did not reach stay emitted for a later run.
+#[derive(Debug)]
+struct PendingWitness {
+    finished: mpsc::Receiver<()>,
+    budget_ends: Instant,
+}
+
+impl PendingWitness {
+    /// Spawns `pass` under [`best_effort`]. `None` when the thread cannot be
+    /// started, which only skips this run's pass.
+    fn start(
+        budget: Duration,
+        pass: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
+    ) -> Option<Self> {
+        let budget_ends: Instant = Instant::now() + budget;
+        let (tx, finished) = mpsc::channel::<()>();
+        let spawned = thread::Builder::new()
+            .name("legion-cmd-witness".to_string())
+            .spawn(move || {
+                best_effort("witness pass", pass);
+                let _ = tx.send(());
+            });
+        match spawned {
+            Ok(_) => Some(Self {
+                finished,
+                budget_ends,
+            }),
+            Err(e) => {
+                eprintln!("[legion cmd-check] witness pass not started: {e}");
+                None
+            }
+        }
+    }
+
+    /// Waits for the pass until its budget ends, and no longer.
+    fn wait(self) {
+        let left: Duration = self.budget_ends.saturating_duration_since(Instant::now());
+        if let Err(mpsc::RecvTimeoutError::Timeout) = self.finished.recv_timeout(left) {
+            eprintln!("[legion cmd-check] witness pass abandoned at the deadline");
+        }
+    }
+}
+
+/// Witnesses this session's rewrites whose results are now in its
+/// transcript. A payload with no session or transcript has nothing to
+/// witness; the decision's own parse reports a malformed payload.
+fn witness_session(input: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(payload) = serde_json::from_str::<HookPayload>(input) else {
+        return Ok(());
+    };
+    let (Some(session_id), Some(transcript)) = (payload.session_id, payload.transcript_path) else {
+        return Ok(());
+    };
+    let db = crate::cli::util::open_db()?;
+    prediction::witness_pending(&db, &session_id, Path::new(&transcript))?;
+    Ok(())
+}
+
+/// Runs work that must never touch the decision: an error or a panic is
+/// reported on stderr (never stdout, which carries the response) and
+/// swallowed.
+fn best_effort(what: &str, work: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>) {
+    let message: Option<String> = match panic::catch_unwind(AssertUnwindSafe(work)) {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(payload) => Some(format!("panic: {}", panic_message(&payload))),
+    };
+    if let Some(message) = message {
+        eprintln!("[legion cmd-check] {what} failed: {message}");
+    }
 }
 
 /// Where the adapter reads confirmations and writes incident records. A seam
@@ -264,26 +436,79 @@ impl CmdStore for LocalCmdStore {
     }
 }
 
+/// The hook mode's session work around route (#1237): pending drops before
+/// the lookups, live confirmations into the Context, and the incident record
+/// and confirmation use after route. The operator mode passes none to
+/// [`route_call`], so a dry run never records, notifies, or uses up a
+/// confirmation.
+pub(crate) struct SessionWork {
+    store: Arc<dyn CmdStore>,
+    /// The payload's `session_id`, when it names one.
+    session: Option<String>,
+    /// The command as the agent issued it, for the incident record.
+    issued: String,
+}
+
 /// The adapter over injected sources, so a test drives every branch without
-/// touching the environment or the store. Reads and parses the policy first
-/// (a local file, outside the deadline), then runs repo derivation, the
-/// lookups, and route on a worker thread under `route.deadline_ms`.
+/// touching the environment or the store.
 fn respond_with(
     input: &str,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
     store: Arc<dyn CmdStore>,
     legion_repo: Option<String>,
-) -> Value {
+) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(payload) => payload,
-        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None),
+        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None).into(),
     };
+    let call = ToolCall {
+        tool: payload.tool_name.clone(),
+        input: payload.tool_input.clone(),
+    };
+    let session = SessionWork {
+        store,
+        session: payload.session_id.clone().filter(|s| !s.is_empty()),
+        issued: match payload.command() {
+            Some(command) => command.to_string(),
+            None => format!("{} {}", payload.tool_name, payload.tool_input),
+        },
+    };
+    match route_call(
+        policy_text,
+        call,
+        lookups,
+        legion_repo,
+        payload.cwd.clone(),
+        Some(session),
+    ) {
+        Ok((routed, policy)) => apply(&routed, &payload, &policy),
+        Err(e) => deny_for_error(&e, Some(&payload)).into(),
+    }
+}
+
+/// The decision core both modes run (FR-CMD-017). Parses the policy and its
+/// settings first (the text is a local file, read outside the deadline), then
+/// runs repo derivation, the lookup pre-pass, and route on a worker thread
+/// under `route.deadline_ms`. Returns route's result with the policy it
+/// decided under, which [`replacement_for`] reads to find a rewrite's rule.
+/// Every failure is an [`AdapterError`], which each mode turns into a deny
+/// (FR-CMD-009, FR-CMD-016). `session` is the hook mode's [`SessionWork`],
+/// run inside the same deadline; the operator mode passes `None`.
+pub(crate) fn route_call(
+    policy_text: Result<String, AdapterError>,
+    call: ToolCall,
+    lookups: Arc<dyn LookupRunner>,
+    legion_repo: Option<String>,
+    cwd: Option<String>,
+    session: Option<SessionWork>,
+) -> Result<(Routed, Arc<Policy>), AdapterError> {
     // A policy file that cannot be read still leaves the built-in no-go list
     // in force (FR-CMD-025): route runs over an empty policy, so a no-go
-    // match is refused, recorded and notified, and every other command is
-    // denied with the read error exactly as before. A file that reads but
-    // does not parse is a different failure and denies outright.
+    // match is refused (and, in the hook mode, recorded and notified), and
+    // every other command is denied with the read error exactly as before. A
+    // file that reads but does not parse is a different failure and denies
+    // outright.
     let (policy, settings, unread): (Arc<Policy>, RouteSettings, Option<AdapterError>) =
         match policy_text {
             Err(e) => (
@@ -292,77 +517,113 @@ fn respond_with(
                 Some(e),
             ),
             Ok(text) => {
-                let settings: RouteSettings = match RouteSettings::from_policy_text(&text) {
-                    Ok(settings) => settings,
-                    Err(e) => {
-                        return deny_for_error(
-                            &AdapterError::PolicyRead(e.to_string()),
-                            Some(&payload),
-                        );
-                    }
-                };
-                match parse_policy(&text) {
-                    Ok(policy) => (Arc::new(policy), settings, None),
-                    Err(e) => {
-                        return deny_for_error(
-                            &AdapterError::PolicyRead(e.to_string()),
-                            Some(&payload),
-                        );
-                    }
-                }
+                let settings: RouteSettings = RouteSettings::from_policy_text(&text)
+                    .map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+                let policy: Policy =
+                    parse_policy(&text).map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+                (Arc::new(policy), settings, None)
+            }
+        };
+    let worker_policy: Arc<Policy> = Arc::clone(&policy);
+    let routed: Routed = decide(settings.deadline, move || {
+        let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
+        let now: DateTime<Utc> = Utc::now();
+        // The hook's confirmation and incident-record work (#1237). Pending
+        // drops are written before the adapter's own work (FR-CMD-027).
+        let opened: Option<(SessionWork, Database, IncidentLog)> = match session {
+            None => None,
+            Some(work) => {
+                let db: Database = work
+                    .store
+                    .open()
+                    .map_err(|e| AdapterError::Confirmations(e.to_string()))?;
+                let log: IncidentLog = work.store.log();
+                log.record_pending_drops(&|id: &str| was_used(&db, id), now)
+                    .map_err(|e| AdapterError::Record(e.to_string()))?;
+                Some((work, db, log))
             }
         };
 
-    let call = ToolCall {
-        tool: payload.tool_name.clone(),
-        input: payload.tool_input.clone(),
-    };
-    let cwd: Option<String> = payload.cwd.clone();
-    let worker_policy: Arc<Policy> = Arc::clone(&policy);
-    let session: Option<String> = payload.session_id.clone().filter(|s| !s.is_empty());
-    let issued: String = match payload.command() {
-        Some(command) => command.to_string(),
-        None => format!("{} {}", payload.tool_name, payload.tool_input),
-    };
-    let outcome: Result<Routed, AdapterError> = decide(settings.deadline, move || {
-        let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
-        let now: DateTime<Utc> = Utc::now();
-        let db: Database = store
-            .open()
-            .map_err(|e| AdapterError::Confirmations(e.to_string()))?;
-        let log: IncidentLog = store.log();
-        // Pending drops are written before the adapter's own work (FR-CMD-027).
-        log.record_pending_drops(&|id: &str| was_used(&db, id), now)
-            .map_err(|e| AdapterError::Record(e.to_string()))?;
-
         let mut ctx: Context =
             fetch_context(&worker_policy, &call, repo.clone(), lookups.as_ref())?;
-        if let Some(session) = &session {
-            ctx.confirmations = live_confirmations(&db, session, now)
+        if let Some((work, db, _)) = &opened
+            && let Some(session) = &work.session
+        {
+            ctx.confirmations = live_confirmations(db, session, now)
                 .map_err(|e| AdapterError::Confirmations(e.to_string()))?;
         }
         let routed: Routed = route(&worker_policy, &call, &ctx);
 
-        let repo: String = repo.unwrap_or_default();
-        let origin = Origin {
-            command: issued,
-            agent: store.agent_for(&repo),
-            repo,
-            session_id: session.unwrap_or_default(),
-            cwd: cwd.unwrap_or_default(),
-        };
-        record_outcome(&routed, &origin, &db, &log, now, &|record| {
-            store.notify(record)
-        })?;
-        Ok(routed)
-    });
-    match (outcome, unread) {
-        (Ok(routed), Some(read_error)) if !matches!(routed.deciding, Deciding::NoGo { .. }) => {
-            deny_for_error(&read_error, Some(&payload))
+        if let Some((work, db, log)) = opened {
+            let repo: String = repo.unwrap_or_default();
+            let origin = Origin {
+                command: work.issued,
+                agent: work.store.agent_for(&repo),
+                repo,
+                session_id: work.session.unwrap_or_default(),
+                cwd: cwd.unwrap_or_default(),
+            };
+            record_outcome(&routed, &origin, &db, &log, now, &|record| {
+                work.store.notify(record)
+            })?;
         }
-        (Ok(routed), _) => apply(&routed, &payload, &policy),
-        (Err(e), _) => deny_for_error(&e, Some(&payload)),
+        Ok(routed)
+    })?;
+    match unread {
+        Some(read_error) if !matches!(routed.deciding, Deciding::NoGo { .. }) => Err(read_error),
+        _ => Ok((routed, policy)),
     }
+}
+
+/// The replacement `tool_input` for a rewrite, built from route's facts
+/// (FR-CMD-003); `None` for every other arm. A replacement that cannot be
+/// built -- including a rewrite whose rule declares translatable arguments
+/// (#1267) -- is a [`AdapterError::Replacement`], a deny in both modes.
+pub(crate) fn replacement_for(
+    routed: &Routed,
+    policy: &Policy,
+    original: &Value,
+) -> Result<Option<Value>, AdapterError> {
+    match &routed.decision {
+        Decision::Rewrite { target, .. } => {
+            rewritten_input(policy, routed, target, original).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// One hook response, and the rewrite it applied if it applied one -- the
+/// only thing the rewrite prediction is emitted from, so a rewrite that
+/// became a deny (a replacement that could not be built) emits nothing.
+#[derive(Debug)]
+struct Applied {
+    response: Value,
+    rewrite: Option<AppliedRewrite>,
+}
+
+impl From<Value> for Applied {
+    fn from(response: Value) -> Self {
+        Self {
+            response,
+            rewrite: None,
+        }
+    }
+}
+
+/// Finds the rewrite rule that decided `routed` and builds the replacement
+/// under it. A rewrite whose deciding entry names no rewrite rule in `policy`
+/// is refused rather than built.
+fn rewritten_input(
+    policy: &Policy,
+    routed: &Routed,
+    target: &ManagedTarget,
+    original: &Value,
+) -> Result<Value, AdapterError> {
+    let (rule_id, spec) = rewrite_rule(policy, &routed.deciding).ok_or_else(|| {
+        AdapterError::Replacement("the rewrite names no rewrite rule in the policy".to_string())
+    })?;
+    build_replacement(target, rule_id, &spec.translatable, &routed.facts, original)
+        .map_err(|e| AdapterError::Replacement(e.to_string()))
 }
 
 /// Runs `work` on a worker thread and waits at most `deadline` for its
@@ -439,7 +700,7 @@ fn fetch_context(
 
 /// Performs the recall and consult lookups a rule requires. A seam so tests
 /// drive the adapter without the store.
-trait LookupRunner: Send + Sync {
+pub(crate) trait LookupRunner: Send + Sync {
     fn recall(&self, repo: &str, query: &str) -> error::Result<Lookup>;
     fn consult(&self, query: &str) -> error::Result<Lookup>;
 }
@@ -447,7 +708,7 @@ trait LookupRunner: Send + Sync {
 /// The production runner: BM25 over the local store. BM25 only, no embedding
 /// model -- loading the model per hook invocation would spend the decision
 /// deadline on setup, which is the failure the deadline exists to catch.
-struct StoreLookups;
+pub(crate) struct StoreLookups;
 
 impl LookupRunner for StoreLookups {
     fn recall(&self, repo: &str, query: &str) -> error::Result<Lookup> {
@@ -480,12 +741,16 @@ fn lookup_from(result: RecallResult) -> Lookup {
     }
 }
 
-/// Reads the policy file: `LEGION_CMD_POLICY`, else
-/// `${CLAUDE_PLUGIN_ROOT}/legion-cmd/policy.json`. Neither set is a
+/// Reads the policy file: `explicit` when given (the operator mode's
+/// `--policy`), else `LEGION_CMD_POLICY`, else
+/// `${CLAUDE_PLUGIN_ROOT}/legion-cmd/policy.json`. None of them is a
 /// `PolicyRead` failure, which denies: no policy is not an empty policy, but
 /// it is refused the same way (FR-CMD-016).
-fn read_policy_text() -> Result<String, AdapterError> {
-    let path: PathBuf = policy_path()?;
+pub(crate) fn read_policy_text(explicit: Option<&Path>) -> Result<String, AdapterError> {
+    let path: PathBuf = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => policy_path()?,
+    };
     std::fs::read_to_string(&path)
         .map_err(|e| AdapterError::PolicyRead(format!("{}: {e}", path.display())))
 }
@@ -606,33 +871,25 @@ fn record_outcome(
 }
 
 /// Applies route's Decision to the hook response (FR-CMD-017). `policy` is
-/// the policy route decided under, read only to find a rewrite's rule.
-fn apply(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Value {
-    match &routed.decision {
+/// the policy route decided under, read only to find a rewrite's rule. A
+/// rewrite whose replacement was built is also returned as the
+/// [`AppliedRewrite`] its prediction records (#1272); a refused rewrite is a
+/// deny and carries none.
+fn apply(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Applied {
+    let response: Value = match &routed.decision {
         Decision::Allow { note } => match (&routed.deciding, note.as_deref()) {
             (Deciding::Default, None | Some("")) => pass_through(Some(DEFAULT_ALLOW_NOTE)),
             (_, note) => pass_through(note),
         },
         Decision::Proxy { .. } => pass_through(None),
         Decision::Rewrite { target, reason } => {
-            let Some((rule_id, spec)) = rewrite_rule(policy, &routed.deciding) else {
-                return deny_for_error(
-                    &AdapterError::Replacement(
-                        "the rewrite names no rewrite rule in the policy".to_string(),
-                    ),
-                    Some(payload),
-                );
+            return match rewritten_input(policy, routed, target, &payload.tool_input) {
+                Ok(updated) => Applied {
+                    response: rewrite_response(payload.rewritten_value(), target, reason, updated),
+                    rewrite: Some(applied_rewrite(payload, target)),
+                },
+                Err(e) => deny_for_error(&e, Some(payload)).into(),
             };
-            match build_replacement(
-                target,
-                rule_id,
-                &spec.translatable,
-                &routed.facts,
-                &payload.tool_input,
-            ) {
-                Ok(updated) => rewrite_response(payload.rewritten_value(), target, reason, updated),
-                Err(e) => deny_for_error(&AdapterError::Replacement(e.to_string()), Some(payload)),
-            }
         }
         Decision::Deny(details) => {
             let mut reason = format!("{} -- instead: {}", details.reason(), details.instead());
@@ -643,6 +900,25 @@ fn apply(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Value {
             deny_response(&reason)
         }
         Decision::Ask(details) => ask_response(details, &routed.deciding, payload),
+    };
+    response.into()
+}
+
+/// The rewrite as its prediction records it: the call's ids, the value as
+/// issued and as constructed, and whether the call runs in the background
+/// (whose transcript result records only that it started).
+fn applied_rewrite(payload: &HookPayload, target: &ManagedTarget) -> AppliedRewrite {
+    AppliedRewrite {
+        tool_use_id: payload.tool_use_id.clone(),
+        session_id: payload.session_id.clone(),
+        tool_name: payload.tool_name.clone(),
+        issued: payload.rewritten_value().map(str::to_string),
+        constructed: target.as_str().to_string(),
+        background: payload
+            .tool_input
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -731,10 +1007,18 @@ fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload
 /// the failure, and the command to run instead is `legion cmd-check` over the
 /// same command, so the agent and the operator can see what route decides.
 fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
-    deny_response(&format!(
-        "legion-cmd could not decide this command ({err}) -- instead: legion cmd-check -- {}",
-        quoted_command(payload.and_then(HookPayload::command))
-    ))
+    let (reason, instead) = error_deny_text(err, payload.and_then(HookPayload::command));
+    deny_response(&format!("{reason} -- instead: {instead}"))
+}
+
+/// The reason and the command to run instead for a deny over an adapter
+/// failure, shared by both modes so the operator mode reports the deny the
+/// hook would send.
+pub(crate) fn error_deny_text(err: &AdapterError, command: Option<&str>) -> (String, String) {
+    (
+        format!("legion-cmd could not decide this command ({err})"),
+        format!("legion cmd-check -- {}", quoted_command(command)),
+    )
 }
 
 fn deny_response(reason: &str) -> Value {
@@ -964,7 +1248,7 @@ mod tests {
         .to_string()
     }
 
-    fn respond_stub(input: &str, policy: &str) -> Value {
+    fn respond_applied(input: &str, policy: &str) -> Applied {
         respond_with(
             input,
             Ok(policy.to_string()),
@@ -972,6 +1256,10 @@ mod tests {
             temp_store(),
             None,
         )
+    }
+
+    fn respond_stub(input: &str, policy: &str) -> Value {
+        respond_applied(input, policy).response
     }
 
     fn output(response: &Value) -> &Value {
@@ -1054,7 +1342,8 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             temp_store(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("policy: /nowhere/policy.json: missing"));
         assert!(reason(&response).ends_with("instead: legion cmd-check -- 'echo hi'"));
@@ -1124,7 +1413,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply(&routed, &parsed_payload("ls"), &policy());
+        let response = apply(&routed, &parsed_payload("ls"), &policy()).response;
         assert!(output(&response).get("additionalContext").is_none());
     }
 
@@ -1151,7 +1440,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let response = apply(&routed, &payload, &policy());
+        let response = apply(&routed, &payload, &policy()).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
     }
@@ -1179,7 +1468,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let out = apply(&routed, &payload, &policy())["hookSpecificOutput"].clone();
+        let out = apply(&routed, &payload, &policy()).response["hookSpecificOutput"].clone();
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
             out["updatedInput"],
@@ -1252,7 +1541,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply(&routed, &parsed_payload("gh issue list src/"), &policy());
+        let response = apply(&routed, &parsed_payload("gh issue list src/"), &policy()).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
         assert!(reason(&response).contains("path operand"));
@@ -1300,7 +1589,12 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply(&routed, &parsed_payload("gh issue list"), &policy());
+        let applied = apply(&routed, &parsed_payload("gh issue list"), &policy());
+        assert!(
+            applied.rewrite.is_none(),
+            "a refused rewrite yields no prediction"
+        );
+        let response = applied.response;
         assert_denied(&response);
         assert!(reason(&response).contains("names no rewrite rule"));
     }
@@ -1366,7 +1660,8 @@ mod tests {
             &ask_routed(false),
             &parsed_payload("gh pr merge 7"),
             &policy(),
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("merge it?"));
     }
@@ -1379,7 +1674,8 @@ mod tests {
             &ask_routed(true),
             &parsed_payload("gh pr merge 7"),
             &policy(),
-        );
+        )
+        .response;
         let out = output(&response);
         assert_eq!(out["permissionDecision"], "ask");
         assert_eq!(out["permissionDecisionReason"], "the agent said: hotfix");
@@ -1396,7 +1692,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply(&routed, &parsed_payload("forbidden"), &policy());
+        let response = apply(&routed, &parsed_payload("forbidden"), &policy()).response;
         assert_denied(&response);
         assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert!(reason(&response).ends_with(RECORDED_NOTE));
@@ -1433,6 +1729,7 @@ mod tests {
             store.clone(),
             None,
         )
+        .response
     }
 
     fn records(store: &TempStore) -> Vec<crate::telemetry::CmdIncidentRecord> {
@@ -1529,7 +1826,8 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             store.clone(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert!(reason(&response).contains(RECORDED_NOTE));
@@ -1548,7 +1846,8 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             store.clone(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("policy: /plugin/legion-cmd/policy.json"));
         assert_eq!(records(&store).len(), 1);
@@ -1673,7 +1972,8 @@ mod tests {
                 notice_failure: None,
             })),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("confirmations: "));
         assert!(reason(&response).contains("db locked"));
@@ -1716,7 +2016,8 @@ mod tests {
             Arc::new(FailingLookups),
             temp_store(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(reason(&response).contains("lookup:"));
         assert!(reason(&response).contains("db unavailable"));
@@ -1752,7 +2053,8 @@ mod tests {
             lookups.clone(),
             temp_store(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert_eq!(
             lookups.calls(),
@@ -1775,7 +2077,8 @@ mod tests {
             lookups.clone(),
             temp_store(),
             Some("other-repo".to_string()),
-        );
+        )
+        .response;
         assert_eq!(lookups.calls()[0].0, "recall:other-repo");
     }
 
@@ -1801,7 +2104,8 @@ mod tests {
     fn a_slow_lookup_overruns_the_configured_deadline_end_to_end() {
         let slow = RecordingLookups::new(Duration::from_millis(400));
         let policy = POLICY.replacen("\"deadline_ms\": 2000", "\"deadline_ms\": 20", 1);
-        let response = respond_with(&payload("git push"), Ok(policy), slow, temp_store(), None);
+        let response =
+            respond_with(&payload("git push"), Ok(policy), slow, temp_store(), None).response;
         assert_denied(&response);
         assert!(reason(&response).contains("no decision within 20 ms"));
     }
@@ -1875,7 +2179,8 @@ mod tests {
             lookups.clone(),
             temp_store(),
             None,
-        );
+        )
+        .response;
         assert_denied(&response);
         assert!(lookups.calls().is_empty());
     }
@@ -1929,5 +2234,198 @@ mod tests {
             Some(&parsed_payload("echo 'a'; touch pwned")),
         );
         assert!(reason(&response).ends_with(r"legion cmd-check -- 'echo '\''a'\''; touch pwned'"));
+    }
+
+    #[test]
+    fn an_applied_rewrite_is_returned_once_with_issued_and_constructed() {
+        // #1272: the prediction is emitted from this, so it must carry the
+        // call's ids, the command as issued and the command constructed.
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue list"},
+            "session_id": "s1",
+            "tool_use_id": "toolu_1",
+            "transcript_path": "/tmp/s1.jsonl",
+            "cwd": REPO_CWD
+        })
+        .to_string();
+        let applied = respond_applied(&input, POLICY);
+        assert_eq!(
+            applied.rewrite,
+            Some(AppliedRewrite {
+                tool_use_id: Some("toolu_1".to_string()),
+                session_id: Some("s1".to_string()),
+                tool_name: "Bash".to_string(),
+                issued: Some("gh issue list".to_string()),
+                constructed: "legion issue list".to_string(),
+                background: false,
+            })
+        );
+        assert_eq!(output(&applied.response)["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn a_backgrounded_rewrite_is_marked_background() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue list", "run_in_background": true},
+            "tool_use_id": "toolu_bg",
+            "cwd": REPO_CWD
+        })
+        .to_string();
+        let rewrite = respond_applied(&input, POLICY).rewrite.expect("a rewrite");
+        assert!(rewrite.background);
+    }
+
+    #[test]
+    fn a_rewrite_refused_for_translatable_arguments_emits_no_prediction() {
+        // #1267/#1274: route returns Rewrite, but the rule declares
+        // translatable arguments the replacement cannot carry, so the adapter
+        // denies. Nothing was constructed, so nothing is predicted.
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh issue view 7 --web"},
+            "session_id": "s1",
+            "tool_use_id": "toolu_refused",
+            "cwd": REPO_CWD
+        })
+        .to_string();
+        let applied = respond_applied(&input, POLICY);
+        assert_denied(&applied.response);
+        assert!(reason(&applied.response).contains("rewrite rule 'gh-issue-view'"));
+        assert!(applied.rewrite.is_none());
+    }
+
+    #[test]
+    fn no_decision_but_an_applied_rewrite_yields_a_prediction() {
+        // Allow, deny, proxy, ask, and a route-level refusal of a rewrite.
+        for command in [
+            "ls -la",
+            "rm -rf build",
+            "xxd file.bin",
+            "gh pr merge 7",
+            "gh issue list src/",
+        ] {
+            let applied = respond_applied(&payload(command), POLICY);
+            assert!(applied.rewrite.is_none(), "{command} yielded a rewrite");
+        }
+    }
+
+    #[test]
+    fn a_rewrite_whose_replacement_fails_yields_no_prediction() {
+        let routed = Routed {
+            decision: Decision::Rewrite {
+                target: ManagedTarget::new("legion issue list"),
+                reason: "legion tracks issues".to_string(),
+            },
+            facts: Facts {
+                paths: vec!["src/".to_string()],
+                ..Facts::default()
+            },
+            deciding: Deciding::Rule {
+                id: "gh-issue-list".to_string(),
+                needs_operator: false,
+            },
+            confirmed: false,
+        };
+        let applied = apply(&routed, &parsed_payload("gh issue list src/"), &policy());
+        assert_denied(&applied.response);
+        assert!(applied.rewrite.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stuck_transcript_read_never_holds_the_decision_past_the_deadline() {
+        // The transcript is a FIFO nobody writes: opening it blocks forever,
+        // the slowest transcript read there is. The pass runs beside the
+        // decision, which never waits on it; after the response the pass gets
+        // only the rest of the one deadline, then is abandoned with the
+        // pending prediction still emitted.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo: PathBuf = dir.path().join("session.jsonl");
+        // Shells out rather than calling libc::mkfifo: the binary is no-unsafe.
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo failed");
+
+        let db = crate::db::testutil::test_db();
+        prediction::emit_rewrite_prediction(
+            &db,
+            &AppliedRewrite {
+                tool_use_id: Some("toolu_pending".to_string()),
+                session_id: Some("s1".to_string()),
+                tool_name: "Bash".to_string(),
+                issued: Some("gh issue list".to_string()),
+                constructed: "legion issue list".to_string(),
+                background: false,
+            },
+        )
+        .expect("emits");
+
+        let deadline = Duration::from_millis(400);
+        let policy: String = POLICY.replace(r#""deadline_ms": 2000"#, r#""deadline_ms": 400"#);
+        assert_ne!(
+            policy, POLICY,
+            "the test policy must carry the short deadline"
+        );
+        let transcript: PathBuf = fifo.clone();
+        // The decision opens the confirmation store (#1237); migrate it before
+        // the clock starts so the timing measures the decision, not setup.
+        let store = temp_store();
+        drop(store.open().expect("migrates the store"));
+        let started = Instant::now();
+        let (applied, pending) = respond_beside_witness(
+            &payload("gh issue list"),
+            Ok(policy),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store,
+            None,
+            move || {
+                prediction::witness_pending(&db, "s1", &transcript)?;
+                Ok(())
+            },
+        );
+        let decided: Duration = started.elapsed();
+        pending.expect("the pass started").wait();
+        let total: Duration = started.elapsed();
+
+        // The decision never waited on the stuck pass.
+        assert!(
+            decided < deadline,
+            "the decision waited {decided:?} on a stuck witness pass"
+        );
+        assert_eq!(output(&applied.response)["permissionDecision"], "allow");
+        assert!(
+            applied.rewrite.is_some(),
+            "the decision itself is unchanged"
+        );
+        // The whole call fits one deadline, not two. At least the deadline:
+        // the pass really was stuck, not ended early by an error.
+        assert!(
+            total >= deadline,
+            "the witness pass ended early ({total:?}); the FIFO did not block"
+        );
+        assert!(
+            total < deadline + Duration::from_millis(300),
+            "the call took {total:?}, past one deadline"
+        );
+        // The abandoned worker still holds the FIFO path open for reading.
+        std::mem::forget(dir);
+    }
+
+    #[test]
+    fn best_effort_swallows_errors_and_panics() {
+        best_effort("error", || Err("boom".into()));
+        best_effort("panic", || panic!("boom"));
+        best_effort("ok", || Ok(()));
+    }
+
+    #[test]
+    fn the_witness_pass_has_nothing_to_do_without_a_session_or_transcript() {
+        // Neither case opens the store: there is nothing to witness.
+        assert!(witness_session("not json").is_ok());
+        assert!(witness_session(&payload("ls")).is_ok());
     }
 }
