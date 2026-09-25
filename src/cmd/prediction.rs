@@ -41,6 +41,10 @@ const REWRITE_CLAIMED_CONFIDENCE: f64 = 0.9;
 /// it. Matches the task-emit hook's TTL.
 const CMD_ORPHAN_TTL_DAYS: u32 = 30;
 
+/// The payload key that marks a backgrounded call, written at emit and read
+/// by the witness pass to skip it.
+const BACKGROUND_KEY: &str = "background";
+
 /// A rewrite the adapter applied, as the prediction records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AppliedRewrite {
@@ -94,7 +98,7 @@ pub(crate) fn emit_rewrite_prediction(
             "tool_name": rewrite.tool_name,
             "issued": rewrite.issued,
             "constructed": rewrite.constructed,
-            "background": rewrite.background,
+            BACKGROUND_KEY: rewrite.background,
         }),
         orphan_after: orphan_after_from_ttl(CMD_ORPHAN_TTL_DAYS),
         issue_ref: None,
@@ -152,7 +156,7 @@ pub(crate) fn witness_pending(
 fn is_background(prediction: &Prediction) -> bool {
     prediction
         .prediction_payload
-        .get("background")
+        .get(BACKGROUND_KEY)
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
 }

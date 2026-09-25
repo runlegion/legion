@@ -786,14 +786,17 @@ mod tests {
         .to_string()
     }
 
-    fn respond_stub(input: &str, policy: &str) -> Value {
+    fn respond_applied(input: &str, policy: &str) -> Applied {
         respond_with(
             input,
             Ok(policy.to_string()),
             Arc::new(StubLookups(Lookup::Empty)),
             None,
         )
-        .response
+    }
+
+    fn respond_stub(input: &str, policy: &str) -> Value {
+        respond_applied(input, policy).response
     }
 
     fn output(response: &Value) -> &Value {
@@ -1379,15 +1382,6 @@ mod tests {
         assert!(reason(&response).ends_with(r"legion cmd-check -- 'echo '\''a'\''; touch pwned'"));
     }
 
-    fn respond_applied(input: &str) -> Applied {
-        respond_with(
-            input,
-            Ok(POLICY.to_string()),
-            Arc::new(StubLookups(Lookup::Empty)),
-            None,
-        )
-    }
-
     #[test]
     fn an_applied_rewrite_is_returned_once_with_issued_and_constructed() {
         // #1272: the prediction is emitted from this, so it must carry the
@@ -1401,7 +1395,7 @@ mod tests {
             "cwd": REPO_CWD
         })
         .to_string();
-        let applied = respond_applied(&input);
+        let applied = respond_applied(&input, POLICY);
         assert_eq!(
             applied.rewrite,
             Some(AppliedRewrite {
@@ -1425,7 +1419,7 @@ mod tests {
             "cwd": REPO_CWD
         })
         .to_string();
-        let rewrite = respond_applied(&input).rewrite.expect("a rewrite");
+        let rewrite = respond_applied(&input, POLICY).rewrite.expect("a rewrite");
         assert!(rewrite.background);
     }
 
@@ -1439,7 +1433,7 @@ mod tests {
             "gh pr merge 7",
             "gh issue list src/",
         ] {
-            let applied = respond_applied(&payload(command));
+            let applied = respond_applied(&payload(command), POLICY);
             assert!(applied.rewrite.is_none(), "{command} yielded a rewrite");
         }
     }
