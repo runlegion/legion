@@ -11,6 +11,7 @@
 /// [`parse_transcript_tail`] entry point -- used by the statusline where
 /// any stderr output would taint the chip -- skips silently with no
 /// aggregation.
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
@@ -723,6 +724,82 @@ fn tool_result_body_len(item: &serde_json::Map<String, Value>) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Tool-result lookup for the legion-cmd witness (#1272)
+// ---------------------------------------------------------------------------
+
+/// What a transcript records about one finished tool call: its `tool_result`
+/// carried `is_error: true` (failed) or did not (worked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultOutcome {
+    Worked,
+    Failed,
+}
+
+/// The outcome of each tool call in `tool_use_ids` whose `tool_result` is in
+/// the transcript at `path`. An id with no `tool_result` yet is absent from
+/// the map: not yet observed, which is not an outcome.
+///
+/// One pass over the file. A line that names none of the wanted ids is
+/// skipped before it is JSON-decoded, so the cost of a long transcript is a
+/// substring scan, not a parse per line. Malformed lines are skipped like
+/// everywhere else in this module; a file that cannot be opened is an error,
+/// so the caller can tell "unreadable" from "nothing finished yet".
+pub fn tool_result_outcomes(
+    path: &Path,
+    tool_use_ids: &HashSet<String>,
+) -> io::Result<HashMap<String, ToolResultOutcome>> {
+    let mut found: HashMap<String, ToolResultOutcome> = HashMap::new();
+    if tool_use_ids.is_empty() {
+        return Ok(found);
+    }
+    let reader = io::BufReader::new(std::fs::File::open(path)?);
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if !tool_use_ids.iter().any(|id| line.contains(id.as_str())) {
+            continue;
+        }
+        let Ok(obj) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if obj.get("type").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(items) = obj
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for item in items {
+            if item.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(id) = item.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !tool_use_ids.contains(id) {
+                continue;
+            }
+            let failed = item
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let outcome = if failed {
+                ToolResultOutcome::Failed
+            } else {
+                ToolResultOutcome::Worked
+            };
+            found.insert(id.to_string(), outcome);
+        }
+        if found.len() == tool_use_ids.len() {
+            break;
+        }
+    }
+    Ok(found)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1083,5 +1160,62 @@ mod tests {
         let (_dir, path) = write_fixture(&[event]);
         let tail = parse_transcript_tail(&path);
         assert_eq!(tail.max_error_bytes, 2500);
+    }
+
+    fn tool_result_line(id: &str, is_error: Option<bool>) -> String {
+        let flag = match is_error {
+            Some(b) => format!(r#","is_error":{b}"#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}"{flag},"content":"out"}}]}}}}"#
+        )
+    }
+
+    fn ids(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tool_result_outcomes_reads_worked_failed_and_absent() {
+        let lines = vec![
+            tool_result_line("toolu_ok", Some(false)),
+            tool_result_line("toolu_bad", Some(true)),
+            tool_result_line("toolu_plain", None),
+            tool_result_line("toolu_other", Some(true)),
+            "not json toolu_missing".to_string(),
+        ];
+        let (_dir, path) = write_fixture(&lines);
+        let found = tool_result_outcomes(
+            &path,
+            &ids(&["toolu_ok", "toolu_bad", "toolu_plain", "toolu_missing"]),
+        )
+        .expect("readable");
+        assert_eq!(found.get("toolu_ok"), Some(&ToolResultOutcome::Worked));
+        assert_eq!(found.get("toolu_bad"), Some(&ToolResultOutcome::Failed));
+        // No is_error field is a result without an error: worked.
+        assert_eq!(found.get("toolu_plain"), Some(&ToolResultOutcome::Worked));
+        // Not asked for, and never finished: neither is in the map.
+        assert!(!found.contains_key("toolu_other"));
+        assert!(!found.contains_key("toolu_missing"));
+    }
+
+    #[test]
+    fn tool_result_outcomes_ignores_the_tool_use_that_names_the_id() {
+        // The assistant's tool_use block carries the same id; only the
+        // user-side tool_result is an outcome.
+        let tool_use = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}"#;
+        let (_dir, path) = write_fixture(&[tool_use]);
+        let found = tool_result_outcomes(&path, &ids(&["toolu_1"])).expect("readable");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn tool_result_outcomes_errors_on_an_unreadable_transcript() {
+        let err = tool_result_outcomes(
+            &PathBuf::from("/nonexistent/transcript.jsonl"),
+            &ids(&["toolu_1"]),
+        );
+        assert!(err.is_err());
     }
 }
