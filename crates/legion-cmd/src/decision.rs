@@ -46,7 +46,12 @@ pub enum ContractError {
 /// The only five outcomes `route` can return (FR-CMD-001). No sixth arm
 /// exists, and an enum admits no value outside its declared variants, so a
 /// `Decision` outside this set cannot be constructed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes tagged by `kind` (`{"kind": "deny", "reason": ..., "instead":
+/// ...}`), the shape a policy rule's `outcome` already uses, so `legion
+/// cmd-check --json` (#1230) can print it for scripts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Decision {
     /// Run the command unchanged. `note` is an optional soft nudge delivered
     /// to the agent; it never alters the command (FR-CMD-002).
@@ -112,7 +117,7 @@ impl Decision {
 /// Fields are private so the invariant -- neither string is empty -- holds
 /// for every `DenyDetails` in existence, not just the ones built through
 /// [`DenyDetails::new`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DenyDetails {
     reason: String,
     instead: String,
@@ -161,7 +166,7 @@ impl DenyDetails {
 /// Fields are private so the invariant -- neither string is empty -- holds
 /// for every `AskDetails` in existence, not just the ones built through
 /// [`AskDetails::new`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AskDetails {
     question: String,
     reason: String,
@@ -203,7 +208,7 @@ impl AskDetails {
 /// command from the [`Facts`] `route` returns alongside the decision. The
 /// set of valid target names is fixed by the routing policy in a later
 /// slice, so this type carries a name and nothing more.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedTarget(String);
 
 impl ManagedTarget {
@@ -327,7 +332,7 @@ pub struct ToolCall {
 
 /// What `route` extracted while deciding, so no caller parses the command a
 /// second time (FR-CMD-003).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Facts {
     pub paths: Vec<String>,
     pub verb: Option<String>,
@@ -628,5 +633,63 @@ mod tests {
         assert_eq!(routed.decision, Decision::Allow { note: None });
         assert_eq!(routed.facts.verb.as_deref(), Some("view"));
         assert_eq!(routed.deciding, Deciding::Default);
+    }
+
+    // -- serialized shape (#1230: legion cmd-check --json) ---------------
+
+    #[test]
+    fn every_decision_arm_serializes_tagged_by_kind() {
+        let cases = [
+            (
+                Decision::Allow {
+                    note: Some("prefer sym".to_string()),
+                },
+                serde_json::json!({"kind": "allow", "note": "prefer sym"}),
+            ),
+            (
+                Decision::Rewrite {
+                    target: ManagedTarget::new("legion issue list"),
+                    reason: "legion tracks issues".to_string(),
+                },
+                serde_json::json!({"kind": "rewrite", "target": "legion issue list",
+                                   "reason": "legion tracks issues"}),
+            ),
+            (
+                Decision::Proxy {
+                    reason: ProxyReason::Binary,
+                },
+                serde_json::json!({"kind": "proxy", "reason": "binary"}),
+            ),
+            (
+                Decision::deny("unrecoverable", "trash it").expect("valid deny"),
+                serde_json::json!({"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}),
+            ),
+            (
+                Decision::ask("merge it?", "PRs are the orchestrator's").expect("valid ask"),
+                serde_json::json!({"kind": "ask", "question": "merge it?",
+                                   "reason": "PRs are the orchestrator's"}),
+            ),
+        ];
+        for (decision, expected) in cases {
+            assert_eq!(
+                serde_json::to_value(&decision).expect("serializes"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn facts_serialize_field_by_field() {
+        let facts = Facts {
+            paths: vec!["src/".to_string()],
+            verb: Some("issue".to_string()),
+            issue_numbers: vec![7],
+            keywords: vec!["list".to_string()],
+        };
+        assert_eq!(
+            serde_json::to_value(&facts).expect("serializes"),
+            serde_json::json!({"paths": ["src/"], "verb": "issue", "issue_numbers": [7],
+                               "keywords": ["list"]})
+        );
     }
 }
