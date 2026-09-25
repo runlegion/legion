@@ -46,6 +46,8 @@ pub(crate) fn bash_command(call: &ToolCall) -> &str {
 fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     let command: &str = bash_command(call);
     let expanded = expand_command(policy, command);
+    // The command's key, once: a no-go hit and a confirmation both carry it.
+    let command_key = nogo::command_key(command).ok();
 
     // The no-go list is checked before any other policy entry (FR-CMD-025),
     // and before the empty-policy deny, so the built-in entries hold when the
@@ -55,7 +57,7 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         && let Some(hit) = evaluate::decide_no_go(policy, &expanded.invocations)
     {
         let mut facts = extract_facts(&expanded.invocations, None);
-        facts.command_key = nogo::command_key(command).ok();
+        facts.command_key = command_key;
         return Routed {
             decision: hit.decision,
             facts,
@@ -102,7 +104,6 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         parts.push(evaluate::decide_region(policy, region));
     }
 
-    let command_key = nogo::command_key(command).ok();
     let confirmation: Option<&String> = command_key
         .as_ref()
         .and_then(|key| ctx.confirmations.get(key));
