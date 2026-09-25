@@ -394,12 +394,70 @@ _legion_bashgrep_classify() {
   RW_CMD="${rendered% }"
 }
 
+# _legion_bashgrep_reads_tool_results CMD -- true (0) when the leading
+# `grep` in CMD reads only files under the harness's tool-results directory
+# (~/.claude/projects/<project>/<session>/tool-results/<file>), where the
+# harness saves a Bash result too large to return inline -- legion's own
+# output, not a repository (#1264). Every file argument must match and at
+# least one must be present; any shape this parse cannot vouch for (a flag
+# taking a detached value, a pattern file, a `..` segment, a path with
+# spaces) returns false so the caller keeps today's ladder.
+_legion_bashgrep_reads_tool_results() {
+  local head toks=()
+  head="$(_legion_bashgrep_safe_head "$1")"
+  IFS=' ' read -ra toks <<<"$head"
+
+  local projects="${HOME}/.claude/projects/"
+  local pattern_seen=0 files=0 seen_dashdash=0 i t
+  for ((i = 1; i < ${#toks[@]}; i++)); do
+    t="${toks[$i]//[\"\']/}"
+    if [ "$seen_dashdash" -eq 0 ]; then
+      case "$t" in
+        --) seen_dashdash=1; continue ;;
+        -e | --regexp) i=$((i + 1)); pattern_seen=1; continue ;;
+        --regexp=*) pattern_seen=1; continue ;;
+        # A pattern file shifts every positional into a file argument;
+        # this parse does not model that.
+        -f | --file | --file=*) return 1 ;;
+        # Any other flag is skipped. A flag's detached value (`-A 3`) is
+        # then misread as the pattern or a file, which fails the path
+        # check below -- a refusal, never a wrong allow.
+        -*) continue ;;
+      esac
+    fi
+    if [ "$pattern_seen" -eq 0 ]; then
+      pattern_seen=1
+      continue
+    fi
+    # The command text is unexpanded: resolve the home spellings it uses.
+    case "$t" in
+      \~/*) t="${HOME}/${t#\~/}" ;;
+      \$HOME/*) t="${HOME}/${t#\$HOME/}" ;;
+      \$\{HOME\}/*) t="${HOME}/${t#\$\{HOME\}/}" ;;
+    esac
+    case "$t" in
+      */../* | */..) return 1 ;;
+      "$projects"*) ;;
+      *) return 1 ;;
+    esac
+    [[ "${t#"$projects"}" =~ ^[^/]+/[^/]+/tool-results/[^/]+$ ]] || return 1
+    files=$((files + 1))
+  done
+  [ "$files" -gt 0 ]
+}
+
 # Universal gate: skip uncovered repos.
 legion_hook_covered || exit 0
 
 # Detect leading search binary; pass through if none.
 BINARY=$(legion_prequery_bash_binary "$COMMAND")
 if [ -z "$BINARY" ]; then
+  exit 0
+fi
+
+# A grep of a harness tool-results file filters legion's own saved output,
+# not the repository, so it is not a search this ladder governs (#1264).
+if [ "$BINARY" = "grep" ] && _legion_bashgrep_reads_tool_results "$COMMAND"; then
   exit 0
 fi
 

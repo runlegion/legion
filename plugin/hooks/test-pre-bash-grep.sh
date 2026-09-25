@@ -441,4 +441,40 @@ echo "==> #876: not-legion-covered repo -- no rewrite, same universal gate as ev
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git grep Symbol"},"session_id":"rw-uncovered-t"}' | LEGION_REPO=uncovered-elsewhere bash "$HOOK")
 assert_empty "uncovered repo -- no rewrite, no deny, nothing" "$out"
 
+
+# --- #1264: a grep that only filters legion's own output passes -------------
+#
+# Every case uses "Symbol", a LOCAL sym hit that the BLOCK tier denies when
+# the grep searches the repo, so the grep's input source is the only
+# variable. An empty output here means pass-through, not a non-symbol
+# pattern slipping past.
+
+echo "==> #1264: a grep piped from a legion command passes"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"legion bullpen --repo x | grep Symbol"},"session_id":"own-pipe-t"}' | bash "$HOOK")
+assert_empty "legion bullpen | grep passes" "$out"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"legion post --help | grep -n Symbol"},"session_id":"own-pipe-help-t"}' | bash "$HOOK")
+assert_empty "legion post --help | grep passes" "$out"
+
+echo "==> #1264: a grep over a harness tool-results file passes"
+TR_FILE="$HOME/.claude/projects/-Volumes-store-legion/sess-1/tool-results/toolu_01.txt"
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -n Symbol $TR_FILE\"},\"session_id\":\"own-tr-abs-t\"}" | bash "$HOOK")
+assert_empty "grep of an absolute tool-results path passes" "$out"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep Symbol ~/.claude/projects/-Volumes-store-legion/sess-1/tool-results/toolu_01.txt"},"session_id":"own-tr-tilde-t"}' | bash "$HOOK")
+assert_empty "grep of a ~/ tool-results path passes" "$out"
+# shellcheck disable=SC2016 # the unexpanded $HOME is the input under test
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep Symbol $HOME/.claude/projects/-Volumes-store-legion/sess-1/tool-results/toolu_01.txt"},"session_id":"own-tr-home-t"}' | bash "$HOOK")
+assert_empty "grep of an unexpanded \$HOME tool-results path passes" "$out"
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -e Symbol '$TR_FILE'\"},\"session_id\":\"own-tr-quoted-t\"}" | bash "$HOOK")
+assert_empty "grep -e PAT of a quoted tool-results path passes" "$out"
+
+echo "==> #1264: a grep over repository files is still refused"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"own-repo-t"}' | bash "$HOOK")
+assert_contains "repo grep still denied" "$out" '"permissionDecision": "deny"'
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep Symbol $TR_FILE src/\"},\"session_id\":\"own-mixed-t\"}" | bash "$HOOK")
+assert_contains "tool-results file beside a repo path still denied" "$out" '"permissionDecision": "deny"'
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -r Symbol $HOME/.claude/projects/p/s/tool-results/../../../../../src\"},\"session_id\":\"own-dotdot-t\"}" | bash "$HOOK")
+assert_contains "a .. escape out of tool-results still denied" "$out" '"permissionDecision": "deny"'
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -r Symbol $HOME/.claude/projects/p/s/tool-results/\"},\"session_id\":\"own-trdir-t\"}" | bash "$HOOK")
+assert_contains "the tool-results directory itself (not a file in it) still denied" "$out" '"permissionDecision": "deny"'
+
 finish_tests
