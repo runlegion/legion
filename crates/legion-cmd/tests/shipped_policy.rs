@@ -31,9 +31,15 @@ fn mirror_policy() -> Policy {
              "interpreter_patterns": ["rglob", "read_text"]}
         ],
         "wrappers": [
-            {"binary": "env"},
-            {"binary": "npx"},
-            {"binary": "pnpm", "required_subcommand": "exec"}
+            {"binary": "env",
+             "flags": ["-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug"],
+             "value_options": ["-u", "--unset", "-C", "--chdir", "-P"]},
+            {"binary": "npx",
+             "flags": ["-y", "--yes", "--no", "--workspaces", "--include-workspace-root"],
+             "value_options": ["-p", "--package", "-w", "--workspace"]},
+            {"binary": "pnpm", "required_subcommand": "exec",
+             "flags": ["-r", "--recursive", "--parallel", "--report-summary"],
+             "value_options": ["--resume-from"]}
         ],
         "interpreters": [
             {"binary": "sh", "flag": "-c", "body": "shell"},
@@ -83,6 +89,44 @@ fn shipped_policy_parses_is_non_empty_and_declares_its_names() {
     assert!(policy.matching_interpreter("python3").is_some());
     assert!(policy.matching_script_carrier("bash").is_some());
     assert!(policy.sym_job("find-content").is_some());
+}
+
+/// The shipped wrapper declarations consume each wrapper's own words up to
+/// the wrapped command (#1286). Checked against the artifact itself, so a
+/// declaration with the wrong arity -- a value option listed as a flag, a
+/// missing operand -- fails here rather than shipping green. This reads the
+/// file but never calls route.
+#[test]
+fn shipped_wrapper_declarations_reach_the_wrapped_command() {
+    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    for (command, wrapped) in [
+        ("timeout 5 chmod -R 777 /", "chmod"),
+        ("timeout -s KILL 5 mkfs.ext4 /dev/sda1", "mkfs.ext4"),
+        ("stdbuf -oL mkfs.ext4 /dev/sda1", "mkfs.ext4"),
+        ("xargs -I{} mkfs.ext4 {}", "mkfs.ext4"),
+        ("sudo -u root mkfs.ext4 /dev/sda1", "mkfs.ext4"),
+        ("sudo -u root git push", "git"),
+        ("nice -n 10 make", "make"),
+        ("nohup make", "make"),
+        ("env -i FOO=1 make", "FOO=1"),
+        ("npx -y eslint .", "eslint"),
+        ("pnpm exec -r eslint .", "eslint"),
+    ] {
+        let mut words = command.split_whitespace().map(str::to_string);
+        let binary = words.next().expect("a wrapper word");
+        let args: Vec<String> = words.collect();
+        let wrapper = policy
+            .matching_wrapper(&binary, &args)
+            .unwrap_or_else(|| panic!("`{binary}` is a shipped wrapper"));
+        let start = wrapper
+            .payload_start(&args)
+            .unwrap_or_else(|| panic!("`{command}`: the declaration consumes its own words"));
+        assert_eq!(
+            args.get(start).map(String::as_str),
+            Some(wrapped),
+            "`{command}` must reach `{wrapped}`"
+        );
+    }
 }
 
 // -- route behavior (inline policy, never touches disk) -----------------------
