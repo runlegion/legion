@@ -68,11 +68,10 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 
     let mut parts: Vec<PartOutcome> = Vec::new();
     for invocation in &expanded.invocations {
-        parts.push(evaluate::decide_bash_invocation(
-            policy,
-            &invocation.binary,
-            &invocation.args,
-            ctx,
+        let part =
+            evaluate::decide_bash_invocation(policy, &invocation.binary, &invocation.args, ctx);
+        parts.push(evaluate::refuse_rewrite_dropping_shell_words(
+            part, invocation,
         ));
     }
     for region in &expanded.regions {
@@ -573,6 +572,66 @@ mod tests {
                 reason: ProxyReason::Opaque
             }
         );
+    }
+
+    /// A rewrite rule for `gh pr list` whose target carries no arguments, so
+    /// the bare command is lossless and reaches the rewrite.
+    fn gh_pr_list_policy() -> Policy {
+        policy(
+            r#"{"tools": {"Bash": {"families": {
+                "gh pr list": {"rules": [
+                    {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
+                     "reason": "legion tracks PRs", "translatable": {}}}
+                ]}
+            }}}}"#,
+        )
+    }
+
+    #[test]
+    fn a_rewrite_without_a_redirect_or_assignment_routes_as_its_rule_says() {
+        let routed = route(
+            &gh_pr_list_policy(),
+            &bash("gh pr list"),
+            &Context::default(),
+        );
+        match routed.decision {
+            Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion pr list"),
+            other => panic!("expected rewrite, got {other:?}"),
+        }
+    }
+
+    /// FR-CMD-008: a rewrite replaces the whole command, so a redirect or an
+    /// environment-assignment prefix would be silently dropped. The command is
+    /// refused instead, naming the rule and what would have been lost.
+    #[test]
+    fn a_rewrite_carrying_a_redirect_or_assignment_prefix_is_refused() {
+        for (command, dropped) in [
+            ("gh pr list > out.txt", "redirect"),
+            ("gh pr list 2>/dev/null", "redirect"),
+            ("gh pr list >&2", "redirect"),
+            ("GIT_TRACE=1 gh pr list", "environment-assignment prefix"),
+        ] {
+            let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
+            match &routed.decision {
+                Decision::Deny(details) => {
+                    let reason = details.reason();
+                    assert!(reason.contains("rule 'pr-list'"), "`{command}`: {reason}");
+                    assert!(
+                        reason.contains(&format!("{dropped} would have been dropped")),
+                        "`{command}`: {reason}"
+                    );
+                }
+                other => panic!("`{command}` must be refused, got {other:?}"),
+            }
+            assert_eq!(
+                routed.deciding,
+                Deciding::Rule {
+                    id: "pr-list".to_string(),
+                    needs_operator: false
+                },
+                "`{command}`"
+            );
+        }
     }
 
     #[test]

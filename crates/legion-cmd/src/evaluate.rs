@@ -18,7 +18,7 @@ use crate::policy::{
     ArgSpec, FallbackDecision, Family, OperandShape, Policy, Predicate, Rule, RuleOutcome,
     ToolKind, ToolRules,
 };
-use crate::splitter::{Unreduced, UnreducedReason};
+use crate::splitter::{Invocation, Position, Unreduced, UnreducedReason};
 use crate::{Context, Lookup};
 
 /// One part's routing result, before the parts are folded into one Decision.
@@ -400,6 +400,45 @@ fn fallback(otherwise: &FallbackDecision, arg: &str, target: &ManagedTarget) -> 
             question, reason, ..
         } => ask(question, reason),
     }
+}
+
+/// Refuses a rewrite of an invocation that carries a redirect or an
+/// environment-assignment prefix (FR-CMD-008: nothing is silently dropped).
+/// A rewrite replaces the whole command with its target, so the redirect or
+/// the assignment would not survive it. Both facts come from the splitter's
+/// own [`Invocation`] -- `redirected` and [`Position::AfterAssignment`] -- so
+/// no caller scans the command for them (FR-CMD-017). The deny keeps the
+/// part's `deciding` and `verb`; any other outcome is returned unchanged.
+pub fn refuse_rewrite_dropping_shell_words(
+    part: PartOutcome,
+    invocation: &Invocation,
+) -> PartOutcome {
+    let Decision::Rewrite { target, .. } = &part.decision else {
+        return part;
+    };
+    let assigned = invocation.position == Position::AfterAssignment;
+    let dropped = match (invocation.redirected, assigned) {
+        (true, true) => "its redirect and environment-assignment prefix",
+        (true, false) => "its redirect",
+        (false, true) => "its environment-assignment prefix",
+        (false, false) => return part,
+    };
+    let rule = match &part.deciding {
+        Deciding::Rule { id, .. } => format!("rule '{id}'"),
+        _ => "a rewrite rule".to_string(),
+    };
+    let decision = deny(
+        format!(
+            "{rule} rewrites this command to `{}`, and {dropped} would have been dropped, \
+             so it is not rewritten",
+            target.as_str()
+        ),
+        format!(
+            "run `{}` without the redirect or assignment",
+            target.as_str()
+        ),
+    );
+    PartOutcome { decision, ..part }
 }
 
 /// A [`PartOutcome`] naming `rule` as the deciding entry, with the operator

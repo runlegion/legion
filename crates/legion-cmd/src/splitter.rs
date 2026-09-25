@@ -97,6 +97,11 @@ pub struct Invocation {
     pub position: Position,
     /// 0 at the top of the text being split; never above [`MAX_DEPTH`].
     pub depth: u8,
+    /// True when the command carries a redirect of its own, in its prefix or
+    /// its suffix (`> out.txt`, `2>/dev/null`, `>&2`, `<<< x`). The redirect
+    /// words are never in `args`, so this is the one place a caller learns the
+    /// command was redirected.
+    pub redirected: bool,
 }
 
 /// Why a region was not reduced to a command (FR-CMD-007). Closed set.
@@ -656,6 +661,12 @@ fn walk_simple_command(
             walk_prefix_or_suffix_item(text, item, depth, scan);
         }
     }
+    let redirected = simple
+        .prefix
+        .iter()
+        .flat_map(|prefix| &prefix.0)
+        .chain(simple.suffix.iter().flat_map(|suffix| &suffix.0))
+        .any(|item| matches!(item, CommandPrefixOrSuffixItem::IoRedirect(_)));
 
     let position = if has_assignment {
         Position::AfterAssignment
@@ -703,6 +714,7 @@ fn walk_simple_command(
                     args,
                     position,
                     depth,
+                    redirected,
                 });
             }
         }
@@ -1337,6 +1349,27 @@ mod tests {
         let scan = scan("cat x | FOO=1 grep y").expect("parses");
         assert_eq!(positions(&scan, "grep"), vec![Position::AfterAssignment]);
         assert_eq!(positions(&scan, "cat"), vec![Position::First]);
+    }
+
+    #[test]
+    fn a_redirect_in_the_prefix_or_suffix_marks_its_own_command_redirected() {
+        for command in [
+            "gh pr list > out.txt",
+            "gh pr list 2>/dev/null",
+            "gh pr list >&2",
+            "gh pr list <<< x",
+            ">out.txt gh pr list",
+        ] {
+            let scan = scan(command).expect("parses");
+            assert!(scan.invocations[0].redirected, "`{command}`");
+            assert_eq!(scan.invocations[0].args, vec!["pr", "list"], "`{command}`");
+        }
+        let scan = scan("gh pr list | tee out.txt > /dev/null").expect("parses");
+        assert!(
+            !scan.invocations[0].redirected,
+            "gh has no redirect of its own"
+        );
+        assert!(scan.invocations[1].redirected, "tee carries the redirect");
     }
 
     #[test]
