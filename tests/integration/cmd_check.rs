@@ -1,6 +1,12 @@
-//! `legion cmd-check --hook` through the real binary (#1229): one payload on
-//! stdin, one hook response on stdout, exit 0 every time, and never an allow
-//! on an adapter failure.
+//! `legion cmd-check` through the real binary, both modes.
+//!
+//! - Hook mode, `--hook` (#1229): one payload on stdin, one hook response on
+//!   stdout, exit 0 every time, and never an allow on an adapter failure.
+//! - Operator mode (#1230): `-- '<command>'` or `--tool T --input <JSON>`
+//!   reports route's decision without running the command. Every decision
+//!   exits 0, deny included. A usage error (more than one word after `--`,
+//!   invalid `--input`, an unknown `--tool`, no command) prints a `[legion]`
+//!   error, exits 2, and routes nothing.
 
 use crate::common::{legion_cmd, run_with_stdin};
 use serde_json::Value;
@@ -303,4 +309,13 @@ fn cmd_check_help_describes_both_modes_and_that_the_command_is_not_run() {
     assert!(help.contains("Hook mode"), "{help}");
     assert!(help.contains("--input"), "{help}");
     assert!(help.contains("--policy"), "{help}");
+    // The one-argument rule: the usage line names a single <COMMAND>, and
+    // nothing in the help renders the positional as variadic.
+    let usage = help
+        .lines()
+        .find(|line| line.starts_with("Usage:"))
+        .expect("a usage line");
+    assert_eq!(usage, "Usage: legion cmd-check [OPTIONS] [-- <COMMAND>]");
+    assert!(!help.contains("COMMAND>..."), "{help}");
+    assert!(!help.contains("[COMMAND]..."), "{help}");
 }

@@ -1208,6 +1208,7 @@ pub(crate) enum Commands {
     /// Hook mode (#1229): `--hook` reads one PreToolUse hook payload (JSON)
     /// on stdin and writes one hook response (JSON) on stdout, always
     /// exiting 0. It does not run the command either; the harness does.
+    #[command(override_usage = "legion cmd-check [OPTIONS] [-- <COMMAND>]")]
     CmdCheck {
         /// Hook mode: read one PreToolUse hook payload (JSON) on stdin and
         /// write one hook response (JSON) on stdout. Always exits 0 with a
@@ -1240,7 +1241,13 @@ pub(crate) enum Commands {
 
         /// The command to check, after `--`, as one quoted argument used
         /// verbatim. More than one word is a usage error. It is never run.
-        #[arg(last = true, value_name = "COMMAND")]
+        ///
+        /// Collected as a Vec so more than one word reaches the handler's
+        /// `[legion] error:` usage check (exit 2) instead of clap's own
+        /// error. It is hidden from the argument list because clap would
+        /// render a Vec as variadic (`[COMMAND]...`); the usage line and the
+        /// about text above describe the single argument instead.
+        #[arg(last = true, value_name = "COMMAND", hide = true)]
         command: Vec<String>,
     },
 }
