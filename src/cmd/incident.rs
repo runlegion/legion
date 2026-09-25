@@ -57,6 +57,10 @@ pub(crate) fn agent_for(repo: &str) -> String {
 /// the operator reads (FR-CMD-027).
 pub(crate) const NOTICE_RECIPIENT: &str = "legion";
 
+/// The notice's fixed sender: the component raising it. Never equal to
+/// [`NOTICE_RECIPIENT`], so no notice is self-addressed.
+pub(crate) const NOTICE_SENDER: &str = "legion-cmd";
+
 /// The notice's verb: informational, so it delivers without waking anyone.
 const NOTICE_VERB: &str = "info";
 
@@ -91,31 +95,30 @@ pub(crate) fn notice_text(record: &CmdIncidentRecord) -> error::Result<String> {
 }
 
 /// Sends a first no-go hit's operator notice as a directed legion signal,
-/// through the same in-process post the `legion signal` command uses, from
-/// the repo the command was issued in. A notice from the recipient's own
-/// repo is refused as self-addressed, as `legion signal` refuses it: such a
-/// signal is never delivered.
+/// through the same in-process post the `legion signal` command uses. The
+/// sender is always [`NOTICE_SENDER`], never the session's repo: a hit in the
+/// operator's own `legion` sessions would otherwise address its sender, which
+/// is never delivered. The repo stays in the details.
 pub(crate) fn send_notice(record: &CmdIncidentRecord) -> error::Result<()> {
-    if record.repo.is_empty() {
-        return Err(error::LegionError::Telemetry(
-            "no repo to send the operator notice from".to_string(),
-        ));
-    }
-    if crate::signal::is_self_address(std::slice::from_ref(&record.repo), NOTICE_RECIPIENT) {
-        return Err(error::LegionError::SignalSelfAddressed {
-            repo: record.repo.clone(),
-        });
-    }
-    let text = notice_text(record)?;
     let (db, index) = crate::cli::util::open_db_and_index()?;
+    post_notice(&db, &index, record)?;
+    Ok(())
+}
+
+/// Posts the notice to the board of `db` and `index`; returns the post id.
+fn post_notice(
+    db: &crate::db::Database,
+    index: &crate::search::SearchIndex,
+    record: &CmdIncidentRecord,
+) -> error::Result<String> {
+    let text = notice_text(record)?;
     crate::board::post_from_text_with_meta(
-        &db,
-        &index,
-        &record.repo,
+        db,
+        index,
+        NOTICE_SENDER,
         &text,
         &crate::db::ReflectionMeta::default(),
-    )?;
-    Ok(())
+    )
 }
 
 /// The incident log: one JSONL file in legion's telemetry directory.
@@ -419,15 +422,43 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_from_the_recipients_own_repo_is_refused_as_self_addressed() {
+    fn a_hit_from_the_legion_repo_produces_a_sendable_notice() {
+        // The operator's own sessions run in the `legion` repo. The notice is
+        // sent as `legion-cmd`, so it never addresses its own sender, and the
+        // repo still travels in the details.
         let (log, _dir) = log();
         let record = log
             .record_no_go(&origin("s1"), "fork-bomb", None, Utc::now(), &|_| Ok(()))
             .expect("record");
-        assert!(matches!(
-            send_notice(&record),
-            Err(error::LegionError::SignalSelfAddressed { .. })
+        assert_eq!(record.repo, NOTICE_RECIPIENT);
+        assert!(!crate::signal::is_self_address(
+            &[NOTICE_SENDER.to_string()],
+            NOTICE_RECIPIENT
         ));
+        let text = notice_text(&record).expect("composes");
+        let parsed = crate::signal::parse_signal(&text).expect("a signal");
+        assert_eq!(parsed.recipient, NOTICE_RECIPIENT);
+        assert_eq!(
+            parsed.details.get("repo").map(String::as_str),
+            Some("legion")
+        );
+    }
+
+    #[test]
+    fn a_notice_is_posted_as_legion_cmd_to_legion() {
+        // The real send path against a temporary data dir: the post lands on
+        // the board authored by `legion-cmd`, addressed to `legion`.
+        let data = tempfile::tempdir().expect("tempdir");
+        let db = crate::db::Database::open(&data.path().join("legion.db")).expect("db");
+        let index = crate::search::SearchIndex::open(&data.path().join("index")).expect("index");
+        let (log, _dir) = log();
+        let record = log
+            .record_no_go(&origin("s1"), "fork-bomb", None, Utc::now(), &|_| Ok(()))
+            .expect("record");
+        let id = post_notice(&db, &index, &record).expect("posted");
+        let posted = db.get_reflection_by_id(&id).expect("read").expect("row");
+        assert_eq!(posted.repo, NOTICE_SENDER);
+        assert!(posted.text.starts_with("@legion info"), "{}", posted.text);
     }
 
     #[test]
