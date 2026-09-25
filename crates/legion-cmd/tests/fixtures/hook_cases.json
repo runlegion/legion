@@ -2309,5 +2309,82 @@
     "route": "allow",
     "agrees": true,
     "note": "lsof is not ls: the family key is matched against the whole basename."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-os-scandir-alone",
+    "tool": "Bash",
+    "input": { "command": "python3 -c \"import os; print([e.name for e in os.scandir('.')])\"" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym tree",
+    "note": "the body carries os.scandir and no other declared primitive, so the script-walk-os-scandir sym job decides it. The hook injects a sym tree nudge. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-walkdir-alone",
+    "tool": "Bash",
+    "input": { "command": "python3 -c \"from walkdir import filtered_walk; print(list(filtered_walk('.')))\"" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym tree",
+    "note": "the body carries walkdir and no other declared primitive (no os.walk), so the script-walk-walkdir sym job decides it. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-pathlib-glob-alone",
+    "tool": "Bash",
+    "input": { "command": "python3 -c \"from pathlib import Path; print(list(Path('src').glob('*.rs')))\"" },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-file",
+    "note": "a pathlib Path(...).glob(...) carries .glob( but not the literal glob.glob and not .rglob(, so the script-glob-path-glob sym job decides it. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-land-work-chain",
+    "tool": "Bash",
+    "input": { "command": "git add -A && git commit -m fix && git push" },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion commit",
+    "note": "#886, the land-work chain from test-no-git-commit.sh: the hook denies a commit anywhere in a composed command. Two parts rewrite here (commit to legion commit, push to legion push) and `git add` allows. The fold ties the two rewrites at the same rank and keeps the first in evaluation order, the commit. The adapter would replace the whole chain with the commit target, dropping both `git add -A` and the push. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-unrecognized-flag",
+    "tool": "Bash",
+    "input": { "command": "git push --dry-run" },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion push",
+    "note": "the hook treats any flag it does not name as benign and rewrites, dropping --dry-run, so a dry run becomes a real push. The rule does not declare --dry-run, so route denies, naming the argument and legion push. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-unrecognized-flag",
+    "tool": "Bash",
+    "input": { "command": "git commit --dry-run -m fix" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit",
+    "note": "an undeclared flag makes the rewrite ineligible, and the default fallback denies naming the argument and the target. The hook denies it as an unrecognized flag."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-checks-unrecognized-flag",
+    "tool": "Bash",
+    "input": { "command": "gh pr checks 42 --interval 5" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr checks",
+    "note": "--interval is not declared translatable, so route denies naming the argument and the target."
   }
 ]
