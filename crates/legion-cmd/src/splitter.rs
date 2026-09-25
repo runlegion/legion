@@ -97,6 +97,18 @@ pub struct Invocation {
     pub position: Position,
     /// 0 at the top of the text being split; never above [`MAX_DEPTH`].
     pub depth: u8,
+    /// True when a redirect applies to the command: one in its own prefix or
+    /// suffix (`> out.txt`, `2>/dev/null`, `>&2`, `<<< x`), or one on an
+    /// enclosing subshell or group (`(cmd) > out.txt`, `{ cmd; } 2>/dev/null`).
+    /// The redirect words are never in `args`, so this is the one place a
+    /// caller learns the command was redirected. The router also sets it on a
+    /// command it re-enters from a redirected wrapper or interpreter.
+    pub redirected: bool,
+    /// True when an environment assignment applies to the command: one in its
+    /// own prefix (`FOO=1 cmd`, the case [`Position::AfterAssignment`] names),
+    /// or, set by the router, one on a wrapper or interpreter it re-entered
+    /// the command from (`FOO=1 env cmd`).
+    pub assigned: bool,
 }
 
 /// Why a region was not reduced to a command (FR-CMD-007). Closed set.
@@ -137,6 +149,10 @@ pub struct Unreduced {
 pub struct Scan {
     pub invocations: Vec<Invocation>,
     pub unreduced: Vec<Unreduced>,
+    /// True only when the parse is structurally exactly one simple command
+    /// with a command word and no substitution anywhere in it. See
+    /// [`is_one_simple_command`].
+    pub single_simple: bool,
 }
 
 /// Errors raised when `scan`'s own top-level parse of the given command
@@ -264,13 +280,114 @@ fn scan_tagged(command: &str, depth: u8, tag: Tag) -> Result<Scan, ScanError> {
             seen_first = true;
         }
     }
+    scan.single_simple = is_one_simple_command(&program, depth);
     Ok(scan)
+}
+
+/// True when `program` is exactly one simple command that names a command
+/// word: one complete command holding one list item, run synchronously, with
+/// no `&&`/`||`, one pipeline stage, no `!` negation, and no `time`, and whose
+/// every word and redirect is plain (see [`is_plain_item`]). A pipe, a list
+/// operator, `&`, a subshell, a brace group, `[[ ]]`, `(( ))`, a function
+/// definition, a line with no command word (`X=1`, `> out.txt`), and any
+/// command or process substitution anywhere in the command all fail it. This
+/// is the shape a rewrite can replace without dropping anything else the line
+/// runs (FR-CMD-008). It is decided from the parse tree alone, never from
+/// what the walk happened to record.
+fn is_one_simple_command(program: &ast::Program, depth: u8) -> bool {
+    let [list] = program.complete_commands.as_slice() else {
+        return false;
+    };
+    let [ast::CompoundListItem(and_or, separator)] = list.0.as_slice() else {
+        return false;
+    };
+    if !matches!(separator, ast::SeparatorOperator::Sequence) || !and_or.additional.is_empty() {
+        return false;
+    }
+    let pipeline = &and_or.first;
+    if pipeline.bang || pipeline.timed.is_some() {
+        return false;
+    }
+    let [Command::Simple(simple)] = pipeline.seq.as_slice() else {
+        return false;
+    };
+    let Some(command_word) = &simple.word_or_name else {
+        return false;
+    };
+    let items = simple
+        .prefix
+        .iter()
+        .flat_map(|prefix| &prefix.0)
+        .chain(simple.suffix.iter().flat_map(|suffix| &suffix.0));
+    is_plain_word(command_word, depth) && items.into_iter().all(|item| is_plain_item(item, depth))
+}
+
+/// An allow-list over one prefix or suffix item: a word or assignment whose
+/// word is plain, or a file, fd-duplicate, here-string or `&>` redirect whose
+/// target word is plain. A process substitution, whether an argument or a
+/// redirect target, and a here-document (whose body may expand) are not.
+fn is_plain_item(item: &CommandPrefixOrSuffixItem, depth: u8) -> bool {
+    match item {
+        CommandPrefixOrSuffixItem::Word(word)
+        | CommandPrefixOrSuffixItem::AssignmentWord(_, word) => is_plain_word(word, depth),
+        CommandPrefixOrSuffixItem::ProcessSubstitution(..) => false,
+        CommandPrefixOrSuffixItem::IoRedirect(redirect) => match redirect {
+            IoRedirect::File(_, _, target) => match target {
+                IoFileRedirectTarget::Filename(word) | IoFileRedirectTarget::Duplicate(word) => {
+                    is_plain_word(word, depth)
+                }
+                IoFileRedirectTarget::Fd(_) => true,
+                IoFileRedirectTarget::ProcessSubstitution(..) => false,
+            },
+            IoRedirect::HereString(_, word) | IoRedirect::OutputAndError(word, _) => {
+                is_plain_word(word, depth)
+            }
+            IoRedirect::HereDocument(..) => false,
+        },
+    }
+}
+
+/// An allow-list over a word's pieces: literal text, quoting, escapes, a tilde,
+/// and a bare parameter reference (`$X`, `${X}`, `$1`, `$@`). A command
+/// substitution (`$(...)` or backquotes), an arithmetic expansion, and every
+/// parameter expansion that carries embedded shell text (a default value, a
+/// pattern, an array subscript) or is indirect (`${!x}`) are not, since each
+/// can run a command.
+fn is_plain_word(word: &ast::Word, depth: u8) -> bool {
+    parse_word_pieces(&word.value, depth)
+        .is_ok_and(|pieces| pieces.iter().all(|piece| is_plain_piece(&piece.piece)))
+}
+
+fn is_plain_piece(piece: &WordPiece) -> bool {
+    match piece {
+        WordPiece::Text(_)
+        | WordPiece::SingleQuotedText(_)
+        | WordPiece::AnsiCQuotedText(_)
+        | WordPiece::EscapeSequence(_)
+        | WordPiece::TildeExpansion(_) => true,
+        WordPiece::DoubleQuotedSequence(pieces)
+        | WordPiece::GettextDoubleQuotedSequence(pieces) => {
+            pieces.iter().all(|p| is_plain_piece(&p.piece))
+        }
+        // An indirect reference (`${!x}`) dereferences the runtime value as
+        // parameter syntax, whose subscript can run a command substitution, so
+        // it is never plain -- the same as a literal subscript.
+        WordPiece::ParameterExpansion(word::ParameterExpr::Parameter {
+            parameter,
+            indirect,
+        }) => !indirect && !matches!(parameter, word::Parameter::NamedWithIndex { .. }),
+        WordPiece::ParameterExpansion(_)
+        | WordPiece::CommandSubstitution(_)
+        | WordPiece::BackquotedCommandSubstitution(_)
+        | WordPiece::ArithmeticExpression(_) => false,
+    }
 }
 
 fn too_deep(text: &str, depth: u8) -> Scan {
     Scan {
         invocations: Vec::new(),
         unreduced: vec![too_deep_unreduced(text, depth)],
+        single_simple: false,
     }
 }
 
@@ -601,8 +718,10 @@ fn walk_command(
             walk_simple_command(text, simple, depth, tag, seq_position, scan)
         }
         Command::Compound(compound, redirects) => {
+            let first_inner = scan.invocations.len();
             walk_compound_command_tagged(text, compound, depth, tag, seq_position, scan);
             if let Some(redirects) = redirects {
+                mark_redirected(&mut scan.invocations[first_inner..]);
                 walk_redirect_list(text, redirects, depth, scan);
             }
         }
@@ -656,6 +775,12 @@ fn walk_simple_command(
             walk_prefix_or_suffix_item(text, item, depth, scan);
         }
     }
+    let redirected = simple
+        .prefix
+        .iter()
+        .flat_map(|prefix| &prefix.0)
+        .chain(simple.suffix.iter().flat_map(|suffix| &suffix.0))
+        .any(|item| matches!(item, CommandPrefixOrSuffixItem::IoRedirect(_)));
 
     let position = if has_assignment {
         Position::AfterAssignment
@@ -703,6 +828,8 @@ fn walk_simple_command(
                     args,
                     position,
                     depth,
+                    redirected,
+                    assigned: has_assignment,
                 });
             }
         }
@@ -1124,6 +1251,7 @@ fn walk_process_substitution(text: &str, subshell: &SubshellCommand, depth: u8, 
 }
 
 fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mut Scan) {
+    let first_inner = scan.invocations.len();
     walk_compound_command_tagged(
         text,
         &body.0,
@@ -1133,7 +1261,18 @@ fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mu
         scan,
     );
     if let Some(redirects) = &body.1 {
+        // `f() { cmd; } > out.txt` redirects every call of `f`, so each
+        // command in the body is marked the same as in a redirected group.
+        mark_redirected(&mut scan.invocations[first_inner..]);
         walk_redirect_list(text, redirects, depth, scan);
+    }
+}
+
+/// Marks every invocation walked inside a compound command or function body
+/// that carries a redirect: the redirect applies to each command inside it.
+fn mark_redirected(inner: &mut [Invocation]) {
+    for invocation in inner {
+        invocation.redirected = true;
     }
 }
 
@@ -1337,6 +1476,42 @@ mod tests {
         let scan = scan("cat x | FOO=1 grep y").expect("parses");
         assert_eq!(positions(&scan, "grep"), vec![Position::AfterAssignment]);
         assert_eq!(positions(&scan, "cat"), vec![Position::First]);
+    }
+
+    #[test]
+    fn a_redirect_on_the_command_or_its_enclosing_group_marks_it_redirected() {
+        for command in [
+            "gh pr list > out.txt",
+            "gh pr list 2>/dev/null",
+            "gh pr list >&2",
+            "gh pr list <<< x",
+            ">out.txt gh pr list",
+        ] {
+            let scan = scan(command).expect("parses");
+            assert!(scan.invocations[0].redirected, "`{command}`");
+            assert_eq!(scan.invocations[0].args, vec!["pr", "list"], "`{command}`");
+        }
+        for command in [
+            "gh pr list <<EOF\nx\nEOF",
+            "gh pr list 3>&1",
+            "(gh pr list) > out.txt",
+            "{ gh pr list; } 2>/dev/null",
+            "( { gh pr list; } ) > out.txt",
+            "f() { gh pr list; } > out.txt",
+        ] {
+            let scan = scan(command).expect("parses");
+            assert!(scan.invocations[0].redirected, "`{command}`");
+        }
+        // A redirect on a group wrapping a pipeline applies to every stage.
+        let grouped = scan("{ gh pr list | head; } > out.txt").expect("parses");
+        assert_eq!(grouped.invocations.len(), 2);
+        assert!(grouped.invocations.iter().all(|i| i.redirected));
+        let scan = scan("gh pr list | tee out.txt > /dev/null").expect("parses");
+        assert!(
+            !scan.invocations[0].redirected,
+            "gh has no redirect of its own"
+        );
+        assert!(scan.invocations[1].redirected, "tee carries the redirect");
     }
 
     #[test]
@@ -1973,6 +2148,50 @@ mod tests {
             }
             let text = String::from_utf8_lossy(&bytes).to_string();
             let _ = scan(&text);
+        }
+    }
+
+    #[test]
+    fn single_simple_is_true_only_for_exactly_one_simple_command() {
+        for text in [
+            "git push",
+            "git push origin main",
+            "FOO=1 git push",
+            "git push origin \"$BRANCH\"",
+            "git push origin ${x}",
+            "git push > out.txt",
+        ] {
+            assert!(scan(text).expect("parses").single_simple, "`{text}`");
+        }
+        for text in [
+            "git push | head",
+            "git push && echo done",
+            "git push; echo done",
+            "git push &",
+            "! git push",
+            "time git push",
+            "(git push)",
+            "{ git push; }",
+            "[[ -f x ]]",
+            "(( 0 ))",
+            "X=1",
+            "> out.txt",
+            "",
+            "git push $(echo main)",
+            "git push `echo main`",
+            "git push \"$(echo main)\"",
+            "git push ${X:-$(echo main)}",
+            "echo ${!x}",
+            "${!x} foo",
+            "git push $((1 + 2))",
+            "FOO=$(> out.txt) git push",
+            "git push > \"$(> out.txt)\"",
+            "git push <<< \"$(> out.txt)\"",
+            "git push > >(> out.txt)",
+            "git push <(echo x)",
+            "f() { git push; }",
+        ] {
+            assert!(!scan(text).expect("parses").single_simple, "`{text}`");
         }
     }
 }
