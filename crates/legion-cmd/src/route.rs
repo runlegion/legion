@@ -68,11 +68,10 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 
     let mut parts: Vec<PartOutcome> = Vec::new();
     for invocation in &expanded.invocations {
-        parts.push(evaluate::decide_bash_invocation(
-            policy,
-            &invocation.binary,
-            &invocation.args,
-            ctx,
+        let part =
+            evaluate::decide_bash_invocation(policy, &invocation.binary, &invocation.args, ctx);
+        parts.push(evaluate::refuse_rewrite_dropping_shell_words(
+            part, invocation,
         ));
     }
     for region in &expanded.regions {
@@ -165,6 +164,7 @@ fn expand(
 
 fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
     let next_depth = invocation.depth.saturating_add(1);
+    let first_inner = out.invocations.len();
 
     if let Some(wrapper) = policy.matching_wrapper(&invocation.binary, &invocation.args) {
         let skip = usize::from(wrapper.required_subcommand.is_some());
@@ -180,6 +180,7 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
                 .collect::<Vec<_>>()
                 .join(" ");
             reenter_text(policy, &text, next_depth, out);
+            inherit_shell_words(&invocation, &mut out.invocations[first_inner..]);
         }
         return;
     }
@@ -199,6 +200,7 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
         match interpreter.body {
             BodyLanguage::Shell => {
                 reenter_text(policy, body, next_depth, out);
+                inherit_shell_words(&invocation, &mut out.invocations[first_inner..]);
             }
             BodyLanguage::Foreign => {
                 out.regions.push(Unreduced {
@@ -223,6 +225,17 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
     }
 
     out.invocations.push(invocation);
+}
+
+/// Marks every invocation re-entered from `outer` with the redirect and the
+/// assignment prefix `outer` carries: `env gh pr list > out.txt` redirects the
+/// command `env` runs, and `FOO=1 env gh pr list` hands it `FOO`. Each
+/// invocation keeps whatever it already carries of its own.
+fn inherit_shell_words(outer: &Invocation, inner: &mut [Invocation]) {
+    for invocation in inner {
+        invocation.redirected |= outer.redirected;
+        invocation.assigned |= outer.assigned;
+    }
 }
 
 /// Re-enters `text` as a shell command. A payload the splitter rejects is
@@ -598,6 +611,83 @@ mod tests {
         );
     }
 
+    /// A rewrite rule for `gh pr list` whose target carries no arguments, so
+    /// the bare command is lossless and reaches the rewrite, with `env` as a
+    /// wrapper and `sh -c` as a shell interpreter to re-enter it through.
+    fn gh_pr_list_policy() -> Policy {
+        policy(
+            r#"{"wrappers": [{"binary": "env"}],
+            "interpreters": [{"binary": "sh", "flag": "-c", "body": "shell"}],
+            "tools": {"Bash": {"families": {
+                "gh pr list": {"rules": [
+                    {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
+                     "reason": "legion tracks PRs", "translatable": {}}}
+                ]}
+            }}}}"#,
+        )
+    }
+
+    #[test]
+    fn a_rewrite_without_a_redirect_or_assignment_routes_as_its_rule_says() {
+        for command in ["gh pr list", "env gh pr list", "sh -c 'gh pr list'"] {
+            let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
+            match routed.decision {
+                Decision::Rewrite { target, .. } => {
+                    assert_eq!(target.as_str(), "legion pr list", "`{command}`")
+                }
+                other => panic!("`{command}`: expected rewrite, got {other:?}"),
+            }
+        }
+    }
+
+    /// FR-CMD-008: a rewrite replaces the whole command, so a redirect or an
+    /// environment-assignment prefix would be silently dropped. The command is
+    /// refused instead, naming the rule and what would have been lost.
+    #[test]
+    fn a_rewrite_carrying_a_redirect_or_assignment_prefix_is_refused() {
+        for (command, dropped) in [
+            ("gh pr list > out.txt", "redirect"),
+            ("gh pr list 2>/dev/null", "redirect"),
+            ("gh pr list >&2", "redirect"),
+            ("GIT_TRACE=1 gh pr list", "environment-assignment prefix"),
+            // On an enclosing wrapper, interpreter, subshell or group: the
+            // redirect or assignment applies to the command inside it.
+            ("env gh pr list > out.txt", "redirect"),
+            ("FOO=1 env gh pr list", "environment-assignment prefix"),
+            ("env FOO=1 gh pr list", "environment-assignment prefix"),
+            ("sh -c 'gh pr list' > out.txt", "redirect"),
+            ("(gh pr list) > out.txt", "redirect"),
+            ("{ gh pr list; } 2>/dev/null", "redirect"),
+            ("gh pr list <<EOF\nx\nEOF", "redirect"),
+            ("gh pr list 3>&1", "redirect"),
+            ("FOO=1 sh -c 'gh pr list'", "environment-assignment prefix"),
+            ("( { gh pr list; } ) > out.txt", "redirect"),
+            ("{ gh pr list | head; } > out.txt", "redirect"),
+            ("f() { gh pr list; } > out.txt", "redirect"),
+        ] {
+            let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
+            match &routed.decision {
+                Decision::Deny(details) => {
+                    let reason = details.reason();
+                    assert!(reason.contains("rule 'pr-list'"), "`{command}`: {reason}");
+                    assert!(
+                        reason.contains(&format!("{dropped} would have been dropped")),
+                        "`{command}`: {reason}"
+                    );
+                }
+                other => panic!("`{command}` must be refused, got {other:?}"),
+            }
+            assert_eq!(
+                routed.deciding,
+                Deciding::Rule {
+                    id: "pr-list".to_string(),
+                    needs_operator: false
+                },
+                "`{command}`"
+            );
+        }
+    }
+
     #[test]
     fn a_malformed_wrapper_payload_proxies_opaque_not_ask() {
         // The outer command parses; the sh -c body does not. That nested
@@ -692,6 +782,10 @@ mod tests {
                 "gh pr list": {"rules": [
                     {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
                      "reason": "legion tracks PRs", "translatable": {}}}
+                ]},
+                "gh issue view": {"rules": [
+                    {"id": "issue-view", "outcome": {"kind": "rewrite", "target": "legion issue view",
+                     "reason": "legion tracks issues", "translatable": {"operands": ["any"]}}}
                 ]}
             }}}}"#,
         )
@@ -785,12 +879,13 @@ mod tests {
             ("(( 0 )) && gh pr list", "pr-list"),
             ("(X=1) || gh pr list", "pr-list"),
             ("{ X=1; } || gh pr list", "pr-list"),
-            // A substitution anywhere in the one command runs something the
-            // rewrite would drop -- here, truncating out.txt.
-            ("FOO=$(> out.txt) gh pr list", "pr-list"),
-            ("gh pr list > \"$(> out.txt)\"", "pr-list"),
-            ("gh pr list <<< \"$(> out.txt)\"", "pr-list"),
-            ("gh pr list > >(> out.txt)", "pr-list"),
+            // A substitution in an operand the rule translates runs something
+            // the rewrite would drop -- here, truncating out.txt. Only the
+            // compound rule catches these: no redirect, no assignment prefix.
+            ("gh issue view \"$(> out.txt)\"", "issue-view"),
+            ("gh issue view `> out.txt`", "issue-view"),
+            ("gh issue view <(> out.txt)", "issue-view"),
+            ("gh issue view ${!x}", "issue-view"),
         ] {
             let routed = route_rewrite_policy(command);
             match &routed.decision {
@@ -816,6 +911,29 @@ mod tests {
                 },
                 "`{command}`"
             );
+        }
+    }
+
+    /// A substitution carried by a redirect or an assignment prefix is refused
+    /// by the redirect/assignment rule (#1281) before the compound rule sees
+    /// it; either refusal names the rule, and the command is never rewritten.
+    #[test]
+    fn a_substitution_in_a_redirect_or_assignment_is_refused_either_way() {
+        for command in [
+            "FOO=$(> out.txt) gh pr list",
+            "gh pr list > \"$(> out.txt)\"",
+            "gh pr list <<< \"$(> out.txt)\"",
+            "gh pr list > >(> out.txt)",
+        ] {
+            let routed = route_rewrite_policy(command);
+            match &routed.decision {
+                Decision::Deny(details) => assert!(
+                    details.reason().contains("rule 'pr-list'"),
+                    "`{command}`: {}",
+                    details.reason()
+                ),
+                other => panic!("`{command}` must be refused, got {other:?}"),
+            }
         }
     }
 
