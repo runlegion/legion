@@ -11,6 +11,8 @@
 use crate::common::{legion_cmd, run_ok, run_with_stdin};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// The policy file the plugin ships, read from the source tree so the
 /// artifact the cutover will install is the one exercised here.
@@ -439,4 +441,271 @@ fn concurrent_hook_processes_on_a_fresh_store_each_record_their_prediction() {
             rows.len()
         );
     }
+}
+
+// -- the response is never held by the store (#1288) --------------------------
+
+/// A rewrite payload: the shipped policy rewrites an Explore spawn, which
+/// needs no lookup, so the store is touched only by the prediction.
+fn explore_rewrite_payload(tool_use_id: &str) -> Vec<u8> {
+    serde_json::json!({
+        "tool_name": "Agent",
+        "tool_input": {"subagent_type": "Explore", "prompt": "map the router"},
+        "session_id": "s1",
+        "cwd": "/tmp/legion-test",
+        "tool_use_id": tool_use_id
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// The shipped policy with `route.deadline_ms` set to `deadline_ms`, written
+/// into `dir`; returns its path.
+fn shipped_policy_with_deadline(dir: &std::path::Path, deadline_ms: u64) -> PathBuf {
+    let text = std::fs::read_to_string(shipped_policy_path()).expect("shipped policy");
+    let mut policy: Value = serde_json::from_str(&text).expect("shipped policy is JSON");
+    policy["route"]["deadline_ms"] = Value::from(deadline_ms);
+    let path = dir.join("policy.json");
+    std::fs::write(&path, policy.to_string()).expect("policy written");
+    path
+}
+
+/// The store file under a data dir.
+fn store_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("legion.db")
+}
+
+/// How long a hook run took to put its response on stdout, and to exit.
+struct TimedHook {
+    response: Value,
+    first_line: Duration,
+    exited: Duration,
+    stderr: String,
+}
+
+/// Runs `cmd-check --hook` and times the first stdout line separately from
+/// the exit, which `run_with_stdin` cannot: it waits for the exit.
+fn timed_hook(
+    data_dir: &std::path::Path,
+    state: &std::path::Path,
+    policy: &std::path::Path,
+    input: &[u8],
+) -> TimedHook {
+    use std::io::{BufRead, Read, Write};
+    use std::process::Stdio;
+    let mut child = legion_cmd(data_dir)
+        .args(["cmd-check", "--hook"])
+        .env("LEGION_CMD_POLICY", policy)
+        .env("XDG_STATE_HOME", state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("legion spawns");
+    let started = Instant::now();
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("payload written");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("a response line");
+    let first_line: Duration = started.elapsed();
+    let status = child.wait().expect("the hook exits");
+    let exited: Duration = started.elapsed();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("piped stderr")
+        .read_to_string(&mut stderr)
+        .expect("stderr read");
+    assert!(status.success(), "the hook must exit 0\nstderr:\n{stderr}");
+    let mut response: Value = serde_json::from_str(line.trim())
+        .unwrap_or_else(|e| panic!("valid JSON response ({e}): {line:?}\nstderr:\n{stderr}"));
+    TimedHook {
+        response: response["hookSpecificOutput"].take(),
+        first_line,
+        exited,
+        stderr,
+    }
+}
+
+/// Runs the binary once before a timed run, so the timing measures the
+/// adapter and not the platform's first launch of a freshly built binary
+/// (seen at 1.5 s before `main` on macOS).
+fn warm_binary() {
+    run_ok(Command::new(env!("CARGO_BIN_EXE_legion")).arg("--version"));
+}
+
+/// The `legion.cmd` predictions recorded in `data_dir`'s store.
+fn cmd_predictions(data_dir: &std::path::Path, state: &std::path::Path) -> Vec<Value> {
+    let listed = run_ok(
+        legion_cmd(data_dir)
+            .args([
+                "uncertainty",
+                "predictions",
+                "--surface",
+                "legion.cmd",
+                "--json",
+            ])
+            .env("XDG_STATE_HOME", state),
+    );
+    serde_json::from_str(listed.trim()).expect("predictions JSON")
+}
+
+#[test]
+fn a_held_store_write_lock_never_delays_the_flushed_response() {
+    // #1288: another connection holds the store's write lock, so the
+    // prediction's insert waits out the store's 2 s busy timeout. The
+    // response must already be on stdout by then: it is written and flushed
+    // before the prediction is.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("state tempdir");
+    // A stamped store: opening it takes no write lock, so the only write the
+    // held lock can block is the prediction's.
+    assert!(cmd_predictions(dir.path(), state.path()).is_empty());
+    let lock = rusqlite::Connection::open(store_path(dir.path())).expect("open the store");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("take the write lock");
+
+    let run = timed_hook(
+        dir.path(),
+        state.path(),
+        &shipped_policy_path(),
+        &explore_rewrite_payload("toolu_locked"),
+    );
+    assert_eq!(
+        run.response["permissionDecision"], "allow",
+        "{}",
+        run.stderr
+    );
+    assert!(run.response.get("updatedInput").is_some());
+    // The lock really held the prediction: the process outlived the busy
+    // timeout, and the insert failed on the lock.
+    assert!(
+        run.exited >= Duration::from_millis(1800),
+        "the process exited after {:?}; the held lock did not block the prediction\nstderr:\n{}",
+        run.exited,
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("rewrite prediction failed"),
+        "stderr: {}",
+        run.stderr
+    );
+    // ...and the response did not wait for it.
+    assert!(
+        run.first_line < Duration::from_millis(1000),
+        "the response took {:?}, held by the prediction's write",
+        run.first_line
+    );
+}
+
+#[test]
+fn a_store_open_that_cannot_finish_by_the_deadline_never_holds_the_decision() {
+    // #1288: a fresh, unmigrated store whose write lock another connection
+    // holds; opening it waits on the lock for the store's 2 s busy timeout.
+    // The adapter waits at most the route deadline for the open, then
+    // decides without it: no prediction, no witness pass.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("state tempdir");
+    let policy = shipped_policy_with_deadline(dir.path(), 300);
+    warm_binary();
+    let lock = rusqlite::Connection::open(store_path(dir.path())).expect("create the store");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("take the write lock");
+
+    let run = timed_hook(
+        dir.path(),
+        state.path(),
+        &policy,
+        &explore_rewrite_payload("toolu_unopened"),
+    );
+    assert_eq!(
+        run.response["permissionDecision"], "allow",
+        "{}",
+        run.stderr
+    );
+    assert!(run.response.get("updatedInput").is_some());
+    assert!(
+        run.first_line < Duration::from_millis(1500),
+        "the response took {:?}; the store open held the decision past its deadline\nstderr:\n{}",
+        run.first_line,
+        run.stderr
+    );
+
+    lock.execute_batch("ROLLBACK").expect("release the lock");
+    drop(lock);
+    assert!(
+        cmd_predictions(dir.path(), state.path()).is_empty(),
+        "a call whose store open timed out recorded a prediction"
+    );
+}
+
+#[test]
+fn the_largest_configured_deadline_yields_the_routing_decision() {
+    // #1288: the store open, the witness budget and the decision all run
+    // under `route.deadline_ms`; the largest value the policy accepts is the
+    // rewrite, not a panic deny.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("state tempdir");
+    let policy = shipped_policy_with_deadline(dir.path(), u64::MAX);
+    let run = timed_hook(
+        dir.path(),
+        state.path(),
+        &policy,
+        &explore_rewrite_payload("toolu_extreme"),
+    );
+    assert_eq!(
+        run.response["permissionDecision"], "allow",
+        "{}",
+        run.stderr
+    );
+    assert!(run.response.get("updatedInput").is_some());
+    assert!(!run.stderr.contains("panic"), "stderr: {}", run.stderr);
+}
+
+#[test]
+fn an_unopenable_store_still_applies_the_decision_and_records_no_prediction() {
+    // #1288: LEGION_DATA_DIR names a regular file, so no store can be opened
+    // under it. The rewrite still applies; the prediction is skipped rather
+    // than attempted.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("state tempdir");
+    let not_a_dir = dir.path().join("not-a-dir");
+    std::fs::write(&not_a_dir, "a file, not a data dir").expect("file written");
+
+    let run = timed_hook(
+        &not_a_dir,
+        state.path(),
+        &shipped_policy_path(),
+        &explore_rewrite_payload("toolu_unopenable"),
+    );
+    assert_eq!(
+        run.response["permissionDecision"], "allow",
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        run.response["updatedInput"]["subagent_type"],
+        "legion:legion-explore"
+    );
+    assert!(
+        run.stderr.contains("store open failed"),
+        "stderr: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("rewrite prediction"),
+        "the prediction was attempted without a store\nstderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(&not_a_dir).expect("still a file"),
+        "a file, not a data dir",
+        "the unopenable path was changed"
+    );
 }

@@ -59,15 +59,19 @@
 //! # The rewrite prediction (#1272, FR-CMD-015)
 //!
 //! A rewrite the adapter applies is a prediction that the constructed
-//! command will work: [`respond`] emits one `legion.cmd` prediction for it,
-//! keyed by the call's `tool_use_id` (`crate::cmd::prediction`). Each run
-//! also starts, before its own work, a pass that witnesses this session's
-//! earlier rewrites whose `tool_result` is now in the session transcript. The
-//! pass runs on a worker thread beside the decision: the decision never waits
-//! on it, and after the response it gets only the rest of one
-//! `route.deadline_ms`, then is abandoned. Both run outside the decision,
-//! which reads neither: a failure in either is reported on stderr and never
-//! changes the response.
+//! command will work: the adapter emits one `legion.cmd` prediction for it,
+//! keyed by the call's `tool_use_id` (`crate::cmd::prediction`), after the
+//! response is written and flushed (#1288), so a store write lock never
+//! holds the response. Each run also starts, before its own work, a pass
+//! that witnesses this session's earlier rewrites whose `tool_result` is now
+//! in the session transcript. The pass runs on a worker thread beside the
+//! decision: the decision never waits on it, and after the response it gets
+//! only the rest of one `route.deadline_ms`, then is abandoned. Both run
+//! outside the decision, which reads neither: a failure in either is
+//! reported on stderr and never changes the response. The store both use is
+//! opened before the decision, and that open waits at most one
+//! `route.deadline_ms`; an open that has not finished by then skips both
+//! for the call.
 //!
 //! # The repo
 //!
@@ -208,23 +212,50 @@ pub(crate) enum AdapterError {
 /// a deny body. A failed write to stdout has no recovery in-process;
 /// `plugin/hooks/legion-cmd.sh` treats empty output as a broken adapter and
 /// prints its own static deny.
+///
+/// The rewrite prediction and the witness pass's remaining budget come only
+/// after the response is written and flushed (#1288): both can wait on the
+/// store's write lock, and the response must never wait with them.
 pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     let mut input = String::new();
-    let mut witness: Option<PendingWitness> = None;
+    let mut after: AfterResponse = AfterResponse::default();
     let response: Value = match stdin.read_to_string(&mut input) {
-        Ok(_) => guarded(|| respond(&input, &mut witness)),
+        Ok(_) => guarded(|| respond(&input, &mut after)),
         Err(e) => deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
     let body: String =
         serde_json::to_string(&response).unwrap_or_else(|_| FALLBACK_DENY_JSON.to_string());
     let _ = writeln!(stdout, "{body}");
     let _ = stdout.flush();
-    // The response is out. The witness pass gets whatever is left of the one
-    // deadline it started under, then the process exits and takes it along.
-    if let Some(witness) = witness {
-        witness.wait();
-    }
+    after.finish();
     ExitCode::SUCCESS
+}
+
+/// The work a run leaves for after its response is out: the prediction for
+/// the rewrite it applied, with the store it was opened against, and the
+/// witness pass still running.
+#[derive(Default)]
+struct AfterResponse {
+    prediction: Option<(AppliedRewrite, Database)>,
+    witness: Option<PendingWitness>,
+}
+
+impl AfterResponse {
+    /// Emits the prediction, then gives the witness pass whatever is left
+    /// of the one deadline it started under; the process exits after and
+    /// takes an unfinished pass along. Neither can change the response,
+    /// which is already written.
+    fn finish(self) {
+        if let Some((rewrite, db)) = self.prediction {
+            best_effort("rewrite prediction", || {
+                prediction::emit_rewrite_prediction(&db, &rewrite)?;
+                Ok(())
+            });
+        }
+        if let Some(witness) = self.witness {
+            witness.wait();
+        }
+    }
 }
 
 /// Runs `build` and turns a panic anywhere inside it into a deny, so the
@@ -251,28 +282,28 @@ pub(crate) fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 ///
 /// Beside and after the decision, and never able to change it (#1272): the
 /// pending-witness pass for this session runs concurrently with the decision
-/// ([`respond_beside_witness`]) and is handed back in `witness` for
-/// [`run_hook`] to give the rest of the deadline after the response is
-/// written; the prediction for a rewrite the decision applied is emitted
-/// here. Each runs under [`best_effort`], so a failure or a panic in either
-/// is a line on stderr, not a deny.
+/// ([`respond_beside_witness`]), and the prediction for a rewrite the
+/// decision applied is left, with the store to write it to, in `after` for
+/// [`run_hook`] to finish once the response is written (#1288). Each runs
+/// under [`best_effort`], so a failure or a panic in either is a line on
+/// stderr, not a deny.
 ///
 /// The store is opened once, here, before the pass starts: `Database::open`
 /// runs the migration chain, and two connections migrating a fresh store at
 /// once collide. The emit uses this handle; the pass and the decision's
 /// lookups open their own connections only after it, when migration is done.
-/// A store that cannot be opened skips the pass and the emit.
-fn respond(input: &str, witness: &mut Option<PendingWitness>) -> Value {
-    let mut store: Option<Database> = None;
-    best_effort("store open", || {
-        store = Some(crate::cli::util::open_db()?);
-        Ok(())
-    });
+/// The open waits at most one route deadline ([`open_store_within`]); a
+/// store that cannot be opened in that time skips the pass and the emit.
+fn respond(input: &str, after: &mut AfterResponse) -> Value {
+    let policy_text: Result<String, AdapterError> = read_policy_text(None);
+    let deadline: Duration = deadline_for(&policy_text);
+    let store: Option<Database> = open_store_within(deadline, crate::cli::util::open_db);
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
     let session_input: Option<String> = store.as_ref().map(|_| input.to_string());
     let (applied, pending) = respond_beside_witness(
         input,
-        read_policy_text(None),
+        deadline,
+        policy_text,
         Arc::new(StoreLookups),
         legion_repo,
         move || match session_input {
@@ -280,35 +311,72 @@ fn respond(input: &str, witness: &mut Option<PendingWitness>) -> Value {
             None => Ok(()),
         },
     );
-    *witness = pending;
-    if let (Some(rewrite), Some(db)) = (&applied.rewrite, &store) {
-        best_effort("rewrite prediction", || {
-            prediction::emit_rewrite_prediction(db, rewrite)?;
-            Ok(())
-        });
-    }
+    after.witness = pending;
+    after.prediction = applied.rewrite.zip(store);
     applied.response
+}
+
+/// The route deadline the policy sets: the default when the policy cannot be
+/// read or its settings do not parse, which the decision reports itself.
+/// Bounds the pre-decision store open and the witness pass's budget.
+fn deadline_for(policy_text: &Result<String, AdapterError>) -> Duration {
+    policy_text
+        .as_ref()
+        .ok()
+        .and_then(|text| RouteSettings::from_policy_text(text).ok())
+        .unwrap_or_default()
+        .deadline
+}
+
+/// Runs `open` on its own worker thread and waits at most `deadline` for the
+/// store (#1288). An open that fails, panics, or has not finished in time is
+/// `None`, reported on stderr, and the decision goes ahead without a store.
+/// An open still running at the deadline is left to finish or not: the
+/// process is one-shot, and it ends the thread.
+fn open_store_within(
+    deadline: Duration,
+    open: impl FnOnce() -> error::Result<Database> + Send + 'static,
+) -> Option<Database> {
+    let (tx, rx) = mpsc::channel::<Option<Database>>();
+    let spawned = thread::Builder::new()
+        .name("legion-cmd-store-open".to_string())
+        .spawn(move || {
+            let mut store: Option<Database> = None;
+            best_effort("store open", || {
+                store = Some(open()?);
+                Ok(())
+            });
+            let _ = tx.send(store);
+        });
+    if let Err(e) = spawned {
+        eprintln!("[legion cmd-check] store open not started: {e}");
+        return None;
+    }
+    match rx.recv_timeout(deadline) {
+        Ok(store) => store,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            eprintln!(
+                "[legion cmd-check] store open not finished within {deadline:?}; \
+                 the prediction and the witness pass are skipped"
+            );
+            None
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+    }
 }
 
 /// Starts the witness pass on its own worker thread, then runs the decision
 /// as it always runs, under its own deadline. The decision never waits on the
-/// pass. The pass's budget is one `route.deadline_ms` from its start (the
-/// default when the policy cannot be read; the decision reports that
-/// itself), so the call as a whole stays within one deadline plus the
-/// decision's overhead.
+/// pass. The pass's budget is one `deadline` from its start, so the call as
+/// a whole stays within one deadline plus the decision's overhead.
 fn respond_beside_witness(
     input: &str,
+    deadline: Duration,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
     legion_repo: Option<String>,
     witness: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
 ) -> (Applied, Option<PendingWitness>) {
-    let deadline: Duration = policy_text
-        .as_ref()
-        .ok()
-        .and_then(|text| RouteSettings::from_policy_text(text).ok())
-        .unwrap_or_default()
-        .deadline;
     let pending: Option<PendingWitness> = PendingWitness::start(deadline, witness);
     let applied: Applied = respond_with(input, policy_text, lookups, legion_repo);
     (applied, pending)
@@ -326,12 +394,18 @@ struct PendingWitness {
 
 impl PendingWitness {
     /// Spawns `pass` under [`best_effort`]. `None` when the thread cannot be
-    /// started, which only skips this run's pass.
+    /// started, or when `budget` ends past what the clock can represent
+    /// (#1288): either only skips this run's pass.
     fn start(
         budget: Duration,
         pass: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
     ) -> Option<Self> {
-        let budget_ends: Instant = Instant::now() + budget;
+        let Some(budget_ends) = Instant::now().checked_add(budget) else {
+            eprintln!(
+                "[legion cmd-check] witness pass skipped: a {budget:?} budget is out of range"
+            );
+            return None;
+        };
         let (tx, finished) = mpsc::channel::<()>();
         let spawned = thread::Builder::new()
             .name("legion-cmd-witness".to_string())
@@ -1790,6 +1864,7 @@ mod tests {
         let started = Instant::now();
         let (applied, pending) = respond_beside_witness(
             &payload("gh issue list"),
+            deadline,
             Ok(policy),
             Arc::new(StubLookups(Lookup::Empty)),
             None,
@@ -1824,6 +1899,93 @@ mod tests {
         );
         // The abandoned worker still holds the FIFO path open for reading.
         std::mem::forget(dir);
+    }
+
+    #[test]
+    fn a_witness_budget_past_the_clock_skips_the_pass_instead_of_panicking() {
+        // #1288: `Instant::now() + Duration::MAX` overflows. The pass is
+        // skipped, and the closure never runs.
+        let ran = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&ran);
+        let pending = PendingWitness::start(Duration::MAX, move || {
+            *flag.lock().expect("flag lock") = true;
+            Ok(())
+        });
+        assert!(pending.is_none(), "an out-of-range budget started the pass");
+        assert!(!*ran.lock().expect("flag lock"), "the skipped pass ran");
+    }
+
+    #[test]
+    fn an_extreme_configured_deadline_yields_the_routing_decision() {
+        // #1288: the largest deadline the policy accepts reaches the
+        // decision, not a panic deny.
+        let policy: String = POLICY.replace(
+            r#""deadline_ms": 2000"#,
+            &format!(r#""deadline_ms": {}"#, u64::MAX),
+        );
+        assert_ne!(policy, POLICY, "the test policy must carry the deadline");
+        let policy_text: Result<String, AdapterError> = Ok(policy);
+        let deadline: Duration = deadline_for(&policy_text);
+        assert_eq!(deadline, Duration::from_millis(u64::MAX));
+        let response: Value = guarded(|| {
+            respond_beside_witness(
+                &payload("gh issue list"),
+                deadline,
+                policy_text,
+                Arc::new(StubLookups(Lookup::Empty)),
+                None,
+                || Ok(()),
+            )
+            .0
+            .response
+        });
+        assert_eq!(
+            output(&response)["permissionDecision"],
+            "allow",
+            "got {response}"
+        );
+        assert!(output(&response).get("updatedInput").is_some());
+    }
+
+    #[test]
+    fn a_store_open_past_the_deadline_is_skipped_at_the_deadline() {
+        // #1288: an open that never finishes costs the decision one
+        // deadline, then the call goes ahead without a store.
+        let (_hold, never) = mpsc::channel::<()>();
+        let deadline = Duration::from_millis(100);
+        let started = Instant::now();
+        let store: Option<Database> = open_store_within(deadline, move || {
+            let _ = never.recv();
+            Err(error::LegionError::Search(
+                "released at the test's end".to_string(),
+            ))
+        });
+        let waited: Duration = started.elapsed();
+        assert!(store.is_none(), "an unfinished open yielded a store");
+        assert!(waited >= deadline, "gave up early, after {waited:?}");
+        assert!(
+            waited < deadline + Duration::from_millis(300),
+            "the open held the call for {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_store_open_that_fails_or_panics_is_skipped() {
+        let failed = open_store_within(Duration::from_secs(5), || {
+            Err(error::LegionError::Search("unopenable".to_string()))
+        });
+        assert!(failed.is_none());
+        let panicked = open_store_within(Duration::from_secs(5), || panic!("open panicked"));
+        assert!(panicked.is_none());
+    }
+
+    #[test]
+    fn a_store_open_in_time_yields_the_store() {
+        let store = open_store_within(
+            Duration::from_secs(5),
+            || Ok(crate::db::testutil::test_db()),
+        );
+        assert!(store.is_some());
     }
 
     #[test]
