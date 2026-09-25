@@ -493,7 +493,7 @@ fn sym_outcome_with_verb(job_id: &str, sym_command: &str, verb: Option<String>) 
     }
 }
 
-fn allow_default() -> PartOutcome {
+pub(crate) fn allow_default() -> PartOutcome {
     PartOutcome {
         decision: Decision::Allow { note: None },
         deciding: Deciding::Default,

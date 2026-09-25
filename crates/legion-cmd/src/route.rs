@@ -78,6 +78,12 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     for region in &expanded.regions {
         parts.push(evaluate::decide_region(policy, region));
     }
+    // A bare wrapper routes nothing, but it is still a command the shell runs:
+    // it counts as an allow part, so a list or pipe holding one is compound
+    // and a rewrite never replaces it away (FR-CMD-008).
+    for _ in 0..expanded.bare_wrappers {
+        parts.push(evaluate::allow_default());
+    }
 
     let winner = evaluate::combine(parts);
     let facts = extract_facts(&expanded.invocations, winner.verb.clone());
@@ -108,6 +114,9 @@ fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> 
 pub(crate) struct Expanded {
     pub(crate) invocations: Vec<Invocation>,
     regions: Vec<Unreduced>,
+    /// Wrapper invocations with no payload words (a bare `env`, `sudo`): they
+    /// wrap no command to route, but each is still a command in the line.
+    bare_wrappers: usize,
 }
 
 /// Splits `command` and re-enters every wrapper and interpreter payload the
@@ -158,9 +167,12 @@ fn classify(policy: &Policy, invocation: Invocation, out: &mut Expanded) {
         let payload: Vec<&String> = invocation.args.iter().skip(skip).collect();
         // A wrapper with no payload words (a bare `env`, `pnpm exec` with
         // nothing after it) wraps no command: there is nothing to route, so it
-        // contributes no part and reaches the allow default -- not an opaque
-        // proxy, which is reserved for a command route genuinely cannot read.
-        if !payload.is_empty() {
+        // is counted as a bare wrapper that reaches the allow default -- not an
+        // opaque proxy, which is reserved for a command route genuinely cannot
+        // read.
+        if payload.is_empty() {
+            out.bare_wrappers += 1;
+        } else {
             let text = payload
                 .iter()
                 .map(|s| s.as_str())
@@ -639,10 +651,13 @@ mod tests {
     }
 
     /// Rewrite rules for `git push`, `git add`, `git commit` and `gh pr view`,
-    /// each covering the arguments the compound-command tests pass it.
+    /// each covering the arguments the compound-command tests pass it, with
+    /// `env` and `sudo` declared as wrappers as the shipped policy declares
+    /// them.
     fn rewrite_policy() -> Policy {
         policy(
-            r#"{"tools": {"Bash": {"families": {
+            r#"{"wrappers": [{"binary": "env"}, {"binary": "sudo"}],
+            "tools": {"Bash": {"families": {
                 "git push": {"rules": [
                     {"id": "push-rewrite", "outcome": {"kind": "rewrite", "target": "legion push",
                      "reason": "legion pushes", "translatable": {}}}
@@ -665,18 +680,25 @@ mod tests {
 
     #[test]
     fn a_single_invocation_rewrite_routes_as_its_rule_says() {
-        let routed = route(&rewrite_policy(), &bash("git push"), &Context::default());
-        match routed.decision {
-            Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion push"),
-            other => panic!("expected rewrite, got {other:?}"),
-        }
-        assert_eq!(
-            routed.deciding,
-            Deciding::Rule {
-                id: "push-rewrite".to_string(),
-                needs_operator: false
+        // A declared wrapper is re-entered, not counted as a second command:
+        // `env git push` is still the one invocation `git push`.
+        for command in ["git push", "env git push"] {
+            let routed = route(&rewrite_policy(), &bash(command), &Context::default());
+            match routed.decision {
+                Decision::Rewrite { target, .. } => {
+                    assert_eq!(target.as_str(), "legion push", "`{command}`")
+                }
+                other => panic!("`{command}`: expected rewrite, got {other:?}"),
             }
-        );
+            assert_eq!(
+                routed.deciding,
+                Deciding::Rule {
+                    id: "push-rewrite".to_string(),
+                    needs_operator: false
+                },
+                "`{command}`"
+            );
+        }
     }
 
     /// FR-CMD-008: a rewrite replaces the whole command, so a compound command
@@ -689,6 +711,11 @@ mod tests {
             ("git add -A && git commit -m x", "add-rewrite"),
             ("gh pr view 42 | head", "pr-view"),
             ("git commit -m x; gh pr view 42", "commit-rewrite"),
+            // A bare wrapper routes nothing but is still a command the rewrite
+            // would drop (bare `env` prints the environment).
+            ("git push && env", "push-rewrite"),
+            ("env && git push", "push-rewrite"),
+            ("git push && sudo", "push-rewrite"),
         ] {
             let routed = route(&rewrite_policy(), &bash(command), &Context::default());
             match &routed.decision {
