@@ -25,9 +25,9 @@ pub use decision::{
 };
 pub use lookups::{RequiredLookups, required_lookups};
 pub use policy::{
-    ArgSpec, BodyLanguage, FallbackDecision, Family, Interpreter, OperandShape, Policy,
-    PolicyError, Predicate, RewriteSpec, Rule, RuleOutcome, ScriptCarrier, SymJob, ToolKind,
-    ToolRules, Wrapper, parse_policy,
+    ArgSpec, BodyLanguage, FallbackDecision, Family, GlobalOptions, Interpreter, OperandShape,
+    Policy, PolicyError, Predicate, RewriteSpec, Rule, RuleOutcome, ScriptCarrier, SymJob,
+    ToolKind, ToolRules, Wrapper, parse_policy,
 };
 pub use route::route;
 pub use splitter::{

@@ -129,6 +129,21 @@
     { "binary": "ruby" },
     { "binary": "perl" }
   ],
+  "global_options": [
+    {
+      "binary": "git",
+      "flags": [
+        "-v", "--version", "-h", "--help", "-p", "--paginate", "-P", "--no-pager",
+        "--exec-path", "--html-path", "--man-path", "--info-path", "--bare",
+        "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--no-advice",
+        "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs"
+      ],
+      "value_options": [
+        "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "--namespace",
+        "--list-cmds", "--attr-source"
+      ]
+    }
+  ],
   "tools": {
     "Bash": {
       "families": {

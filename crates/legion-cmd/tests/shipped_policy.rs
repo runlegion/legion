@@ -1,4 +1,4 @@
-//! Two concerns, kept apart so NFR-CMD-001 holds:
+//! Three concerns, kept apart so NFR-CMD-001 holds:
 //!
 //! 1. The shipped artifact (`plugin/legion-cmd/policy.json`) parses, is
 //!    non-empty, and declares the names the splitter refuses to hold. This test
@@ -8,10 +8,16 @@
 //! 2. route reaches every arm over a policy that mirrors the shipped rules,
 //!    built from an inline JSON literal (the Behavior section's "tests build
 //!    policies from inline JSON strings"), so no test of route touches disk.
+//! 3. The shipped git global-option declaration routes a git command by its
+//!    subcommand's family (#1294). That issue asks for these tests "with the
+//!    shipped policy", so this one section routes over the artifact, as
+//!    `hook_parity.rs` does; route itself still performs no I/O.
 
 use std::fs;
 
-use legion_cmd::{Context, Decision, Policy, ProxyReason, ToolCall, parse_policy, route};
+use legion_cmd::{
+    Context, Deciding, Decision, Policy, ProxyReason, Routed, ToolCall, parse_policy, route,
+};
 
 fn shipped_policy_text() -> String {
     let path = format!(
@@ -223,6 +229,90 @@ fn mirror_policy_routes_a_python_search_one_liner_to_sym() {
     match decide(&policy, command) {
         Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
         other => panic!("python search should route to sym, got {other:?}"),
+    }
+}
+
+// -- git global options over the shipped artifact (#1294) --------------------
+
+fn shipped_route(policy: &Policy, command: &str) -> Routed {
+    route(policy, &bash(command), &Context::default())
+}
+
+#[test]
+fn shipped_git_global_options_route_by_the_subcommand_family() {
+    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    for (command, rule, verb, option) in [
+        ("git -C /tmp push", "git-push-to-legion", "push", "-C"),
+        (
+            "git -c user.name=x commit -m y",
+            "git-commit-to-legion",
+            "commit",
+            "-c",
+        ),
+        (
+            "git --git-dir=.git push",
+            "git-push-to-legion",
+            "push",
+            "--git-dir=.git",
+        ),
+    ] {
+        let routed = shipped_route(&policy, command);
+        // The family's own rule decides, as it does for the bare subcommand.
+        assert_eq!(
+            routed.deciding,
+            Deciding::Rule {
+                id: rule.to_string(),
+                needs_operator: false
+            },
+            "`{command}`"
+        );
+        assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
+        // That rule rewrites only when every argument translates; the global
+        // option has no lossless translation, so it is refused by name
+        // rather than dropped (FR-CMD-008).
+        match &routed.decision {
+            Decision::Deny(details) => assert!(
+                details.reason().contains(&format!("`{option}`")),
+                "`{command}`: {}",
+                details.reason()
+            ),
+            other => panic!("`{command}` should be denied naming `{option}`, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn shipped_git_undeclared_global_option_is_proxied_opaque() {
+    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    for command in [
+        "git --bogus push",
+        "git --bogus status",
+        "git -C /tmp -Z commit -m y",
+    ] {
+        let routed = shipped_route(&policy, command);
+        assert_eq!(
+            routed.decision,
+            Decision::Proxy {
+                reason: ProxyReason::Opaque
+            },
+            "`{command}`"
+        );
+        assert_eq!(routed.deciding, Deciding::Default, "`{command}`");
+    }
+    // Declared global options before an unmanaged subcommand still reach the
+    // allow default: the declaration changes which word is the subcommand,
+    // not what an unmanaged one earns.
+    for command in [
+        "git -C /tmp status",
+        "git --no-pager log --oneline",
+        "git -C push status",
+        "git --version",
+    ] {
+        assert_eq!(
+            shipped_route(&policy, command).decision,
+            Decision::Allow { note: None },
+            "`{command}`"
+        );
     }
 }
 

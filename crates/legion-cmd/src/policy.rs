@@ -401,69 +401,101 @@ impl Wrapper {
 
     /// The index of the first word from `index` on that is not one of the
     /// wrapper's options, or `None` when an option there is one it does not
-    /// declare or lacks its value. Options are read getopt-style; a `--` stops
-    /// the read and is left for the caller. Each word is compared as the shell
-    /// sees it (one outer quote pair removed), so a quoted `"-u"` is still an
-    /// option.
-    fn options_end(&self, args: &[String], mut index: usize) -> Option<usize> {
-        while let Some(word) = word_at(args, index) {
-            // A lone `-` is an operand (stdin) unless the wrapper declares it
-            // an option, as `env` does.
-            let is_option =
-                word != "--" && word.starts_with('-') && (word != "-" || self.declares_flag(word));
-            if !is_option {
-                break;
-            }
-            let consumed = self.option_words(word)?;
-            if index + consumed > args.len() {
-                return None;
-            }
-            index += consumed;
-        }
-        Some(index)
+    /// declare or lacks its value (see [`declared_options_end`]).
+    fn options_end(&self, args: &[String], index: usize) -> Option<usize> {
+        declared_options_end(&self.flags, &self.value_options, args, index)
     }
+}
 
-    /// How many words the option `word` spans (1, or 2 when its value is the
-    /// next word), or `None` when the declaration does not name it.
-    fn option_words(&self, word: &str) -> Option<usize> {
-        if self.declares_flag(word) {
-            return Some(1);
-        }
-        if self.declares_value_option(word) {
-            return Some(2);
-        }
-        if let Some(long) = word.strip_prefix("--") {
-            // `--name=value` is one word when `--name` takes a value.
-            let (name, _) = long.split_once('=')?;
-            return self
-                .declares_value_option(&format!("--{name}"))
-                .then_some(1);
-        }
-        // A short cluster (`-0r`, `-oL`, `-uroot`): every letter is a
-        // declared flag until one takes a value, which is the rest of the
-        // word when anything follows it and the next word otherwise.
-        let cluster = word.strip_prefix('-')?;
-        for (pos, letter) in cluster.char_indices() {
-            let option = format!("-{letter}");
-            if self.declares_flag(&option) {
-                continue;
-            }
-            if !self.declares_value_option(&option) {
-                return None;
-            }
-            let attached = pos + letter.len_utf8() < cluster.len();
-            return Some(if attached { 1 } else { 2 });
-        }
-        Some(1)
-    }
+/// A binary's global options: the options it reads before its subcommand
+/// word (#1294), e.g. git's `-C <path>`, `-c <name>=<value>` and
+/// `--no-pager`. A family keyed by subcommand words (`git push`) is matched
+/// only after these are consumed, so an option's separate value is never
+/// read as the subcommand. An option before the subcommand that the
+/// declaration does not name leaves route unable to say which word is the
+/// subcommand, so the invocation is proxied opaque rather than read.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GlobalOptions {
+    pub binary: String,
+    /// Global options that take no value, e.g. `--no-pager`.
+    pub flags: Vec<String>,
+    /// Global options that take a value, as the next word (`-C /tmp`) or
+    /// attached (`--git-dir=.git`).
+    pub value_options: Vec<String>,
+}
 
-    fn declares_flag(&self, word: &str) -> bool {
-        self.flags.iter().any(|f| f == word)
+impl GlobalOptions {
+    /// The index in `args` of the first word that is not one of the declared
+    /// global options, or `None` when a word before it is an option the
+    /// declaration does not name, or a value option with no value left.
+    pub fn subcommand_start(&self, args: &[String]) -> Option<usize> {
+        declared_options_end(&self.flags, &self.value_options, args, 0)
     }
+}
 
-    fn declares_value_option(&self, word: &str) -> bool {
-        self.value_options.iter().any(|o| o == word)
+/// The index of the first word from `index` on that is not one of the
+/// declared options, or `None` when an option there is one the declaration
+/// does not name or lacks its value. Shared by [`Wrapper`] (#1286) and
+/// [`GlobalOptions`] (#1294). Options are read getopt-style; a `--` stops the
+/// read and is left for the caller. Each word is compared as the shell sees
+/// it (one outer quote pair removed), so a quoted `"-u"` is still an option.
+fn declared_options_end(
+    flags: &[String],
+    value_options: &[String],
+    args: &[String],
+    mut index: usize,
+) -> Option<usize> {
+    while let Some(word) = word_at(args, index) {
+        // A lone `-` is an operand (stdin) unless it is declared an option,
+        // as `env` does.
+        let is_option =
+            word != "--" && word.starts_with('-') && (word != "-" || declares(flags, word));
+        if !is_option {
+            break;
+        }
+        let consumed = option_words(flags, value_options, word)?;
+        if index + consumed > args.len() {
+            return None;
+        }
+        index += consumed;
     }
+    Some(index)
+}
+
+/// How many words the option `word` spans (1, or 2 when its value is the
+/// next word), or `None` when the declaration does not name it.
+fn option_words(flags: &[String], value_options: &[String], word: &str) -> Option<usize> {
+    if declares(flags, word) {
+        return Some(1);
+    }
+    if declares(value_options, word) {
+        return Some(2);
+    }
+    if let Some(long) = word.strip_prefix("--") {
+        // `--name=value` is one word when `--name` takes a value.
+        let (name, _) = long.split_once('=')?;
+        return declares(value_options, &format!("--{name}")).then_some(1);
+    }
+    // A short cluster (`-0r`, `-oL`, `-uroot`): every letter is a declared
+    // flag until one takes a value, which is the rest of the word when
+    // anything follows it and the next word otherwise.
+    let cluster = word.strip_prefix('-')?;
+    for (pos, letter) in cluster.char_indices() {
+        let option = format!("-{letter}");
+        if declares(flags, &option) {
+            continue;
+        }
+        if !declares(value_options, &option) {
+            return None;
+        }
+        let attached = pos + letter.len_utf8() < cluster.len();
+        return Some(if attached { 1 } else { 2 });
+    }
+    Some(1)
+}
+
+fn declares(list: &[String], word: &str) -> bool {
+    list.iter().any(|entry| entry == word)
 }
 
 /// The word at `index` as the shell sees it, one outer quote pair removed.
@@ -505,6 +537,7 @@ pub struct Policy {
     pub wrappers: Vec<Wrapper>,
     pub interpreters: Vec<Interpreter>,
     pub script_carriers: Vec<ScriptCarrier>,
+    pub global_options: Vec<GlobalOptions>,
 }
 
 impl Policy {
@@ -536,6 +569,18 @@ impl Policy {
     /// The script carrier matching `binary`, if the policy names one.
     pub fn matching_script_carrier(&self, binary: &str) -> Option<&ScriptCarrier> {
         self.script_carriers.iter().find(|s| s.binary == binary)
+    }
+
+    /// The index in `args` where `binary`'s subcommand words begin: after its
+    /// declared global options (#1294), or 0 when the policy declares none
+    /// for it. `None` when a word before the subcommand is an option the
+    /// declaration does not name, so route cannot say which word is the
+    /// subcommand.
+    pub fn subcommand_start(&self, binary: &str, args: &[String]) -> Option<usize> {
+        match self.global_options.iter().find(|g| g.binary == binary) {
+            Some(declared) => declared.subcommand_start(args),
+            None => Some(0),
+        }
     }
 
     /// The sym job with this id, if any.
@@ -638,6 +683,7 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
             "wrappers",
             "interpreters",
             "script_carriers",
+            "global_options",
             "route",
         ],
     )?;
@@ -666,6 +712,10 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         Some(value) => parse_script_carriers(value, "/script_carriers")?,
         None => Vec::new(),
     };
+    let global_options = match root.get("global_options") {
+        Some(value) => parse_global_options(value, "/global_options")?,
+        None => Vec::new(),
+    };
 
     let tools = match root.get("tools") {
         Some(value) => parse_tools(value, "/tools", &sym_job_ids, &mut seen_ids)?,
@@ -678,6 +728,7 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         wrappers,
         interpreters,
         script_carriers,
+        global_options,
     })
 }
 
@@ -1402,6 +1453,31 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
         });
     }
     Ok(wrappers)
+}
+
+fn parse_global_options(value: &Value, pointer: &str) -> Result<Vec<GlobalOptions>, PolicyError> {
+    let array = as_array(value, pointer)?;
+    let mut declarations = Vec::with_capacity(array.len());
+    for (index, declaration_value) in array.iter().enumerate() {
+        let declaration_pointer = child_pointer(pointer, &index.to_string());
+        let map = as_object(declaration_value, &declaration_pointer)?;
+        check_known_keys(
+            map,
+            &declaration_pointer,
+            &["binary", "flags", "value_options"],
+        )?;
+        let binary = require_string(map, "binary", &declaration_pointer)?;
+        let optional_strings = |key: &str| match map.get(key) {
+            Some(value) => parse_string_array(value, &child_pointer(&declaration_pointer, key)),
+            None => Ok(Vec::new()),
+        };
+        declarations.push(GlobalOptions {
+            binary,
+            flags: optional_strings("flags")?,
+            value_options: optional_strings("value_options")?,
+        });
+    }
+    Ok(declarations)
 }
 
 fn parse_interpreters(value: &Value, pointer: &str) -> Result<Vec<Interpreter>, PolicyError> {
@@ -2329,5 +2405,102 @@ mod tests {
         assert_eq!(env.payload_start(&words("- grep foo")), Some(1));
         // Undeclared, a lone `-` is an operand, not an option.
         assert_eq!(Wrapper::default().payload_start(&words("- grep")), Some(0));
+    }
+
+    #[test]
+    fn global_options_parse_from_the_declaration() {
+        let text = r#"{"global_options": [{"binary": "git", "flags": ["--no-pager"],
+            "value_options": ["-C"]}]}"#;
+        let policy = parse_policy(text).expect("valid");
+        assert_eq!(
+            policy.global_options,
+            vec![GlobalOptions {
+                binary: "git".to_string(),
+                flags: vec!["--no-pager".to_string()],
+                value_options: vec!["-C".to_string()],
+            }]
+        );
+        // Declarations alone route nothing, like wrappers.
+        assert!(policy.is_empty());
+    }
+
+    #[test]
+    fn global_options_of_the_wrong_shape_are_rejected_with_their_pointer() {
+        assert_eq!(
+            parse_policy(r#"{"global_options": [{"binary": "git", "flag": ["-p"]}]}"#)
+                .expect_err("unknown field"),
+            PolicyError::UnknownField {
+                pointer: "/global_options/0/flag".to_string(),
+                field: "flag".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_policy(r#"{"global_options": [{"flags": ["-p"]}]}"#).expect_err("missing binary"),
+            PolicyError::MissingField {
+                pointer: "/global_options/0".to_string(),
+                field: "binary".to_string(),
+            }
+        );
+        for (text, pointer, expected) in [
+            (r#"{"global_options": {}}"#, "/global_options", "an array"),
+            (
+                r#"{"global_options": [{"binary": "git", "value_options": "-C"}]}"#,
+                "/global_options/0/value_options",
+                "an array",
+            ),
+            (
+                r#"{"global_options": [{"binary": "git", "flags": [1]}]}"#,
+                "/global_options/0/flags/0",
+                "a string",
+            ),
+        ] {
+            assert_eq!(
+                parse_policy(text).expect_err("wrong type"),
+                PolicyError::WrongType {
+                    pointer: pointer.to_string(),
+                    expected: expected.to_string(),
+                },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn subcommand_start_consumes_the_declared_global_options() {
+        let policy = Policy {
+            global_options: vec![GlobalOptions {
+                binary: "git".to_string(),
+                flags: vec!["--no-pager".to_string(), "-p".to_string()],
+                value_options: vec!["-C".to_string(), "-c".to_string(), "--git-dir".to_string()],
+            }],
+            ..Policy::default()
+        };
+        for (args, start) in [
+            ("push", 0),
+            ("-C /tmp push", 2),
+            ("-c user.name=x commit -m y", 2),
+            ("--git-dir=.git push", 1),
+            ("--git-dir .git push", 2),
+            ("--no-pager -C a -C b push", 5),
+            // Options stop at the subcommand: `--force` is push's own.
+            ("push --force", 0),
+            // `--` ends the read and is left for the family match.
+            ("-- push", 0),
+            ("", 0),
+        ] {
+            assert_eq!(
+                policy.subcommand_start("git", &words(args)),
+                Some(start),
+                "{args}"
+            );
+        }
+        for args in ["--bogus push", "-C /tmp --bogus push", "-C", "-x push"] {
+            assert_eq!(policy.subcommand_start("git", &words(args)), None, "{args}");
+        }
+        // A binary with no declaration starts its subcommand at the first word.
+        assert_eq!(
+            policy.subcommand_start("gh", &words("--bogus issue list")),
+            Some(0)
+        );
     }
 }
