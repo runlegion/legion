@@ -1364,10 +1364,10 @@
     "tool": "Bash",
     "input": { "command": "gh pr list" },
     "hook_behavior": "rewrite",
-    "route": "rewrite",
-    "agrees": true,
-    "target": "legion pr list",
-    "note": "the empty translatable declaration covers the bare verb."
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion pr list --repo <repo>",
+    "note": "the hook rewrites to `legion pr list --repo <repo>`, filling in the repo itself. A policy rewrite target is static text and cannot carry the required --repo, so the rewrite the adapter would build fails as a usage error. The rule denies instead, naming the working command, until rewrites carry arguments (#1278). DISAGREEMENT: hook rewrite, route deny."
   },
   {
     "hook": "no-gh.sh",
@@ -1386,10 +1386,10 @@
     "tool": "Bash",
     "input": { "command": "gh issue list" },
     "hook_behavior": "rewrite",
-    "route": "rewrite",
-    "agrees": true,
-    "target": "legion issue list",
-    "note": "the empty translatable declaration covers the bare verb."
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion issue list --repo <repo>",
+    "note": "as gh-pr-list-bare: the rule denies naming `legion issue list --repo <repo>`, because a static target cannot carry the required --repo, until rewrites carry arguments (#1278). DISAGREEMENT: hook rewrite, route deny."
   },
   {
     "hook": "no-gh.sh",
@@ -1484,7 +1484,7 @@
     "route": "deny",
     "agrees": true,
     "instead_contains": "legion pr list",
-    "note": "legion pr list takes no filter, so no flag is declared; any flag denies."
+    "note": "the gh pr list rule denies every invocation, naming legion pr list --repo <repo>; legion pr list takes no filter either."
   },
   {
     "hook": "no-gh.sh",
@@ -1504,7 +1504,7 @@
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
-    "note": "any flag denies."
+    "note": "the gh issue list rule denies every invocation, naming legion issue list --repo <repo>."
   },
   {
     "hook": "no-gh.sh",

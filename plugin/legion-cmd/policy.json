@@ -202,10 +202,9 @@
             {
               "id": "gh-pr-list-to-legion",
               "outcome": {
-                "kind": "rewrite",
-                "target": "legion pr list",
-                "reason": "the audited work-source path: legion pr list lands in `legion audit` the way a raw gh call never does",
-                "translatable": {}
+                "kind": "deny",
+                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`); this is not rewritten because the rewrite target cannot carry the required --repo until rewrites carry arguments (#1278)",
+                "instead": "legion pr list --repo <repo>"
               }
             }
           ]
@@ -228,10 +227,9 @@
             {
               "id": "gh-issue-list-to-legion",
               "outcome": {
-                "kind": "rewrite",
-                "target": "legion issue list",
-                "reason": "the audited work-source path: legion issue list lands in `legion audit` the way a raw gh call never does",
-                "translatable": {}
+                "kind": "deny",
+                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`); this is not rewritten because the rewrite target cannot carry the required --repo until rewrites carry arguments (#1278)",
+                "instead": "legion issue list --repo <repo>"
               }
             }
           ]
