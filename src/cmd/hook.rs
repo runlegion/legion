@@ -1367,19 +1367,40 @@ mod tests {
     }
 
     #[test]
-    fn a_record_that_cannot_be_written_refuses_even_a_confirmed_command() {
+    fn an_ask_whose_record_cannot_be_written_is_refused_naming_the_failure() {
         let store = temp_store();
-        agent_confirms(&store, "curl example.com", "s1", Utc::now());
+        std::fs::write(store.log_path(), "").expect("create log");
         let mut perms = std::fs::metadata(store.log_path())
             .expect("log exists")
             .permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(store.log_path(), perms).expect("chmod");
-        // An ask whose record cannot be written is refused naming the failure.
-        let response = run(&store, "curl example.org", "s1");
+        let response = run(&store, "curl example.com", "s1");
         assert_denied(&response);
         assert!(reason(&response).contains("incident record:"));
         assert!(!reason(&response).contains(RECORDED_NOTE));
+    }
+
+    #[test]
+    fn a_confirmed_command_whose_confirmation_cannot_be_used_up_is_refused() {
+        // A confirmed run writes one thing before it proceeds: the use of its
+        // confirmation in the store. When that write fails the command is
+        // refused, even though it was confirmed.
+        let store = temp_store();
+        agent_confirms(&store, "curl example.com", "s1", Utc::now());
+        {
+            let db = store.open().expect("db");
+            db.conn
+                .execute_batch(
+                    "CREATE TRIGGER refuse_use BEFORE UPDATE ON cmd_confirmations \
+                     BEGIN SELECT RAISE(ABORT, 'store is read-only'); END;",
+                )
+                .expect("trigger");
+        }
+        let response = run(&store, "curl example.com", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains("incident record:"));
+        assert!(reason(&response).contains("store is read-only"));
     }
 
     #[test]
