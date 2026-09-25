@@ -335,6 +335,13 @@ pub struct Wrapper {
     /// How many operands the wrapper takes after its options and before the
     /// payload, e.g. 1 for `timeout DURATION`.
     pub operands: usize,
+    /// Words that each take exactly one following word and are the wrapper's
+    /// own, accepted only before the required subcommand (#1293): a workspace
+    /// selector such as `workspace <name>` or `workspaces foreach` for `yarn`.
+    /// A selector is not an option, so without this declaration `yarn
+    /// workspace web exec` would never be claimed and would reach its payload
+    /// unrouted.
+    pub selectors: Vec<String>,
 }
 
 impl Wrapper {
@@ -367,26 +374,39 @@ impl Wrapper {
         for raw in &args[..position] {
             let word = crate::evaluate::dequote_outer(raw);
             let is_option = word.starts_with('-');
-            if !is_option && !after_option {
+            // A declared selector reads like a value option: the word after it
+            // is its own (#1293).
+            let is_selector = self.declares_selector(word);
+            if !is_option && !is_selector && !after_option {
                 return false;
             }
-            // A value follows an option, never `--` and never another value.
-            after_option = is_option && word != "--";
+            // A value follows an option or a selector, never `--` and never
+            // another value.
+            after_option = (is_option && word != "--") || is_selector;
         }
         true
     }
 
     /// The index in `args` where the wrapped command begins, or `None` when
     /// the wrapper's own words cannot be consumed by its declaration: an
-    /// option it does not declare, a value option with no value, a missing
-    /// required subcommand, or fewer operands than it takes (#1286).
+    /// option it does not declare, a value option with no value, a selector
+    /// with no following word, a missing required subcommand, or fewer
+    /// operands than it takes (#1286, #1293).
     ///
     /// Declared options are read before and after the required subcommand,
-    /// then one `--`, then the declared operands. An index equal to
-    /// `args.len()` means the wrapper wraps no command.
+    /// with any `<selector> <word>` pairs (each followed by options) between
+    /// the leading options and the subcommand, then one `--`, then the
+    /// declared operands. An index equal to `args.len()` means the wrapper
+    /// wraps no command.
     pub fn payload_start(&self, args: &[String]) -> Option<usize> {
         let mut index = self.options_end(args, 0)?;
         if let Some(subcommand) = &self.required_subcommand {
+            while word_at(args, index).is_some_and(|word| self.declares_selector(word)) {
+                if index + 2 > args.len() {
+                    return None;
+                }
+                index = self.options_end(args, index + 2)?;
+            }
             if word_at(args, index) != Some(subcommand.as_str()) {
                 return None;
             }
@@ -463,6 +483,10 @@ impl Wrapper {
 
     fn declares_value_option(&self, word: &str) -> bool {
         self.value_options.iter().any(|o| o == word)
+    }
+
+    fn declares_selector(&self, word: &str) -> bool {
+        self.selectors.iter().any(|s| s == word)
     }
 }
 
@@ -1367,6 +1391,7 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
                 "flags",
                 "value_options",
                 "operands",
+                "selectors",
             ],
         )?;
         let binary = require_string(map, "binary", &wrapper_pointer)?;
@@ -1383,6 +1408,7 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
         };
         let flags = optional_strings("flags")?;
         let value_options = optional_strings("value_options")?;
+        let selectors = optional_strings("selectors")?;
         let operands = match map.get("operands") {
             Some(value) => value
                 .as_u64()
@@ -1399,6 +1425,7 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
             flags,
             value_options,
             operands,
+            selectors,
         });
     }
     Ok(wrappers)
@@ -2197,7 +2224,7 @@ mod tests {
     #[test]
     fn wrapper_arguments_parse_from_the_declaration() {
         let text = r#"{"wrappers": [{"binary": "timeout", "flags": ["-v"],
-            "value_options": ["-s"], "operands": 1}]}"#;
+            "value_options": ["-s"], "operands": 1, "selectors": ["workspace"]}]}"#;
         let policy = parse_policy(text).expect("valid");
         assert_eq!(
             policy.wrappers[0],
@@ -2207,6 +2234,7 @@ mod tests {
                 flags: vec!["-v".to_string()],
                 value_options: vec!["-s".to_string()],
                 operands: 1,
+                selectors: vec!["workspace".to_string()],
             }
         );
     }
@@ -2233,6 +2261,11 @@ mod tests {
                 r#"{"wrappers": [{"binary": "sudo", "value_options": [1]}]}"#,
                 "/wrappers/0/value_options/0",
                 "a string",
+            ),
+            (
+                r#"{"wrappers": [{"binary": "yarn", "selectors": "workspace"}]}"#,
+                "/wrappers/0/selectors",
+                "an array",
             ),
         ] {
             assert_eq!(
@@ -2329,5 +2362,54 @@ mod tests {
         assert_eq!(env.payload_start(&words("- grep foo")), Some(1));
         // Undeclared, a lone `-` is an operand, not an option.
         assert_eq!(Wrapper::default().payload_start(&words("- grep")), Some(0));
+    }
+
+    #[test]
+    fn payload_start_consumes_selector_pairs_before_the_required_subcommand() {
+        let yarn_exec = Wrapper {
+            binary: "yarn".to_string(),
+            required_subcommand: Some("exec".to_string()),
+            flags: vec!["--silent".to_string()],
+            value_options: vec!["--cwd".to_string()],
+            selectors: vec!["workspace".to_string(), "workspaces".to_string()],
+            ..Wrapper::default()
+        };
+        // Any number of pairs, each optionally followed by declared options;
+        // a selector's word may itself be the subcommand word.
+        for (args, start) in [
+            ("workspace web exec grep", 3),
+            ("workspaces foreach exec grep", 3),
+            ("--cwd x workspace web exec grep", 5),
+            ("workspace web --silent exec grep", 4),
+            ("workspace a workspace b exec grep", 5),
+            ("workspace exec exec grep", 3),
+        ] {
+            assert!(yarn_exec.wraps(&words(args)), "{args}");
+            assert_eq!(yarn_exec.payload_start(&words(args)), Some(start), "{args}");
+        }
+        // Claimed, then refused: an undeclared option after a pair, or a
+        // selector whose word is missing.
+        for args in [
+            "workspaces foreach -A exec grep",
+            "workspace web --bogus exec grep",
+        ] {
+            assert!(yarn_exec.wraps(&words(args)), "{args}");
+            assert_eq!(yarn_exec.payload_start(&words(args)), None, "{args}");
+        }
+        assert_eq!(yarn_exec.payload_start(&words("workspace")), None);
+        // A script run through a selector names no subcommand: ordinary.
+        for args in [
+            "workspace web grep",
+            "workspace web build",
+            "workspace web run exec",
+        ] {
+            assert!(!yarn_exec.wraps(&words(args)), "{args}");
+        }
+        // A selector is read only before the subcommand: after it, the word is
+        // the payload's.
+        assert_eq!(
+            yarn_exec.payload_start(&words("exec workspace web")),
+            Some(1)
+        );
     }
 }
