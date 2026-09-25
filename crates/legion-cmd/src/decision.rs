@@ -101,6 +101,18 @@ impl Decision {
         Ok(Decision::Deny(DenyDetails::no_go(reason)?))
     }
 
+    /// The deny for a match on the no-go entry `entry` (FR-CMD-025).
+    /// Infallible by construction: the reason always carries fixed non-empty
+    /// text and `instead` is [`NO_GO_INSTEAD`], so the invariant
+    /// [`DenyDetails::new`] checks holds without a fallible path -- a no-go
+    /// match can never degrade into any other arm.
+    pub(crate) fn no_go_entry(entry: &str) -> Decision {
+        Decision::Deny(DenyDetails {
+            reason: format!("this command matches the no-go entry `{entry}`"),
+            instead: NO_GO_INSTEAD.to_string(),
+        })
+    }
+
     /// Builds a [`Decision::Ask`], rejecting an empty question or an empty
     /// reason (FR-CMD-006).
     pub fn ask(

@@ -116,6 +116,23 @@ fn a_missing_policy_file_denies_instead_of_running_the_command() {
 }
 
 #[test]
+fn a_missing_policy_file_still_refuses_and_records_a_no_go_command() {
+    // FR-CMD-025: the built-in no-go list applies when the file is absent.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("no-such-policy.json");
+    let out = hook_output(dir.path(), &missing, &payload("rm -rf /"));
+    assert_eq!(out["permissionDecision"], "deny");
+    let reason = out["permissionDecisionReason"].as_str().expect("reason");
+    assert!(
+        reason.contains("none: this command never runs"),
+        "got: {reason}"
+    );
+    let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
+        .expect("incident log written");
+    assert_eq!(log.lines().count(), 1);
+}
+
+#[test]
 fn a_malformed_payload_denies_with_exit_0() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = hook_output(dir.path(), &shipped_policy_path(), b"{\"tool_name\": ");

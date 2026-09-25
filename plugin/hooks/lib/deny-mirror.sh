@@ -14,11 +14,34 @@
 # an array, is left untouched and the reason goes to stderr. When nothing is
 # missing the file is not rewritten.
 
+# legion_resolve_symlink PATH -- print the file PATH finally names, following
+# every symlink hop (relative targets resolve against the link's directory).
+# Portable: no `readlink -f`. Fails after 40 hops, the usual loop limit.
+legion_resolve_symlink() {
+  local path="$1" link hops=0
+  while [ -L "$path" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+      echo "[legion] too many symlink hops resolving $1" >&2
+      return 1
+    fi
+    link=$(readlink "$path") || return 1
+    case "$link" in
+      /*) path="$link" ;;
+      *) path="$(dirname "$path")/$link" ;;
+    esac
+  done
+  printf '%s' "$path"
+}
+
 # legion_merge_deny_patterns SETTINGS_FILE PATTERNS_JSON
 #   Returns 0 when the file holds every pattern afterwards (or was left
 #   untouched on purpose), non-zero only when the write itself failed.
 legion_merge_deny_patterns() {
-  local settings="$1" patterns="$2"
+  local settings patterns="$2"
+  # A symlinked settings file is written through to its target: the temp
+  # file and the rename happen beside the target, so the link survives.
+  settings=$(legion_resolve_symlink "$1") || return 1
   if ! command -v jq >/dev/null 2>&1; then
     echo "[legion] jq not found; permissions.deny mirror skipped" >&2
     return 0

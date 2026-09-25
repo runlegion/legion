@@ -115,16 +115,6 @@ impl Database {
         Ok(rows.next().transpose()?)
     }
 
-    /// Removes one confirmation: the undo when its incident record could not
-    /// be written.
-    pub fn delete_cmd_confirmation(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM cmd_confirmations WHERE id = ?1",
-            rusqlite::params![id],
-        )?;
-        Ok(())
-    }
-
     /// Uses up the oldest unused confirmation for `command_key` in this
     /// session recorded at or after `since`. Returns false when none was left
     /// to use.

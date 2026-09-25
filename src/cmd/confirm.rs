@@ -92,21 +92,21 @@ pub(crate) fn confirm(
         recorded_at: now,
         used_at: None,
     };
-    db.insert_cmd_confirmation(&confirmation)
-        .map_err(|e| ConfirmError::Store(e.to_string()))?;
-    if let Err(e) = log.record_confirmation(
+    // The incident record is written first, so a record that cannot be
+    // written leaves no usable confirmation behind. If the store insert then
+    // fails, the record names a confirmation that never existed; the store
+    // reports it unused, so it becomes a drop once it expires.
+    log.record_confirmation(
         &confirmation.id,
         &request.origin,
         entry.as_deref(),
         &confirmation.command_key,
         &confirmation.reason,
         now,
-    ) {
-        // A confirmation with no incident record must not stand: take it
-        // back, and report the original failure.
-        let _ = db.delete_cmd_confirmation(&confirmation.id);
-        return Err(ConfirmError::Store(e.to_string()));
-    }
+    )
+    .map_err(|e| ConfirmError::Store(e.to_string()))?;
+    db.insert_cmd_confirmation(&confirmation)
+        .map_err(|e| ConfirmError::Store(e.to_string()))?;
     Ok(confirmation)
 }
 
@@ -305,8 +305,9 @@ mod tests {
     #[test]
     fn a_record_that_cannot_be_written_leaves_no_confirmation() {
         let db = test_db();
-        // A read-only log: the pending-drop read succeeds, the append fails,
-        // so the stored confirmation must be taken back.
+        // A read-only log: the pending-drop read succeeds and the append
+        // fails. The record is written before the store insert, so nothing
+        // is inserted.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("cmd-incidents.jsonl");
         std::fs::write(&path, "").expect("write");
@@ -325,6 +326,39 @@ mod tests {
         .expect_err("refused");
         assert!(matches!(err, ConfirmError::Store(_)));
         assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
+    }
+
+    #[test]
+    fn a_store_insert_that_fails_leaves_no_confirmation_and_its_record_drops() {
+        let db = test_db();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_insert BEFORE INSERT ON cmd_confirmations \
+                 BEGIN SELECT RAISE(ABORT, 'store is read-only'); END;",
+            )
+            .expect("trigger");
+        let (log, _dir) = log();
+        let now = Utc::now();
+        let err = confirm(
+            &request("curl example.com", Some("r"), "s1"),
+            &policy(),
+            &db,
+            &log,
+            now,
+        )
+        .expect_err("refused");
+        match err {
+            ConfirmError::Store(text) => assert!(text.contains("store is read-only"), "{text}"),
+            other => panic!("expected Store, got {other:?}"),
+        }
+        assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
+        // The record names a confirmation the store never held: once it
+        // expires it is recorded as a drop.
+        let later = now + chrono::Duration::minutes(11);
+        let dropped = log
+            .record_pending_drops(&|id: &str| was_used(&db, id), later)
+            .expect("drops");
+        assert_eq!(dropped, 1);
     }
 
     #[test]

@@ -341,13 +341,8 @@ pub fn decide_no_go(policy: &Policy, invocations: &[Invocation]) -> Option<PartO
     let entries = policy.no_go_entries();
     let entry = crate::nogo::first_match(&entries, invocations)?;
     Some(PartOutcome {
-        decision: Decision::no_go(format!(
-            "this command matches the no-go entry `{}`",
-            entry.id
-        ))
-        .unwrap_or(Decision::Proxy {
-            reason: ProxyReason::Opaque,
-        }),
+        // Infallible: a no-go match is always a deny, never a fallback arm.
+        decision: Decision::no_go_entry(&entry.id),
         deciding: Deciding::NoGo {
             id: entry.id.clone(),
         },

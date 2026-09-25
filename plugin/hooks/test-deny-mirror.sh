@@ -76,6 +76,20 @@ legion_merge_deny_patterns "$NEW" "$PATTERNS" 2>/dev/null
 assert_eq "created with every pattern" "$(jq -c '.permissions.deny' "$NEW")" \
   '["Bash(rm -rf /)","Bash(rm -rf \"$HOME\")","Bash(mkfs *)"]'
 
+echo "==> a symlinked settings file is written through, and the link survives"
+mkdir -p "$WORK/dotfiles" "$WORK/home/.claude"
+TARGET="$WORK/dotfiles/settings.json"
+printf '{"permissions":{"deny":["Bash(grep *)"]}}' > "$TARGET"
+LINK="$WORK/home/.claude/settings.json"
+ln -s ../../dotfiles/settings.json "$LINK"
+legion_merge_deny_patterns "$LINK" "$PATTERNS" 2>/dev/null
+if [ -L "$LINK" ]; then link_state="symlink"; else link_state="replaced"; fi
+assert_eq "the link is still a symlink" "$link_state" "symlink"
+assert_eq "the target received the patterns" "$(jq -c '.permissions.deny' "$TARGET")" \
+  '["Bash(grep *)","Bash(rm -rf /)","Bash(rm -rf \"$HOME\")","Bash(mkfs *)"]'
+assert_eq "no temp file beside the link" \
+  "$(find "$WORK/home" -name '.settings.json.*' | wc -l | tr -d ' ')" "0"
+
 echo "==> no temp file is left behind"
 assert_eq "only the settings files remain" \
   "$(find "$WORK" -name '.settings.json.*' | wc -l | tr -d ' ')" "0"

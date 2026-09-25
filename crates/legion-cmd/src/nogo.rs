@@ -53,6 +53,11 @@ pub enum NoGoPredicate {
         prefixes: Vec<String>,
         suffixes: Vec<String>,
     },
+    /// Some operand is a forced refspec -- it starts with `+` -- whose source
+    /// or destination (either side of its first `:`) equals one of `names`.
+    /// `+main`, `+HEAD:main` and `+main:refs/heads/main` all force-write the
+    /// ref they name, with or without a force flag.
+    ForcedRefspec { names: Vec<String> },
 }
 
 impl NoGoEntry {
@@ -100,6 +105,12 @@ impl NoGoPredicate {
                 equals.iter().any(|e| e == word)
                     || prefixes.iter().any(|p| word.starts_with(p.as_str()))
                     || suffixes.iter().any(|s| word.ends_with(s.as_str()))
+            }),
+            NoGoPredicate::ForcedRefspec { names } => operands.iter().any(|word| {
+                word.strip_prefix('+').is_some_and(|refspec| {
+                    let (source, destination) = refspec.split_once(':').unwrap_or((refspec, ""));
+                    names.iter().any(|n| n == source || n == destination)
+                })
             }),
         }
     }
@@ -169,6 +180,11 @@ pub const FORK_BOMB: &str = "fork-bomb";
 pub const CHMOD_CHOWN_ROOT: &str = "chmod-chown-recursive-root";
 /// Id of a forced `git push` to main or master.
 pub const FORCE_PUSH_MAIN: &str = "git-force-push-main";
+/// Id of a `git push` whose `+` refspec force-writes main or master.
+pub const FORCE_REFSPEC_MAIN: &str = "git-force-refspec-main";
+
+/// The ref names a forced push may not write.
+const PROTECTED_BRANCHES: [&str; 4] = ["main", "master", "refs/heads/main", "refs/heads/master"];
 
 /// The disk device paths a raw block copy may not write to: whole disks and
 /// partitions, never `/dev/null` or `/dev/zero`.
@@ -245,10 +261,22 @@ pub fn builtin_no_go() -> Vec<NoGoEntry> {
                 operand(&["push"], &[], &[]),
                 flag(&['f'], &["force", "force-with-lease"]),
                 operand(
-                    &["main", "master", "refs/heads/main", "refs/heads/master"],
+                    &PROTECTED_BRANCHES,
                     &[],
                     &[":main", ":master", ":refs/heads/main", ":refs/heads/master"],
                 ),
+            ],
+        },
+        NoGoEntry {
+            id: FORCE_REFSPEC_MAIN.to_string(),
+            binaries: strings(&["git"]),
+            binary_prefixes: Vec::new(),
+            position: None,
+            predicates: vec![
+                operand(&["push"], &[], &[]),
+                NoGoPredicate::ForcedRefspec {
+                    names: strings(&PROTECTED_BRANCHES),
+                },
             ],
         },
     ]
@@ -313,6 +341,15 @@ pub const BUILTIN_DENY_PATTERNS: &[(&str, &[&str])] = &[
             "Bash(git push -f * master)",
             "Bash(git push --force-with-lease * main)",
             "Bash(git push --force-with-lease * master)",
+        ],
+    ),
+    (
+        FORCE_REFSPEC_MAIN,
+        &[
+            "Bash(git push * +main)",
+            "Bash(git push * +master)",
+            "Bash(git push * +HEAD:main)",
+            "Bash(git push * +HEAD:master)",
         ],
     ),
 ];
@@ -569,6 +606,39 @@ mod tests {
             "git push --force origin feature",
             "git push -f origin fix/main-menu",
             "git push origin main",
+        ] {
+            assert_eq!(matched(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_plus_refspec_that_force_writes_main_or_master_matches() {
+        for command in [
+            "git push origin +main",
+            "git push -f origin +main",
+            "git push origin +master",
+            "git push origin +HEAD:main",
+            "git push origin +feature:refs/heads/master",
+            "git push origin +main:backup",
+            "git push origin feature +refs/heads/main",
+        ] {
+            let hit = matched(command);
+            assert!(
+                hit.as_deref() == Some(FORCE_REFSPEC_MAIN)
+                    || hit.as_deref() == Some(FORCE_PUSH_MAIN),
+                "{command} -> {hit:?}"
+            );
+        }
+        assert_eq!(
+            matched("git push origin +main").as_deref(),
+            Some(FORCE_REFSPEC_MAIN)
+        );
+        for command in [
+            "git push origin +feature",
+            "git push origin +HEAD:feature",
+            "git push origin main",
+            "git push origin HEAD:main",
+            "git fetch origin +main:main",
         ] {
             assert_eq!(matched(command), None, "{command}");
         }

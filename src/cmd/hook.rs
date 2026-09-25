@@ -279,22 +279,39 @@ fn respond_with(
         Ok(payload) => payload,
         Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
-    let policy_text: String = match policy_text {
-        Ok(text) => text,
-        Err(e) => return deny_for_error(&e, Some(&payload)),
-    };
-    let settings: RouteSettings = match RouteSettings::from_policy_text(&policy_text) {
-        Ok(settings) => settings,
-        Err(e) => {
-            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload));
-        }
-    };
-    let policy: Arc<Policy> = match parse_policy(&policy_text) {
-        Ok(policy) => Arc::new(policy),
-        Err(e) => {
-            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload));
-        }
-    };
+    // A policy file that cannot be read still leaves the built-in no-go list
+    // in force (FR-CMD-025): route runs over an empty policy, so a no-go
+    // match is refused, recorded and notified, and every other command is
+    // denied with the read error exactly as before. A file that reads but
+    // does not parse is a different failure and denies outright.
+    let (policy, settings, unread): (Arc<Policy>, RouteSettings, Option<AdapterError>) =
+        match policy_text {
+            Err(e) => (
+                Arc::new(Policy::default()),
+                RouteSettings::default(),
+                Some(e),
+            ),
+            Ok(text) => {
+                let settings: RouteSettings = match RouteSettings::from_policy_text(&text) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        return deny_for_error(
+                            &AdapterError::PolicyRead(e.to_string()),
+                            Some(&payload),
+                        );
+                    }
+                };
+                match parse_policy(&text) {
+                    Ok(policy) => (Arc::new(policy), settings, None),
+                    Err(e) => {
+                        return deny_for_error(
+                            &AdapterError::PolicyRead(e.to_string()),
+                            Some(&payload),
+                        );
+                    }
+                }
+            }
+        };
 
     let call = ToolCall {
         tool: payload.tool_name.clone(),
@@ -339,9 +356,12 @@ fn respond_with(
         })?;
         Ok(routed)
     });
-    match outcome {
-        Ok(routed) => apply(&routed, &payload, &policy),
-        Err(e) => deny_for_error(&e, Some(&payload)),
+    match (outcome, unread) {
+        (Ok(routed), Some(read_error)) if !matches!(routed.deciding, Deciding::NoGo { .. }) => {
+            deny_for_error(&read_error, Some(&payload))
+        }
+        (Ok(routed), _) => apply(&routed, &payload, &policy),
+        (Err(e), _) => deny_for_error(&e, Some(&payload)),
     }
 }
 
@@ -1492,6 +1512,46 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("inbox unreachable"))
         );
+    }
+
+    #[test]
+    fn an_unreadable_policy_still_refuses_records_and_notifies_a_no_go_hit() {
+        // FR-CMD-025: the built-ins apply when the policy file is absent.
+        let store = temp_store();
+        let unread = || {
+            Err(AdapterError::PolicyRead(
+                "/plugin/legion-cmd/policy.json: No such file".to_string(),
+            ))
+        };
+        let response = respond_with(
+            &session_payload("rm -rf /", "s1"),
+            unread(),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store.clone(),
+            None,
+        );
+        assert_denied(&response);
+        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(reason(&response).contains(RECORDED_NOTE));
+        let rows = records(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::NoGo);
+        assert_eq!(
+            store.notices.lock().expect("notices lock").clone(),
+            vec!["rm-recursive-force-root".to_string()]
+        );
+
+        // Every other command is still denied with the read error, as before.
+        let response = respond_with(
+            &session_payload("echo hi", "s1"),
+            unread(),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store.clone(),
+            None,
+        );
+        assert_denied(&response);
+        assert!(reason(&response).contains("policy: /plugin/legion-cmd/policy.json"));
+        assert_eq!(records(&store).len(), 1);
     }
 
     #[test]

@@ -1326,6 +1326,12 @@ fn parse_no_go_predicates(value: &Value, pointer: &str) -> Result<Vec<NoGoPredic
                     suffixes: optional_string_array(map, "suffixes", &item_pointer)?,
                 }
             }
+            "forced-refspec" => {
+                check_known_keys(map, &item_pointer, &["kind", "names"])?;
+                NoGoPredicate::ForcedRefspec {
+                    names: optional_string_array(map, "names", &item_pointer)?,
+                }
+            }
             _ => {
                 return Err(PolicyError::UnknownPredicateKind {
                     pointer: child_pointer(&item_pointer, "kind"),
