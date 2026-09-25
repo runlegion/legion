@@ -190,10 +190,11 @@ fn tool_call(
 /// a second `rm -rf x` command.
 ///
 /// The run of leading assignment words is the exception, as it is to the
-/// shell: in `NAME=value`, only the value is quoted (`FOO='a b'`). Quoting
-/// the whole word would turn the assignment into the command name and the
-/// real command into its argument. The first word that is not an assignment
-/// ends the run.
+/// shell: in `NAME=value` (or `NAME+=value`, `NAME[sub]=value`,
+/// `NAME[sub]+=value`), only the value is quoted (`FOO='a b'`). Quoting the
+/// whole word would turn the assignment into the command name and the real
+/// command into its argument. The first word that is not an assignment ends
+/// the run.
 fn command_line(words: &[String]) -> String {
     if let [only] = words {
         return only.clone();
@@ -203,8 +204,8 @@ fn command_line(words: &[String]) -> String {
         .iter()
         .map(|word| {
             if in_assignments {
-                if let Some((name, value)) = assignment(word) {
-                    return format!("{name}={}", quoted_word(value));
+                if let Some((target, value)) = assignment(word) {
+                    return format!("{target}{}", quoted_word(value));
                 }
                 in_assignments = false;
             }
@@ -223,17 +224,33 @@ fn quoted_word(word: &str) -> String {
     }
 }
 
-/// Splits `word` into `(NAME, value)` when it is a shell assignment: `NAME`
-/// is a valid identifier (a letter or `_`, then letters, digits or `_`)
-/// followed by `=`. `None` for any other word.
+/// Splits `word` into `(target, value)` when it is a bash assignment word.
+/// `target` runs through the `=` and is kept bare. It is an identifier (a
+/// letter or `_`, then letters, digits or `_`), then an optional `[subscript]`
+/// (everything up to the first `]`, taken bare as bash takes it), then an
+/// optional `+`, then `=`. `None` for any other word.
 fn assignment(word: &str) -> Option<(&str, &str)> {
-    let (name, value) = word.split_once('=')?;
-    let mut chars = name.chars();
-    let starts_well = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
-    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    (starts_well && rest_ok).then_some((name, value))
+    let bytes = word.as_bytes();
+    let first = *bytes.first()?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut at = 1 + bytes[1..]
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+        .count();
+    if bytes.get(at) == Some(&b'[') {
+        at += 1 + bytes[at + 1..].iter().position(|b| *b == b']')? + 1;
+    }
+    if bytes.get(at) == Some(&b'+') {
+        at += 1;
+    }
+    if bytes.get(at) != Some(&b'=') {
+        return None;
+    }
+    // `at` indexes the ASCII `=`, so `at + 1` is a char boundary even when the
+    // subscript holds multi-byte characters.
+    Some(word.split_at(at + 1))
 }
 
 /// True when `word` would not survive the shell as one literal word: it is
@@ -762,6 +779,59 @@ mod tests {
         let from_typed = check_policy(typed, POLICY);
         assert_eq!(from_positional.decision, from_typed.decision);
         assert_eq!(deny_reason(&from_positional), "unrecoverable");
+    }
+
+    #[test]
+    fn every_bash_assignment_form_keeps_its_target_bare() {
+        for (word, expected) in [
+            ("FOO+=a b", "FOO+='a b'"),
+            ("arr[0]=a b", "arr[0]='a b'"),
+            ("arr[0]+=a b", "arr[0]+='a b'"),
+            ("arr[k=v]=x", "arr[k=v]=x"),
+            ("FOO+=1", "FOO+=1"),
+            ("arr[0]=1", "arr[0]=1"),
+        ] {
+            let words: Vec<String> = vec![word.to_string(), "ls".to_string()];
+            assert_eq!(command_line(&words), format!("{expected} ls"), "{word}");
+        }
+        // Not assignments: an unclosed subscript, `+` without `=`, no name.
+        for word in ["arr[0=a b", "FOO+a b", "=a b"] {
+            let words: Vec<String> = vec![word.to_string(), "ls".to_string()];
+            assert_eq!(
+                command_line(&words),
+                format!("{} ls", shell_single_quote(word)),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_assignment_prefix_form_decides_the_same_as_the_typed_command() {
+        // The re-review's cases: each positional prefix must report the
+        // Decision the typed string gets via --input, the rm-rf deny.
+        for (positional, typed) in [
+            (vec!["FOO+=a b"], r#"FOO+="a b""#),
+            (vec!["arr[0]=a b"], r#"arr[0]="a b""#),
+            (vec!["arr[0]+=a b"], r#"arr[0]+="a b""#),
+            (vec!["FOO+=x", "BAR=a b"], r#"FOO+=x BAR="a b""#),
+        ] {
+            let mut words: Vec<String> = positional.iter().map(|w| w.to_string()).collect();
+            words.extend(["rm", "-rf", "build"].map(String::from));
+            let from_positional =
+                check_policy(tool_call(None, None, words).expect("a valid call"), POLICY);
+            let input = serde_json::json!({ "command": format!("{typed} rm -rf build") });
+            let from_typed = check_policy(
+                tool_call(
+                    Some("Bash".to_string()),
+                    Some(input.to_string()),
+                    Vec::new(),
+                )
+                .expect("a valid call"),
+                POLICY,
+            );
+            assert_eq!(from_positional.decision, from_typed.decision, "{typed}");
+            assert_eq!(deny_reason(&from_positional), "unrecoverable", "{typed}");
+        }
     }
 
     #[test]
