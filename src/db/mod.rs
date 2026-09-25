@@ -38,10 +38,10 @@ pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::validate_hhmm;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode, TransactionBehavior};
 
 use crate::error::{LegionError, Result};
 
@@ -69,6 +69,17 @@ pub(crate) fn format_date(iso_timestamp: &str) -> &str {
 /// with sync_actor's own setting (#721).
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Schema stamp written to `PRAGMA user_version` once [`Database::open`]
+/// has run the full create-and-migrate chain (#1289). An open that finds
+/// this value (or newer) skips the chain and its write lock entirely.
+///
+/// Bump this whenever a `create_tables` or `migrate` step changes the
+/// schema: an already-stamped store only re-runs the chain when its stamp
+/// is below this value, so a new step without a bump never reaches it.
+/// `schema_fingerprint_is_pinned_to_schema_version` fails on a schema
+/// change until this is bumped and the fingerprint re-pinned.
+const SCHEMA_VERSION: i32 = 1;
+
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
     pub(crate) conn: Connection,
@@ -86,20 +97,49 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)
             .map_err(LegionError::Database)?;
 
-        let mode: String = conn
-            .pragma_query_value(None, "journal_mode", |row| row.get(0))
-            .map_err(LegionError::Database)?;
-        if mode != "wal" {
-            conn.pragma_update(None, "journal_mode", "WAL")?;
-        }
-
-        Self::init_schema(&conn)?;
+        Self::enable_wal(&conn)?;
+        Self::init_schema(&mut conn)?;
 
         Ok(Self { conn })
+    }
+
+    /// Switch the store to WAL journaling unless it already is.
+    ///
+    /// SQLite does not run the busy handler for the lock the WAL switch
+    /// needs, so a fresh store opened by several connections at once
+    /// fails all but one switch with `SQLITE_BUSY` immediately (#1289).
+    /// A busy switch is retried until [`DEFAULT_BUSY_TIMEOUT`] runs out,
+    /// re-reading the mode first so a switch another opener already made
+    /// ends the loop.
+    fn enable_wal(conn: &Connection) -> Result<()> {
+        let deadline = Instant::now() + DEFAULT_BUSY_TIMEOUT;
+        loop {
+            let mode: String = conn
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .map_err(LegionError::Database)?;
+            if mode == "wal" {
+                return Ok(());
+            }
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Err(e)
+                    if e.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => return result.map_err(LegionError::Database),
+            }
+        }
+    }
+
+    /// Read the store's `PRAGMA user_version` schema stamp.
+    fn schema_version(conn: &Connection) -> Result<i32> {
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(LegionError::Database)
     }
 
     /// Check whether a table has a specific column via PRAGMA table_info.
@@ -115,45 +155,64 @@ impl Database {
         Ok(names.iter().any(|n| n == column))
     }
 
-    /// Create every table and index, then run the column migrations.
+    /// Create every table and index, then run the column migrations,
+    /// serialized across every connection opening this store (#1289).
+    ///
+    /// A store stamped with [`SCHEMA_VERSION`] (or newer) returns after
+    /// one `user_version` read, taking no lock. Otherwise the whole chain
+    /// runs inside one `BEGIN IMMEDIATE` transaction: the write lock is
+    /// taken up front (waiting out [`DEFAULT_BUSY_TIMEOUT`] behind another
+    /// opener), the stamp is re-read under the lock so an opener that
+    /// lost the race to a finished migration does nothing, and the stamp
+    /// is written in the same commit as the schema. Two opens of a fresh
+    /// store therefore never interleave has_column checks and ALTERs.
     ///
     /// Each domain file owns its DDL: the per-domain `create_tables`
     /// functions run the CREATE TABLE / CREATE INDEX statements for the
-    /// base shape inside one transaction, and the `migrate` steps
-    /// (has_column-guarded ALTERs, their backfills, and indexes over
-    /// migrated columns) run after it, outside the transaction, in the
-    /// same relative order they held in the single-file init_schema.
-    fn init_schema(conn: &Connection) -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
-        reflections::create_tables(conn)?;
-        board::create_tables(conn)?;
-        kanban::create_tables(conn)?;
-        defer::create_tables(conn)?;
-        schedules::create_tables(conn)?;
-        health::create_tables(conn)?;
-        audit::create_tables(conn)?;
-        quality_gates::create_tables(conn)?;
-        findings::create_tables(conn)?;
-        statusline_samples::create_tables(conn)?;
-        wake::create_tables(conn)?;
-        scip::create_tables(conn)?;
-        sessions::create_tables(conn)?;
-        documents::create_tables(conn)?;
-        uncertainty::create_tables(conn)?;
-        autonomy::create_tables(conn)?;
-        heartbeat::create_tables(conn)?;
-        inventory::create_tables(conn)?;
-        module_edges::create_tables(conn)?;
-        css_symbols::create_tables(conn)?;
-        tx.commit()?;
+    /// base shape, and the `migrate` steps (has_column-guarded ALTERs,
+    /// their backfills, and indexes over migrated columns) run after, in
+    /// the same relative order they held in the single-file init_schema.
+    fn init_schema(conn: &mut Connection) -> Result<()> {
+        if Self::schema_version(conn)? >= SCHEMA_VERSION {
+            return Ok(());
+        }
 
-        reflections::migrate(conn)?;
-        board::migrate(conn)?;
-        kanban::migrate(conn)?;
-        schedules::migrate(conn)?;
-        wake::migrate(conn)?;
-        quality_gates::migrate(conn)?;
-        documents::migrate(conn)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if Self::schema_version(&tx)? >= SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        reflections::create_tables(&tx)?;
+        board::create_tables(&tx)?;
+        kanban::create_tables(&tx)?;
+        defer::create_tables(&tx)?;
+        schedules::create_tables(&tx)?;
+        health::create_tables(&tx)?;
+        audit::create_tables(&tx)?;
+        quality_gates::create_tables(&tx)?;
+        findings::create_tables(&tx)?;
+        statusline_samples::create_tables(&tx)?;
+        wake::create_tables(&tx)?;
+        scip::create_tables(&tx)?;
+        sessions::create_tables(&tx)?;
+        documents::create_tables(&tx)?;
+        uncertainty::create_tables(&tx)?;
+        autonomy::create_tables(&tx)?;
+        heartbeat::create_tables(&tx)?;
+        inventory::create_tables(&tx)?;
+        module_edges::create_tables(&tx)?;
+        css_symbols::create_tables(&tx)?;
+
+        reflections::migrate(&tx)?;
+        board::migrate(&tx)?;
+        kanban::migrate(&tx)?;
+        schedules::migrate(&tx)?;
+        wake::migrate(&tx)?;
+        quality_gates::migrate(&tx)?;
+        documents::migrate(&tx)?;
+
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -432,10 +491,9 @@ mod tests {
 
         lock_held.wait();
 
-        // Time the open AND the write together: Database::open's own
-        // migrate step issues unconditional `CREATE INDEX IF NOT EXISTS`
-        // DDL, which needs the write lock even when the index already
-        // exists, so contention can surface during open, not just insert.
+        // Time the open AND the write together. The store is already
+        // stamped, so open skips the migration chain (#1289) and the
+        // contention surfaces at the insert.
         let start = Instant::now();
         let waiter = Database::open(&path).unwrap();
         waiter
@@ -548,5 +606,191 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old_count, 0, "no rows should remain under the old name");
+    }
+
+    /// Every schema object in the store, ordered, as `(type, name, sql)`.
+    /// Two stores with equal snapshots carry the same tables, columns, and
+    /// indexes (an ALTER ... ADD COLUMN rewrites the table's stored `sql`).
+    type SchemaSnapshot = Vec<(String, String, Option<String>)>;
+
+    fn schema_snapshot(conn: &Connection) -> SchemaSnapshot {
+        conn.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// The schema a fresh store gets from one uncontended open.
+    fn reference_schema() -> SchemaSnapshot {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("reference.db")).unwrap();
+        schema_snapshot(&db.conn)
+    }
+
+    /// Assert the store at `path` carries the full schema and the stamp.
+    fn assert_full_schema(path: &Path, reference: &SchemaSnapshot) {
+        let conn = Connection::open(path).unwrap();
+        assert_eq!(&schema_snapshot(&conn), reference, "schema incomplete");
+        assert_eq!(
+            Database::schema_version(&conn).unwrap(),
+            SCHEMA_VERSION,
+            "schema version unstamped"
+        );
+    }
+
+    /// SHA-256 of a fresh store's [`schema_snapshot`] at [`SCHEMA_VERSION`].
+    const PINNED_SCHEMA_FINGERPRINT: (i32, &str) = (
+        1,
+        "8acd6b6d4eb1cdb89f70157436f5e2b63e4ad48091edcdd3a51888f2df5895bd",
+    );
+
+    #[test]
+    fn schema_fingerprint_is_pinned_to_schema_version() {
+        // #1289: an already-stamped store skips the migration chain, so a
+        // schema change that does not bump SCHEMA_VERSION would never reach
+        // it. Any change to the fresh schema changes this fingerprint.
+        use sha2::{Digest, Sha256};
+
+        let snapshot = reference_schema();
+        let fingerprint = hex::encode(Sha256::digest(format!("{snapshot:?}")));
+        assert_eq!(
+            (SCHEMA_VERSION, fingerprint.as_str()),
+            PINNED_SCHEMA_FINGERPRINT,
+            "the fresh schema changed: bump SCHEMA_VERSION in src/db/mod.rs and \
+             re-pin PINNED_SCHEMA_FINGERPRINT to (new version, new fingerprint)"
+        );
+    }
+
+    #[test]
+    fn open_stamps_schema_version_and_skips_the_chain_when_current() {
+        // #1289: the full chain stamps the store; a later open finds the
+        // stamp and returns without taking the write lock, so it succeeds
+        // even while another connection holds that lock.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamped.db");
+        drop(Database::open(&path).unwrap());
+
+        let holder = Connection::open(&path).unwrap();
+        assert_eq!(Database::schema_version(&holder).unwrap(), SCHEMA_VERSION);
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let start = std::time::Instant::now();
+        Database::open(&path).unwrap();
+        assert!(
+            start.elapsed() < DEFAULT_BUSY_TIMEOUT / 2,
+            "a current store's open waited on the write lock"
+        );
+        holder.execute_batch("COMMIT;").unwrap();
+    }
+
+    const CONCURRENT_OPENERS: usize = 8;
+
+    #[test]
+    fn concurrent_thread_opens_of_a_fresh_store_all_succeed() {
+        // #1289: N threads released together at one fresh store must all
+        // open it, and the store must end with the full schema. Repeated
+        // over many fresh stores so an unserialized migration chain would
+        // race (duplicate column name) in at least one round.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const ROUNDS: usize = 40;
+        let reference = reference_schema();
+        for round in 0..ROUNDS {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fresh.db");
+            let barrier = Arc::new(Barrier::new(CONCURRENT_OPENERS));
+            let handles: Vec<_> = (0..CONCURRENT_OPENERS)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let path = path.clone();
+                    thread::spawn(move || {
+                        barrier.wait();
+                        Database::open(&path).map(drop)
+                    })
+                })
+                .collect();
+            for handle in handles {
+                if let Err(e) = handle.join().unwrap() {
+                    panic!("round {round}: concurrent open failed: {e}");
+                }
+            }
+            assert_full_schema(&path, &reference);
+        }
+    }
+
+    /// Env var naming the store a child process opens in
+    /// `concurrent_open_child`; unset in a normal test run.
+    const CHILD_DB_ENV: &str = "LEGION_TEST_1289_CHILD_DB";
+    /// Env var naming the file whose appearance releases every child at once.
+    const CHILD_GO_ENV: &str = "LEGION_TEST_1289_CHILD_GO";
+    /// Line a child prints after its open succeeds, so the parent can tell
+    /// a real open from a test filter that matched nothing.
+    const CHILD_SENTINEL: &str = "legion-1289-child-opened";
+
+    /// Child side of `concurrent_process_opens_of_a_fresh_store_all_succeed`.
+    /// A no-op pass unless the parent set [`CHILD_DB_ENV`].
+    #[test]
+    fn concurrent_open_child() {
+        let Some(db_path) = std::env::var_os(CHILD_DB_ENV) else {
+            return;
+        };
+        let go = std::path::PathBuf::from(std::env::var_os(CHILD_GO_ENV).unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !go.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "go file never appeared"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Database::open(Path::new(&db_path)).unwrap();
+        println!("{CHILD_SENTINEL}");
+    }
+
+    #[test]
+    fn concurrent_process_opens_of_a_fresh_store_all_succeed() {
+        // #1289: N separate processes opening one fresh store at once must
+        // all succeed and leave the full schema. Each child is this test
+        // binary running `concurrent_open_child`; all children wait on a go
+        // file so their opens overlap instead of trailing process startup.
+        use std::process::{Command, Stdio};
+
+        const ROUNDS: usize = 8;
+        let exe = std::env::current_exe().unwrap();
+        let child_test = format!(
+            "{}::concurrent_open_child",
+            module_path!().split_once("::").unwrap().1
+        );
+        let reference = reference_schema();
+        for round in 0..ROUNDS {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fresh.db");
+            let go = dir.path().join("go");
+            let children: Vec<_> = (0..CONCURRENT_OPENERS)
+                .map(|_| {
+                    Command::new(&exe)
+                        .args([child_test.as_str(), "--exact", "--nocapture"])
+                        .env(CHILD_DB_ENV, &path)
+                        .env(CHILD_GO_ENV, &go)
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .unwrap()
+                })
+                .collect();
+            std::fs::write(&go, b"").unwrap();
+            for child in children {
+                let out = child.wait_with_output().unwrap();
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(
+                    out.status.success() && stdout.contains(CHILD_SENTINEL),
+                    "round {round}: child open failed\nstdout:\n{stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            assert_full_schema(&path, &reference);
+        }
     }
 }
