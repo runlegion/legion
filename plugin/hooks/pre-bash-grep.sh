@@ -410,28 +410,35 @@ _legion_bashgrep_classify() {
 #     second search chained after this grep must never ride along;
 #   - a pattern file (-f, --file, or f inside a short-flag cluster such as
 #     -if), which turns every positional into a file argument;
-#   - recursion (-r/-R, in a cluster too, or --recursive/--directories): a
-#     saved tool-results file never needs it, and with it a symlinked
-#     directory would reach the repo;
-#   - a symlinked file argument, a `..` segment, or a path with spaces.
+#   - recursion or device reads (-r/-R/-d/-D, in a cluster too, or
+#     --recursive/--directories/--devices): a saved tool-results file never
+#     needs them;
+#   - a file argument that is not an existing regular, non-symlink file
+#     whose PHYSICAL directory (symlinks resolved, $HOME too) is still a
+#     <project>/<session>/tool-results directory -- a lexical check alone
+#     lets a symlinked `tool-results` component reach the repo;
+#   - a relative path, or a path with spaces.
 _legion_bashgrep_reads_tool_results() {
   _legion_bashgrep_is_compound "$1" && return 1
   local toks=()
   IFS=' ' read -ra toks <<<"$1"
 
-  local projects="${HOME}/.claude/projects/"
-  local pattern_seen=0 files=0 seen_dashdash=0 i j t ch
+  # One pass collects every positional. The pattern is known to come from
+  # -e/--regexp only once the whole argv is seen (`grep src/x -e PAT f`
+  # makes src/x a file), so which positional is the pattern is decided
+  # after the loop, never at the first positional.
+  local positionals=() pattern_via_e=0 seen_dashdash=0 i j t ch
   for ((i = 1; i < ${#toks[@]}; i++)); do
     t="${toks[$i]//[\"\']/}"
     if [ "$seen_dashdash" -eq 0 ]; then
       case "$t" in
         --) seen_dashdash=1; continue ;;
-        --regexp) i=$((i + 1)); pattern_seen=1; continue ;;
-        --regexp=*) pattern_seen=1; continue ;;
-        --file | --file=* | --recursive | --dereference-recursive | --directories*) return 1 ;;
+        --regexp) i=$((i + 1)); pattern_via_e=1; continue ;;
+        --regexp=*) pattern_via_e=1; continue ;;
+        --file | --file=* | --recursive | --dereference-recursive | --directories* | --devices*) return 1 ;;
         # Any other long flag is skipped. A flag's detached value
-        # (`--context 3`) is then misread as the pattern or a file, which
-        # fails the path check below -- a refusal, never a wrong allow.
+        # (`--context 3`) is then misread as a positional, which fails the
+        # file check below -- a refusal, never a wrong allow.
         --*) continue ;;
         -?*)
           # Short-flag cluster: -e ends it, taking the rest of the token
@@ -439,9 +446,9 @@ _legion_bashgrep_reads_tool_results() {
           for ((j = 1; j < ${#t}; j++)); do
             ch="${t:$j:1}"
             case "$ch" in
-              f | r | R | d) return 1 ;;
+              f | r | R | d | D) return 1 ;;
               e)
-                pattern_seen=1
+                pattern_via_e=1
                 [ "$j" -eq $((${#t} - 1)) ] && i=$((i + 1))
                 break
                 ;;
@@ -451,10 +458,14 @@ _legion_bashgrep_reads_tool_results() {
           ;;
       esac
     fi
-    if [ "$pattern_seen" -eq 0 ]; then
-      pattern_seen=1
-      continue
-    fi
+    positionals+=("$t")
+  done
+  [ "$pattern_via_e" -eq 1 ] || positionals=("${positionals[@]:1}")
+  [ "${#positionals[@]}" -gt 0 ] || return 1
+
+  local projects dir
+  projects="$(cd -P -- "${HOME}/.claude/projects" 2>/dev/null && pwd -P)" || return 1
+  for t in "${positionals[@]}"; do
     # The command text is unexpanded: resolve the home spellings it uses.
     case "$t" in
       \~/*) t="${HOME}/${t#\~/}" ;;
@@ -462,15 +473,17 @@ _legion_bashgrep_reads_tool_results() {
       \$\{HOME\}/*) t="${HOME}/${t#\$\{HOME\}/}" ;;
     esac
     case "$t" in
-      */../* | */..) return 1 ;;
-      "$projects"*) ;;
+      /*) ;;
       *) return 1 ;;
     esac
-    [[ "${t#"$projects"}" =~ ^[^/]+/[^/]+/tool-results/[^/]+$ ]] || return 1
-    [ -L "$t" ] && return 1
-    files=$((files + 1))
+    [ -f "$t" ] && [ ! -L "$t" ] || return 1
+    dir="$(cd -P -- "${t%/*}" 2>/dev/null && pwd -P)" || return 1
+    case "$dir" in
+      "$projects"/*) ;;
+      *) return 1 ;;
+    esac
+    [[ "${dir#"$projects"/}" =~ ^[^/]+/[^/]+/tool-results$ ]] || return 1
   done
-  [ "$files" -gt 0 ]
 }
 
 # Universal gate: skip uncovered repos.
