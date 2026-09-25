@@ -441,4 +441,103 @@ echo "==> #876: not-legion-covered repo -- no rewrite, same universal gate as ev
 out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"git grep Symbol"},"session_id":"rw-uncovered-t"}' | LEGION_REPO=uncovered-elsewhere bash "$HOOK")
 assert_empty "uncovered repo -- no rewrite, no deny, nothing" "$out"
 
+
+# --- #1264: a grep that only filters legion's own output passes -------------
+#
+# Every case uses "Symbol", a LOCAL sym hit that the BLOCK tier denies when
+# the grep searches the repo, so the grep's input source is the only
+# variable. An empty output here means pass-through, not a non-symbol
+# pattern slipping past.
+
+echo "==> #1264: a grep piped from a legion command passes"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"legion bullpen --repo x | grep Symbol"},"session_id":"own-pipe-t"}' | bash "$HOOK")
+assert_empty "legion bullpen | grep passes" "$out"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"legion post --help | grep -n Symbol"},"session_id":"own-pipe-help-t"}' | bash "$HOOK")
+assert_empty "legion post --help | grep passes" "$out"
+
+# Tool-results cases run the hook under a fake HOME in $WORK (removed by
+# make_plugin_root's EXIT trap): the exemption requires a real, regular
+# file whose physical directory is a tool-results directory, so the
+# fixtures must exist on disk.
+FAKE_HOME="$WORK/home"
+FAKE_PROJ="$FAKE_HOME/.claude/projects/-Volumes-store-legion"
+FAKE_TR="$FAKE_PROJ/sess-1/tool-results"
+TR_FILE="$FAKE_TR/toolu_01.txt"
+mkdir -p "$FAKE_TR" "$FAKE_PROJ/sess-2" "$WORK/repo-src"
+touch "$TR_FILE" "$WORK/repo-src/lib.rs"
+ln -s "$WORK/repo-src/lib.rs" "$FAKE_TR/link.txt"
+ln -s "$WORK/repo-src" "$FAKE_TR/linkdir"
+ln -s "$WORK/repo-src" "$FAKE_PROJ/sess-2/tool-results"
+
+# hook_tr CMD SESSION -- run the hook on CMD under the fake HOME.
+hook_tr() {
+  jq -cn --arg c "$1" --arg s "$2" \
+    '{cwd: "/tmp/legion", tool_name: "Bash", tool_input: {command: $c}, session_id: $s}' |
+    HOME="$FAKE_HOME" bash "$HOOK"
+}
+
+echo "==> #1264: a grep over a harness tool-results file passes"
+out=$(hook_tr "grep -n Symbol $TR_FILE" own-tr-abs-t)
+assert_empty "grep of an absolute tool-results path passes" "$out"
+out=$(hook_tr 'grep Symbol ~/.claude/projects/-Volumes-store-legion/sess-1/tool-results/toolu_01.txt' own-tr-tilde-t)
+assert_empty "grep of a ~/ tool-results path passes" "$out"
+# shellcheck disable=SC2016 # the unexpanded $HOME is the input under test
+out=$(hook_tr 'grep Symbol $HOME/.claude/projects/-Volumes-store-legion/sess-1/tool-results/toolu_01.txt' own-tr-home-t)
+assert_empty "grep of an unexpanded \$HOME tool-results path passes" "$out"
+out=$(hook_tr "grep -e Symbol '$TR_FILE'" own-tr-quoted-t)
+assert_empty "grep -e PAT of a quoted tool-results path passes" "$out"
+out=$(hook_tr "grep -ine Symbol $TR_FILE" own-cluster-e-t)
+assert_empty "a -ine cluster (pattern via e) over a tool-results file passes" "$out"
+
+echo "==> #1264: a grep over repository files is still refused"
+out=$(echo '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep -r Symbol src/"},"session_id":"own-repo-t"}' | bash "$HOOK")
+assert_contains "repo grep still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol $TR_FILE src/" own-mixed-t)
+assert_contains "tool-results file beside a repo path still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol $FAKE_TR/../../../../../repo-src/lib.rs" own-dotdot-t)
+assert_contains "a .. escape out of tool-results still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol $FAKE_TR" own-trdir-t)
+assert_contains "a flagless tool-results directory argument still denied" "$out" '"permissionDecision": "deny"'
+# With a later -e/--regexp, the leading positional is a FILE (here a repo
+# file named `Symbol`), not the pattern. Once the exemption refuses, the
+# ladder reads `Symbol` as the pattern and BLOCKs, which is observable; a
+# path-shaped first positional would fall through silently either way.
+out=$(hook_tr "grep Symbol -e fn_main $TR_FILE" own-late-e-t)
+assert_contains "a repo file ahead of a later -e is checked as a file, still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol --regexp fn_main $TR_FILE" own-late-regexp-t)
+assert_contains "a repo file ahead of a later --regexp is checked as a file, still denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #1264: a repo search chained after a tool-results grep is still refused"
+out=$(hook_tr "grep Symbol $TR_FILE; grep -r Symbol src/" own-chain-t)
+assert_contains "; chained repo grep still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol $TR_FILE
+grep -r Symbol src/" own-newline-t)
+assert_contains "newline-separated repo grep still denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #1264: recursion, device reads and pattern files never take the tool-results pass"
+for flags in '-r' '-R' '-rn' '-nR' '--recursive' '--directories=recurse' '-D' '--devices=read' '-if' '-f'; do
+  out=$(hook_tr "grep $flags Symbol $TR_FILE" own-flag-t)
+  assert_contains "grep $flags over a tool-results file still denied" "$out" '"permissionDecision": "deny"'
+done
+
+echo "==> #1264: a symlink anywhere on the path never takes the tool-results pass"
+out=$(hook_tr "grep Symbol $FAKE_TR/link.txt" own-link-t)
+assert_contains "a symlinked file in tool-results still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol $FAKE_TR/linkdir" own-linkdir-t)
+assert_contains "a symlinked directory in tool-results still denied" "$out" '"permissionDecision": "deny"'
+out=$(hook_tr "grep Symbol $FAKE_PROJ/sess-2/tool-results/lib.rs" own-trlink-t)
+assert_contains "a file under a symlinked tool-results component still denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #1264: a symlinked ~/.claude/projects anchor never takes the tool-results pass"
+# The link target holds a genuine-looking <x>/<y>/tool-results/<file>, so
+# only the anchor check refuses it.
+LINK_HOME="$WORK/link-home"
+mkdir -p "$LINK_HOME/.claude" "$WORK/elsewhere/x/y/tool-results"
+touch "$WORK/elsewhere/x/y/tool-results/f.txt"
+ln -s "$WORK/elsewhere" "$LINK_HOME/.claude/projects"
+out=$(jq -cn --arg c "grep Symbol $LINK_HOME/.claude/projects/x/y/tool-results/f.txt" \
+  '{cwd: "/tmp/legion", tool_name: "Bash", tool_input: {command: $c}, session_id: "own-anchor-t"}' |
+  HOME="$LINK_HOME" bash "$HOOK")
+assert_contains "a file under a symlinked projects anchor still denied" "$out" '"permissionDecision": "deny"'
+
 finish_tests
