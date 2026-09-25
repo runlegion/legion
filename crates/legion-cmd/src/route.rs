@@ -638,6 +638,85 @@ mod tests {
         assert_eq!(routed.facts, Facts::default());
     }
 
+    /// Rewrite rules for `git push`, `git add`, `git commit` and `gh pr view`,
+    /// each covering the arguments the compound-command tests pass it.
+    fn rewrite_policy() -> Policy {
+        policy(
+            r#"{"tools": {"Bash": {"families": {
+                "git push": {"rules": [
+                    {"id": "push-rewrite", "outcome": {"kind": "rewrite", "target": "legion push",
+                     "reason": "legion pushes", "translatable": {}}}
+                ]},
+                "git add": {"rules": [
+                    {"id": "add-rewrite", "outcome": {"kind": "rewrite", "target": "legion add",
+                     "reason": "legion stages", "translatable": {"flags": ["-A"]}}}
+                ]},
+                "git commit": {"rules": [
+                    {"id": "commit-rewrite", "outcome": {"kind": "rewrite", "target": "legion commit",
+                     "reason": "legion signs", "translatable": {"valued_flags": ["-m"]}}}
+                ]},
+                "gh pr view": {"rules": [
+                    {"id": "pr-view", "outcome": {"kind": "rewrite", "target": "legion pr view",
+                     "reason": "legion tracks PRs", "translatable": {"operands": ["integer"]}}}
+                ]}
+            }}}}"#,
+        )
+    }
+
+    #[test]
+    fn a_single_invocation_rewrite_routes_as_its_rule_says() {
+        let routed = route(&rewrite_policy(), &bash("git push"), &Context::default());
+        match routed.decision {
+            Decision::Rewrite { target, .. } => assert_eq!(target.as_str(), "legion push"),
+            other => panic!("expected rewrite, got {other:?}"),
+        }
+        assert_eq!(
+            routed.deciding,
+            Deciding::Rule {
+                id: "push-rewrite".to_string(),
+                needs_operator: false
+            }
+        );
+    }
+
+    /// FR-CMD-008: a rewrite replaces the whole command, so a compound command
+    /// whose Decision would be a rewrite is refused, naming the rule, rather
+    /// than rewritten with its other parts dropped.
+    #[test]
+    fn a_compound_command_whose_decision_is_a_rewrite_is_refused() {
+        for (command, rule) in [
+            ("git push && echo done", "push-rewrite"),
+            ("git add -A && git commit -m x", "add-rewrite"),
+            ("gh pr view 42 | head", "pr-view"),
+            ("git commit -m x; gh pr view 42", "commit-rewrite"),
+        ] {
+            let routed = route(&rewrite_policy(), &bash(command), &Context::default());
+            match &routed.decision {
+                Decision::Deny(details) => {
+                    assert!(
+                        details.reason().contains(&format!("rule '{rule}'")),
+                        "`{command}`: {}",
+                        details.reason()
+                    );
+                    assert!(
+                        details.reason().contains("drop the rest"),
+                        "`{command}`: {}",
+                        details.reason()
+                    );
+                }
+                other => panic!("`{command}` must be refused, got {other:?}"),
+            }
+            assert_eq!(
+                routed.deciding,
+                Deciding::Rule {
+                    id: rule.to_string(),
+                    needs_operator: false
+                },
+                "`{command}`"
+            );
+        }
+    }
+
     #[test]
     fn a_tool_kind_the_policy_does_not_model_is_allowed() {
         let p = sample_policy();
