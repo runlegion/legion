@@ -85,6 +85,7 @@ use crate::cmd::replacement::{build_replacement, rewritable_field};
 use crate::db::Database;
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
+use crate::telemetry::CmdIncidentRecord;
 use crate::timerange::TimeRange;
 
 /// Names the policy file directly. Checked before the plugin-root default so
@@ -240,6 +241,8 @@ trait CmdStore: Send + Sync {
     fn log(&self) -> IncidentLog;
     /// The agent a repo's commands are recorded under.
     fn agent_for(&self, repo: &str) -> String;
+    /// Sends a first no-go hit's operator notice (FR-CMD-027).
+    fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()>;
 }
 
 /// The production store: the node's legion database and telemetry log.
@@ -254,6 +257,9 @@ impl CmdStore for LocalCmdStore {
     }
     fn agent_for(&self, repo: &str) -> String {
         crate::cmd::incident::agent_for(repo)
+    }
+    fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()> {
+        crate::cmd::incident::send_notice(record)
     }
 }
 
@@ -325,7 +331,9 @@ fn respond_with(
             session_id: session.unwrap_or_default(),
             cwd: cwd.unwrap_or_default(),
         };
-        record_outcome(&routed, &origin, &db, &log, now)?;
+        record_outcome(&routed, &origin, &db, &log, now, &|record| {
+            store.notify(record)
+        })?;
         Ok(routed)
     });
     match outcome {
@@ -535,12 +543,13 @@ fn record_outcome(
     db: &Database,
     log: &IncidentLog,
     now: DateTime<Utc>,
+    notify: &dyn Fn(&CmdIncidentRecord) -> error::Result<()>,
 ) -> Result<(), AdapterError> {
     let key: Option<&CommandKey> = routed.facts.command_key.as_ref();
     let failed = |e: error::LegionError| AdapterError::Record(e.to_string());
     match (&routed.decision, &routed.deciding) {
         (Decision::Deny(_), Deciding::NoGo { id }) => {
-            log.record_no_go(origin, id, key.map(CommandKey::as_str), now)
+            log.record_no_go(origin, id, key.map(CommandKey::as_str), now, notify)
                 .map_err(failed)?;
         }
         (
@@ -781,6 +790,10 @@ mod tests {
     /// A confirmation store and incident log in a temporary directory.
     struct TempStore {
         dir: tempfile::TempDir,
+        /// The entry of every operator notice sent, in order.
+        notices: Mutex<Vec<String>>,
+        /// When set, every notice fails with this text.
+        notice_failure: Option<String>,
     }
 
     impl TempStore {
@@ -802,11 +815,23 @@ mod tests {
         fn agent_for(&self, repo: &str) -> String {
             format!("agent-of-{repo}")
         }
+        fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()> {
+            if let Some(failure) = &self.notice_failure {
+                return Err(error::LegionError::Telemetry(failure.clone()));
+            }
+            self.notices
+                .lock()
+                .expect("notices lock")
+                .push(record.entry.clone().unwrap_or_default());
+            Ok(())
+        }
     }
 
     fn temp_store() -> Arc<TempStore> {
         Arc::new(TempStore {
             dir: tempfile::tempdir().expect("tempdir"),
+            notices: Mutex::new(Vec::new()),
+            notice_failure: None,
         })
     }
 
@@ -1312,6 +1337,41 @@ mod tests {
     }
 
     #[test]
+    fn the_first_no_go_hit_in_a_session_notifies_the_operator_once_per_entry() {
+        let store = temp_store();
+        run(&store, "rm -rf /", "s1");
+        run(&store, "rm -fr /", "s1");
+        run(&store, ":(){ :|:& };:", "s1");
+        run(&store, "rm -rf /", "s2");
+        assert_eq!(
+            store.notices.lock().expect("notices lock").clone(),
+            vec![
+                "rm-recursive-force-root".to_string(),
+                "fork-bomb".to_string(),
+                "rm-recursive-force-root".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_notice_that_fails_to_send_is_recorded_and_the_command_stays_refused() {
+        let store = Arc::new(TempStore {
+            dir: tempfile::tempdir().expect("tempdir"),
+            notices: Mutex::new(Vec::new()),
+            notice_failure: Some("inbox unreachable".to_string()),
+        });
+        let response = run(&store, "rm -rf /", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(
+            records(&store)[0]
+                .notice_error
+                .as_deref()
+                .is_some_and(|e| e.contains("inbox unreachable"))
+        );
+    }
+
+    #[test]
     fn an_ask_is_recorded_and_the_refusal_says_so() {
         let store = temp_store();
         let response = run(&store, "curl example.com", "s1");
@@ -1416,6 +1476,9 @@ mod tests {
             fn agent_for(&self, repo: &str) -> String {
                 repo.to_string()
             }
+            fn notify(&self, _record: &CmdIncidentRecord) -> error::Result<()> {
+                Ok(())
+            }
         }
         let response = respond_with(
             &session_payload("curl example.com", "s1"),
@@ -1423,6 +1486,8 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             Arc::new(BrokenStore(TempStore {
                 dir: tempfile::tempdir().expect("tempdir"),
+                notices: Mutex::new(Vec::new()),
+                notice_failure: None,
             })),
             None,
         );

@@ -257,4 +257,9 @@ fn a_no_go_command_is_refused_and_recorded_through_the_real_binary() {
     let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
         .expect("incident log written under XDG_STATE_HOME");
     assert_eq!(log.lines().count(), 3);
+    // The first hit sent the operator notice through the real signal path;
+    // no send failure was recorded on its row.
+    let first: Value = serde_json::from_str(log.lines().next().expect("a row")).expect("json");
+    assert_eq!(first["hit_count"], 1);
+    assert!(first["notice_error"].is_null(), "row: {first}");
 }

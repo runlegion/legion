@@ -257,6 +257,10 @@ pub fn builtin_no_go() -> Vec<NoGoEntry> {
 /// The harness `permissions.deny` text patterns that mirror each built-in
 /// entry (FR-CMD-025): at least one per common written form. This layer is a
 /// backstop and is not complete; route's argument match is the check.
+///
+/// The harness reads `*` in a pattern as a wildcard, so the `rm -rf /*` form
+/// has no pattern: `Bash(rm -rf /*)` would also deny every recursive delete
+/// of an absolute path. route still refuses that form.
 pub const BUILTIN_DENY_PATTERNS: &[(&str, &[&str])] = &[
     (
         RM_ROOT,
@@ -264,7 +268,6 @@ pub const BUILTIN_DENY_PATTERNS: &[(&str, &[&str])] = &[
             "Bash(rm -rf /)",
             "Bash(rm -fr /)",
             "Bash(rm -r -f /)",
-            "Bash(rm -rf /*)",
             "Bash(rm -rf ~)",
             "Bash(rm -rf ~/)",
             "Bash(rm -rf $HOME)",

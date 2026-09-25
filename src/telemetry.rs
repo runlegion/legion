@@ -265,6 +265,10 @@ pub struct CmdIncidentRecord {
     /// A drop's dropped ask or confirmation id.
     #[serde(default)]
     pub drop_of: Option<String>,
+    /// A first no-go hit's operator notice that failed to send, with why.
+    /// `None` on a first hit means the notice was sent.
+    #[serde(default)]
+    pub notice_error: Option<String>,
 }
 
 /// Resolve the canonical legion-cmd incident log path (sibling of

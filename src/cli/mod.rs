@@ -1199,6 +1199,11 @@ pub(crate) enum Commands {
         /// hook response (JSON) on stdout. Always exits 0 with a response.
         #[arg(long)]
         hook: bool,
+        /// Print the harness permissions.deny text patterns that mirror the
+        /// built-in no-go entries, as one JSON array (#1237). Plugin setup
+        /// merges them into the user settings. Read-only.
+        #[arg(long, conflicts_with = "hook")]
+        deny_patterns: bool,
     },
 
     /// legion-cmd verbs an agent runs itself (#1237): `legion cmd confirm`

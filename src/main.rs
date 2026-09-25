@@ -355,7 +355,10 @@ fn run() -> error::Result<()> {
             all_hosts,
             json,
         } => cli::ops::handle_health(history, all_hosts, json)?,
-        Commands::CmdCheck { hook } => cli::cmd_check::handle_cmd_check(hook)?,
+        Commands::CmdCheck {
+            hook,
+            deny_patterns,
+        } => cli::cmd_check::handle_cmd_check(hook, deny_patterns)?,
         Commands::Cmd { action } => cli::cmd_confirm::handle_cmd(action)?,
     }
 
