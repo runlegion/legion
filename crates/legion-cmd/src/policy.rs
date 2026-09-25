@@ -338,26 +338,62 @@ pub struct Wrapper {
 }
 
 impl Wrapper {
+    /// Whether this wrapper claims an invocation of its binary with `args`.
+    /// A wrapper with no required subcommand claims every one. One with a
+    /// required subcommand claims it when that word follows the declared
+    /// options, since a runner's options precede its subcommand
+    /// (`pnpm -r exec`). When an option the wrapper does not declare comes
+    /// first, route cannot tell where the subcommand sits, so the wrapper
+    /// claims the invocation if the word appears at all and
+    /// [`Wrapper::payload_start`] then refuses it -- proxied opaque rather
+    /// than read as an ordinary invocation (#1286).
+    pub fn wraps(&self, args: &[String]) -> bool {
+        let Some(subcommand) = &self.required_subcommand else {
+            return true;
+        };
+        match self.options_end(args, 0) {
+            Some(index) => word_at(args, index) == Some(subcommand.as_str()),
+            None => args
+                .iter()
+                .any(|a| crate::evaluate::dequote_outer(a) == subcommand),
+        }
+    }
+
     /// The index in `args` where the wrapped command begins, or `None` when
     /// the wrapper's own words cannot be consumed by its declaration: an
-    /// option it does not declare, a value option with no value, or fewer
-    /// operands than it takes (#1286).
+    /// option it does not declare, a value option with no value, a missing
+    /// required subcommand, or fewer operands than it takes (#1286).
     ///
-    /// Options are read getopt-style and stop at the first word that is not
-    /// an option, or after a `--`. Each word is compared as the shell sees it
-    /// (one outer quote pair removed), so a quoted `"-u"` is still an option.
-    /// An index equal to `args.len()` means the wrapper wraps no command.
+    /// Declared options are read before and after the required subcommand,
+    /// then one `--`, then the declared operands. An index equal to
+    /// `args.len()` means the wrapper wraps no command.
     pub fn payload_start(&self, args: &[String]) -> Option<usize> {
-        let mut index = usize::from(self.required_subcommand.is_some());
-        while let Some(raw) = args.get(index) {
-            let word = crate::evaluate::dequote_outer(raw);
-            if word == "--" {
-                index += 1;
-                break;
+        let mut index = self.options_end(args, 0)?;
+        if let Some(subcommand) = &self.required_subcommand {
+            if word_at(args, index) != Some(subcommand.as_str()) {
+                return None;
             }
+            index = self.options_end(args, index + 1)?;
+        }
+        if word_at(args, index) == Some("--") {
+            index += 1;
+        }
+        let start = index + self.operands;
+        (start <= args.len()).then_some(start)
+    }
+
+    /// The index of the first word from `index` on that is not one of the
+    /// wrapper's options, or `None` when an option there is one it does not
+    /// declare or lacks its value. Options are read getopt-style; a `--` stops
+    /// the read and is left for the caller. Each word is compared as the shell
+    /// sees it (one outer quote pair removed), so a quoted `"-u"` is still an
+    /// option.
+    fn options_end(&self, args: &[String], mut index: usize) -> Option<usize> {
+        while let Some(word) = word_at(args, index) {
             // A lone `-` is an operand (stdin) unless the wrapper declares it
             // an option, as `env` does.
-            let is_option = word.starts_with('-') && (word != "-" || self.declares_flag(word));
+            let is_option =
+                word != "--" && word.starts_with('-') && (word != "-" || self.declares_flag(word));
             if !is_option {
                 break;
             }
@@ -367,8 +403,7 @@ impl Wrapper {
             }
             index += consumed;
         }
-        let start = index + self.operands;
-        (start <= args.len()).then_some(start)
+        Some(index)
     }
 
     /// How many words the option `word` spans (1, or 2 when its value is the
@@ -412,6 +447,11 @@ impl Wrapper {
     fn declares_value_option(&self, word: &str) -> bool {
         self.value_options.iter().any(|o| o == word)
     }
+}
+
+/// The word at `index` as the shell sees it, one outer quote pair removed.
+fn word_at(args: &[String], index: usize) -> Option<&str> {
+    args.get(index).map(|a| crate::evaluate::dequote_outer(a))
 }
 
 /// Whether an interpreter body is shell (re-entered) or a foreign language
@@ -463,16 +503,12 @@ impl Policy {
     }
 
     /// The wrapper matching `binary` given its arguments, if the policy names
-    /// one. A wrapper with a required subcommand matches only when that word
-    /// is the first argument.
+    /// one. A wrapper with a required subcommand matches only when
+    /// [`Wrapper::wraps`] finds that word.
     pub fn matching_wrapper(&self, binary: &str, args: &[String]) -> Option<&Wrapper> {
-        self.wrappers.iter().find(|w| {
-            w.binary == binary
-                && match &w.required_subcommand {
-                    None => true,
-                    Some(word) => args.first().map(String::as_str) == Some(word.as_str()),
-                }
-        })
+        self.wrappers
+            .iter()
+            .find(|w| w.binary == binary && w.wraps(args))
     }
 
     /// The interpreter matching `binary`, if the policy names one.
@@ -2235,9 +2271,26 @@ mod tests {
             binary: "pnpm".to_string(),
             required_subcommand: Some("exec".to_string()),
             flags: vec!["-r".to_string()],
+            value_options: vec!["-C".to_string()],
             ..Wrapper::default()
         };
-        assert_eq!(pnpm_exec.payload_start(&words("exec -r eslint")), Some(2));
+        // A runner's options precede its subcommand.
+        for (args, start) in [
+            ("exec eslint", 1),
+            ("-r exec eslint", 2),
+            ("-C pkg -r exec eslint", 4),
+            ("exec -- eslint", 2),
+        ] {
+            assert!(pnpm_exec.wraps(&words(args)), "{args}");
+            assert_eq!(pnpm_exec.payload_start(&words(args)), Some(start), "{args}");
+        }
+        // Not the runner: the subcommand is not the word after the options.
+        for args in ["grep", "-r install", "run exec"] {
+            assert!(!pnpm_exec.wraps(&words(args)), "{args}");
+        }
+        // An undeclared option before the subcommand: claimed, then refused.
+        assert!(pnpm_exec.wraps(&words("--bogus exec eslint")));
+        assert_eq!(pnpm_exec.payload_start(&words("--bogus exec eslint")), None);
 
         let env = Wrapper {
             binary: "env".to_string(),

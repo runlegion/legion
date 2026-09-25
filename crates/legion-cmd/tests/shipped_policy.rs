@@ -35,11 +35,11 @@ fn mirror_policy() -> Policy {
              "flags": ["-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug"],
              "value_options": ["-u", "--unset", "-C", "--chdir", "-P"]},
             {"binary": "npx",
-             "flags": ["-y", "--yes", "--no", "--workspaces", "--include-workspace-root"],
+             "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
              "value_options": ["-p", "--package", "-w", "--workspace"]},
             {"binary": "pnpm", "required_subcommand": "exec",
-             "flags": ["-r", "--recursive", "--parallel", "--report-summary"],
-             "value_options": ["--resume-from"]}
+             "flags": ["-r", "--recursive", "--parallel", "--report-summary", "-w", "--workspace-root"],
+             "value_options": ["--resume-from", "-C", "--dir", "-F", "--filter"]}
         ],
         "interpreters": [
             {"binary": "sh", "flag": "-c", "body": "shell"},
@@ -110,23 +110,52 @@ fn shipped_wrapper_declarations_reach_the_wrapped_command() {
         ("nohup make", "make"),
         ("env -i FOO=1 make", "FOO=1"),
         ("npx -y eslint .", "eslint"),
-        ("pnpm exec -r eslint .", "eslint"),
+        ("pnpm -r exec grep foo .", "grep"),
+        ("pnpm -C web --filter app exec eslint .", "eslint"),
+        ("pnpm dlx -s cowsay hi", "cowsay"),
+        ("pnpx -s cowsay hi", "cowsay"),
+        ("npm --prefix x exec --package=eslint -- eslint .", "eslint"),
+        ("yarn --cwd web exec eslint .", "eslint"),
+        ("yarn dlx -q cowsay hi", "cowsay"),
+        ("bunx --silent --no-install cowsay hi", "cowsay"),
     ] {
-        let mut words = command.split_whitespace().map(str::to_string);
-        let binary = words.next().expect("a wrapper word");
-        let args: Vec<String> = words.collect();
-        let wrapper = policy
-            .matching_wrapper(&binary, &args)
-            .unwrap_or_else(|| panic!("`{binary}` is a shipped wrapper"));
-        let start = wrapper
-            .payload_start(&args)
-            .unwrap_or_else(|| panic!("`{command}`: the declaration consumes its own words"));
+        let (args, start) = shipped_payload_start(&policy, command);
+        let start =
+            start.unwrap_or_else(|| panic!("`{command}`: the declaration consumes its own words"));
         assert_eq!(
             args.get(start).map(String::as_str),
             Some(wrapped),
             "`{command}` must reach `{wrapped}`"
         );
     }
+
+    // Options whose real arity the declaration does not model are left
+    // undeclared, so the shipped policy refuses to consume them (proxied
+    // opaque by route): npm's `--no` takes the next word.
+    for command in [
+        "npx --no cowsay hi",
+        "npm exec --no cowsay hi",
+        "env -S 'make'",
+    ] {
+        assert_eq!(
+            shipped_payload_start(&policy, command).1,
+            None,
+            "`{command}`"
+        );
+    }
+}
+
+/// Splits `command` on whitespace, finds the shipped wrapper its first word
+/// names, and returns its arguments with where that wrapper's payload starts.
+fn shipped_payload_start(policy: &Policy, command: &str) -> (Vec<String>, Option<usize>) {
+    let mut words = command.split_whitespace().map(str::to_string);
+    let binary = words.next().expect("a wrapper word");
+    let args: Vec<String> = words.collect();
+    let wrapper = policy
+        .matching_wrapper(&binary, &args)
+        .unwrap_or_else(|| panic!("`{command}`: `{binary}` is a shipped wrapper"));
+    let start = wrapper.payload_start(&args);
+    (args, start)
 }
 
 // -- route behavior (inline policy, never touches disk) -----------------------

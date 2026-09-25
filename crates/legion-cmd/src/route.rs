@@ -577,7 +577,12 @@ mod tests {
     fn wrapper_args_policy() -> Policy {
         policy(
             r#"{
+            "sym_jobs": [
+                {"id": "find-content", "sym_command": "legion sym find-content"}
+            ],
             "wrappers": [
+                {"binary": "pnpm", "required_subcommand": "exec",
+                 "flags": ["-r", "--recursive"], "value_options": ["-C", "--filter"]},
                 {"binary": "timeout", "flags": ["--foreground", "-v"],
                  "value_options": ["-k", "--kill-after", "-s", "--signal"], "operands": 1},
                 {"binary": "stdbuf", "value_options": ["-i", "-o", "-e", "--output"]},
@@ -587,6 +592,9 @@ mod tests {
                 {"binary": "env", "flags": ["-", "-i"], "value_options": ["-u"]}
             ],
             "tools": {"Bash": {"families": {
+                "grep": {"rules": [
+                    {"id": "grep-search", "outcome": {"kind": "sym", "job": "find-content"}}
+                ]},
                 "chmod": {"rules": [
                     {"id": "chmod-recursive", "predicates": [{"kind": "arg-present", "arg": "-R"}],
                      "outcome": {"kind": "deny", "reason": "recursive mode change", "instead": "name the paths"}}
@@ -629,6 +637,9 @@ mod tests {
             ),
             ("env -i -u HOME FOO=1 mkfs.ext4 x", "mkfs.ext4 x"),
             ("sudo -- mkfs.ext4 x", "mkfs.ext4 x"),
+            // A runner's options precede its subcommand.
+            ("pnpm -r exec grep foo .", "grep foo ."),
+            ("pnpm -C pkg --filter web exec mkfs.ext4 x", "mkfs.ext4 x"),
         ] {
             let expected = decide_wrapped(alone);
             assert!(
@@ -656,6 +667,7 @@ mod tests {
             "timeout",
             "timeout -s",
             "env -S 'mkfs.ext4 /dev/sda1'",
+            "pnpm --bogus exec mkfs.ext4 x",
         ] {
             assert_eq!(
                 decide_wrapped(command),

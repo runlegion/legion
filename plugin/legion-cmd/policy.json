@@ -61,30 +61,39 @@
     { "binary": "exec", "flags": ["-c", "-l"], "value_options": ["-a"] },
     {
       "binary": "npx",
-      "flags": ["-y", "--yes", "--no", "--workspaces", "--include-workspace-root"],
+      "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
       "value_options": ["-p", "--package", "-w", "--workspace"]
     },
-    { "binary": "pnpx", "flags": ["--silent"], "value_options": ["--package", "--allow-build"] },
-    { "binary": "bunx", "flags": ["--bun"], "value_options": ["-p", "--package"] },
+    { "binary": "pnpx", "flags": ["-s", "--silent"], "value_options": ["--package", "--allow-build"] },
+    {
+      "binary": "bunx",
+      "flags": ["--bun", "--silent", "--verbose", "--no-install"],
+      "value_options": ["-p", "--package"]
+    },
     {
       "binary": "pnpm",
       "required_subcommand": "exec",
-      "flags": ["-r", "--recursive", "--parallel", "--report-summary"],
-      "value_options": ["--resume-from"]
+      "flags": ["-r", "--recursive", "--parallel", "--report-summary", "-w", "--workspace-root"],
+      "value_options": ["--resume-from", "-C", "--dir", "-F", "--filter"]
     },
     {
       "binary": "pnpm",
       "required_subcommand": "dlx",
-      "flags": ["--silent"],
+      "flags": ["-s", "--silent"],
       "value_options": ["--package", "--allow-build"]
     },
     {
       "binary": "npm",
       "required_subcommand": "exec",
-      "flags": ["-y", "--yes", "--no", "--workspaces", "--include-workspace-root"],
-      "value_options": ["-p", "--package", "-w", "--workspace"]
+      "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
+      "value_options": ["-p", "--package", "-w", "--workspace", "--prefix"]
     },
-    { "binary": "yarn", "required_subcommand": "exec" },
+    {
+      "binary": "yarn",
+      "required_subcommand": "exec",
+      "flags": ["--silent", "--verbose"],
+      "value_options": ["--cwd"]
+    },
     {
       "binary": "yarn",
       "required_subcommand": "dlx",
