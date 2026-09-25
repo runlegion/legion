@@ -477,4 +477,33 @@ assert_contains "a .. escape out of tool-results still denied" "$out" '"permissi
 out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -r Symbol $HOME/.claude/projects/p/s/tool-results/\"},\"session_id\":\"own-trdir-t\"}" | bash "$HOOK")
 assert_contains "the tool-results directory itself (not a file in it) still denied" "$out" '"permissionDecision": "deny"'
 
+echo "==> #1264: a repo search chained after a tool-results grep is still refused"
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep Symbol ~/.claude/projects/p/s/tool-results/f; grep -r Symbol src/\"},\"session_id\":\"own-chain-t\"}" | bash "$HOOK")
+assert_contains "; chained repo grep still denied" "$out" '"permissionDecision": "deny"'
+# The JSON \n escape decodes to a literal newline in the command.
+out=$(printf '%s\n' '{"cwd":"/tmp/legion","tool_name":"Bash","tool_input":{"command":"grep Symbol ~/.claude/projects/p/s/tool-results/f\ngrep -r Symbol src/"},"session_id":"own-newline-t"}' | bash "$HOOK")
+assert_contains "newline-separated repo grep still denied" "$out" '"permissionDecision": "deny"'
+
+echo "==> #1264: recursion and pattern files never take the tool-results pass"
+for flags in '-r' '-R' '-rn' '-nR' '--recursive' '--directories=recurse' '-if' '-f'; do
+  out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep $flags Symbol $TR_FILE\"},\"session_id\":\"own-flag-t\"}" | bash "$HOOK")
+  assert_contains "grep $flags over a tool-results path still denied" "$out" '"permissionDecision": "deny"'
+done
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep -ine Symbol $TR_FILE\"},\"session_id\":\"own-cluster-e-t\"}" | bash "$HOOK")
+assert_empty "a -ine cluster (pattern via e) over a tool-results file passes" "$out"
+
+echo "==> #1264: a symlinked file argument never takes the tool-results pass"
+FAKE_HOME="$WORK/home"
+FAKE_TR="$FAKE_HOME/.claude/projects/p/s/tool-results"
+mkdir -p "$FAKE_TR" "$WORK/repo-src"
+touch "$FAKE_TR/real.txt" "$WORK/repo-src/lib.rs"
+ln -s "$WORK/repo-src/lib.rs" "$FAKE_TR/link.txt"
+ln -s "$WORK/repo-src" "$FAKE_TR/linkdir"
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep Symbol $FAKE_TR/real.txt\"},\"session_id\":\"own-real-t\"}" | HOME="$FAKE_HOME" bash "$HOOK")
+assert_empty "a real tool-results file passes" "$out"
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep Symbol $FAKE_TR/link.txt\"},\"session_id\":\"own-link-t\"}" | HOME="$FAKE_HOME" bash "$HOOK")
+assert_contains "a symlinked file in tool-results still denied" "$out" '"permissionDecision": "deny"'
+out=$(echo "{\"cwd\":\"/tmp/legion\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"grep Symbol $FAKE_TR/linkdir\"},\"session_id\":\"own-linkdir-t\"}" | HOME="$FAKE_HOME" bash "$HOOK")
+assert_contains "a symlinked directory in tool-results still denied" "$out" '"permissionDecision": "deny"'
+
 finish_tests

@@ -139,11 +139,16 @@ _legion_bashgrep_safe_head() {
 }
 
 # _legion_bashgrep_is_compound CMD -- true (0) when CMD contains a shell
-# chain/pipe/redirect operator OUTSIDE single/double quotes. A wrong
-# rewrite inside a pipeline is worse than no rewrite, so callers skip the
-# REWRITE tier entirely when this returns true.
+# chain/pipe/redirect operator OUTSIDE single/double quotes, or any
+# newline (a second command on its own line; a newline inside a quoted
+# pattern is also counted, which only costs a rewrite). A wrong rewrite
+# inside a pipeline is worse than no rewrite, so callers skip the REWRITE
+# tier entirely when this returns true.
 _legion_bashgrep_is_compound() {
   local cmd="$1"
+  case "$cmd" in
+    *$'\n'*) return 0 ;;
+  esac
   local head
   head="$(_legion_bashgrep_safe_head "$cmd")"
   [ "${#head}" -lt "${#cmd}" ]
@@ -399,30 +404,51 @@ _legion_bashgrep_classify() {
 # (~/.claude/projects/<project>/<session>/tool-results/<file>), where the
 # harness saves a Bash result too large to return inline -- legion's own
 # output, not a repository (#1264). Every file argument must match and at
-# least one must be present; any shape this parse cannot vouch for (a flag
-# taking a detached value, a pattern file, a `..` segment, a path with
-# spaces) returns false so the caller keeps today's ladder.
+# least one must be present. Returns false, so the caller keeps today's
+# ladder, for any shape this parse cannot vouch for:
+#   - a compound command: the caller exits for the WHOLE command, so a
+#     second search chained after this grep must never ride along;
+#   - a pattern file (-f, --file, or f inside a short-flag cluster such as
+#     -if), which turns every positional into a file argument;
+#   - recursion (-r/-R, in a cluster too, or --recursive/--directories): a
+#     saved tool-results file never needs it, and with it a symlinked
+#     directory would reach the repo;
+#   - a symlinked file argument, a `..` segment, or a path with spaces.
 _legion_bashgrep_reads_tool_results() {
-  local head toks=()
-  head="$(_legion_bashgrep_safe_head "$1")"
-  IFS=' ' read -ra toks <<<"$head"
+  _legion_bashgrep_is_compound "$1" && return 1
+  local toks=()
+  IFS=' ' read -ra toks <<<"$1"
 
   local projects="${HOME}/.claude/projects/"
-  local pattern_seen=0 files=0 seen_dashdash=0 i t
+  local pattern_seen=0 files=0 seen_dashdash=0 i j t ch
   for ((i = 1; i < ${#toks[@]}; i++)); do
     t="${toks[$i]//[\"\']/}"
     if [ "$seen_dashdash" -eq 0 ]; then
       case "$t" in
         --) seen_dashdash=1; continue ;;
-        -e | --regexp) i=$((i + 1)); pattern_seen=1; continue ;;
+        --regexp) i=$((i + 1)); pattern_seen=1; continue ;;
         --regexp=*) pattern_seen=1; continue ;;
-        # A pattern file shifts every positional into a file argument;
-        # this parse does not model that.
-        -f | --file | --file=*) return 1 ;;
-        # Any other flag is skipped. A flag's detached value (`-A 3`) is
-        # then misread as the pattern or a file, which fails the path
-        # check below -- a refusal, never a wrong allow.
-        -*) continue ;;
+        --file | --file=* | --recursive | --dereference-recursive | --directories*) return 1 ;;
+        # Any other long flag is skipped. A flag's detached value
+        # (`--context 3`) is then misread as the pattern or a file, which
+        # fails the path check below -- a refusal, never a wrong allow.
+        --*) continue ;;
+        -?*)
+          # Short-flag cluster: -e ends it, taking the rest of the token
+          # (or, when last, the next token) as the pattern.
+          for ((j = 1; j < ${#t}; j++)); do
+            ch="${t:$j:1}"
+            case "$ch" in
+              f | r | R | d) return 1 ;;
+              e)
+                pattern_seen=1
+                [ "$j" -eq $((${#t} - 1)) ] && i=$((i + 1))
+                break
+                ;;
+            esac
+          done
+          continue
+          ;;
       esac
     fi
     if [ "$pattern_seen" -eq 0 ]; then
@@ -441,6 +467,7 @@ _legion_bashgrep_reads_tool_results() {
       *) return 1 ;;
     esac
     [[ "${t#"$projects"}" =~ ^[^/]+/[^/]+/tool-results/[^/]+$ ]] || return 1
+    [ -L "$t" ] && return 1
     files=$((files + 1))
   done
   [ "$files" -gt 0 ]
