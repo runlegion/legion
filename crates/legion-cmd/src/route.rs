@@ -681,6 +681,10 @@ mod tests {
             "timeout -s",
             "env -S 'mkfs.ext4 /dev/sda1'",
             "pnpm --bogus exec mkfs.ext4 x",
+            // A `--` before a runner's subcommand is a shape the declaration
+            // does not model: stricter (opaque), never the allow default.
+            "pnpm -- exec grep foo .",
+            "pnpm -r -- exec grep foo .",
         ] {
             assert_eq!(
                 decide_wrapped(command),
@@ -698,6 +702,18 @@ mod tests {
         // allow default, as for a bare `env`.
         assert_eq!(decide_wrapped("sudo -n"), Decision::Allow { note: None });
         assert_eq!(decide_wrapped("env -i"), Decision::Allow { note: None });
+    }
+
+    #[test]
+    fn a_runner_binary_without_its_subcommand_in_position_stays_ordinary() {
+        // `pnpm grep` names no runner; in `pnpm run exec` the word `exec` is
+        // run's script name, not pnpm's subcommand. Both stay ordinary pnpm
+        // invocations, which nothing manages here.
+        assert_eq!(decide_wrapped("pnpm grep"), Decision::Allow { note: None });
+        assert_eq!(
+            decide_wrapped("pnpm run exec"),
+            Decision::Allow { note: None }
+        );
     }
 
     #[test]

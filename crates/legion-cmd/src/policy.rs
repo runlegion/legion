@@ -339,24 +339,41 @@ pub struct Wrapper {
 
 impl Wrapper {
     /// Whether this wrapper claims an invocation of its binary with `args`.
-    /// A wrapper with no required subcommand claims every one. One with a
-    /// required subcommand claims it when that word follows the declared
-    /// options, since a runner's options precede its subcommand
-    /// (`pnpm -r exec`). When an option the wrapper does not declare comes
-    /// first, route cannot tell where the subcommand sits, so the wrapper
-    /// claims the invocation if the word appears at all and
-    /// [`Wrapper::payload_start`] then refuses it -- proxied opaque rather
-    /// than read as an ordinary invocation (#1286).
+    /// A wrapper with no required subcommand claims every one.
+    ///
+    /// A runner's options precede its subcommand (`pnpm -r exec`), so a
+    /// wrapper with a required subcommand claims the invocation when that
+    /// word appears and every word before it could be an option: a word
+    /// starting with `-`, or a single word right after an option, which may
+    /// be that option's value. This test is deliberately looser than the
+    /// declaration: a shape the declaration does not model (`pnpm -- exec`,
+    /// an undeclared option) is still claimed, and [`Wrapper::payload_start`]
+    /// then refuses it, so it is proxied opaque rather than read as an
+    /// ordinary invocation -- an unexpected shape only gets stricter (#1286).
+    /// A word before the subcommand that cannot be an option or its value
+    /// (`pnpm run exec`) means the subcommand word is someone else's operand,
+    /// and the invocation stays ordinary.
     pub fn wraps(&self, args: &[String]) -> bool {
         let Some(subcommand) = &self.required_subcommand else {
             return true;
         };
-        match self.options_end(args, 0) {
-            Some(index) => word_at(args, index) == Some(subcommand.as_str()),
-            None => args
-                .iter()
-                .any(|a| crate::evaluate::dequote_outer(a) == subcommand),
+        let Some(position) = args
+            .iter()
+            .position(|a| crate::evaluate::dequote_outer(a) == subcommand)
+        else {
+            return false;
+        };
+        let mut after_option = false;
+        for raw in &args[..position] {
+            let word = crate::evaluate::dequote_outer(raw);
+            let is_option = word.starts_with('-');
+            if !is_option && !after_option {
+                return false;
+            }
+            // A value follows an option, never `--` and never another value.
+            after_option = is_option && word != "--";
         }
+        true
     }
 
     /// The index in `args` where the wrapped command begins, or `None` when
@@ -2288,9 +2305,21 @@ mod tests {
         for args in ["grep", "-r install", "run exec"] {
             assert!(!pnpm_exec.wraps(&words(args)), "{args}");
         }
-        // An undeclared option before the subcommand: claimed, then refused.
-        assert!(pnpm_exec.wraps(&words("--bogus exec eslint")));
-        assert_eq!(pnpm_exec.payload_start(&words("--bogus exec eslint")), None);
+        // A shape the declaration does not model before the subcommand -- an
+        // undeclared option, a `--` -- is claimed, then refused.
+        for args in [
+            "--bogus exec eslint",
+            "--bogus val exec eslint",
+            "-- exec eslint",
+            "-r -- exec eslint",
+        ] {
+            assert!(pnpm_exec.wraps(&words(args)), "{args}");
+            assert_eq!(pnpm_exec.payload_start(&words(args)), None, "{args}");
+        }
+        // The subcommand word as another command's operand stays ordinary.
+        for args in ["-C pkg run exec", "-- run exec"] {
+            assert!(!pnpm_exec.wraps(&words(args)), "{args}");
+        }
 
         let env = Wrapper {
             binary: "env".to_string(),

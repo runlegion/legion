@@ -64,7 +64,7 @@
       "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
       "value_options": ["-p", "--package", "-w", "--workspace"]
     },
-    { "binary": "pnpx", "flags": ["-s", "--silent"], "value_options": ["--package", "--allow-build"] },
+    { "binary": "pnpx", "flags": ["-s", "--silent"], "value_options": ["--package", "--allow-build", "--reporter"] },
     {
       "binary": "bunx",
       "flags": ["--bun", "--silent", "--verbose", "--no-install"],
@@ -80,7 +80,7 @@
       "binary": "pnpm",
       "required_subcommand": "dlx",
       "flags": ["-s", "--silent"],
-      "value_options": ["--package", "--allow-build"]
+      "value_options": ["--package", "--allow-build", "--reporter"]
     },
     {
       "binary": "npm",

@@ -114,6 +114,8 @@ fn shipped_wrapper_declarations_reach_the_wrapped_command() {
         ("pnpm -C web --filter app exec eslint .", "eslint"),
         ("pnpm dlx -s cowsay hi", "cowsay"),
         ("pnpx -s cowsay hi", "cowsay"),
+        ("pnpm dlx --reporter silent cowsay hi", "cowsay"),
+        ("pnpx --reporter=silent cowsay hi", "cowsay"),
         ("npm --prefix x exec --package=eslint -- eslint .", "eslint"),
         ("yarn --cwd web exec eslint .", "eslint"),
         ("yarn dlx -q cowsay hi", "cowsay"),
@@ -129,13 +131,19 @@ fn shipped_wrapper_declarations_reach_the_wrapped_command() {
         );
     }
 
-    // Options whose real arity the declaration does not model are left
-    // undeclared, so the shipped policy refuses to consume them (proxied
-    // opaque by route): npm's `--no` takes the next word.
+    // Shapes the declarations do not model are claimed by the wrapper and
+    // refused, so route proxies them opaque -- never the allow default.
+    // npm's `--no` is deliberately undeclared: its arity differs across npm
+    // versions and reports, and leaving it out is safe either way. A `--`
+    // before a runner's subcommand is refused the same way.
     for command in [
         "npx --no cowsay hi",
         "npm exec --no cowsay hi",
         "env -S 'make'",
+        "pnpm -- exec grep foo .",
+        "pnpm -r -- exec grep foo .",
+        "npm -- exec grep foo .",
+        "yarn -- exec grep foo .",
     ] {
         assert_eq!(
             shipped_payload_start(&policy, command).1,
