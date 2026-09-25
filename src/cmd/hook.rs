@@ -55,7 +55,8 @@
 //! command will work: [`respond`] emits one `legion.cmd` prediction for it,
 //! keyed by the call's `tool_use_id` (`crate::cmd::prediction`). Before its
 //! own work, each run witnesses this session's earlier rewrites whose
-//! `tool_result` is now in the session transcript. Both run outside the
+//! `tool_result` is now in the session transcript, on a worker thread waited
+//! for at most `route.deadline_ms` and abandoned after. Both run outside the
 //! decision, which reads neither: a failure in either is reported on stderr
 //! and never changes the response.
 //!
@@ -226,17 +227,19 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 /// local store, the repo override from `LEGION_REPO`.
 ///
 /// Around the decision, and never able to change it (#1272): first the
-/// pending-witness pass for this session, then the prediction for a rewrite
-/// the decision applied. Each runs under [`best_effort`], so a failure or a
+/// pending-witness pass for this session, bounded by the route deadline
+/// ([`respond_after_witness`]), then the prediction for a rewrite the
+/// decision applied. Each runs under [`best_effort`], so a failure or a
 /// panic in either is a line on stderr, not a deny.
 fn respond(input: &str) -> Value {
-    best_effort("witness pass", || witness_session(input));
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
-    let applied: Applied = respond_with(
+    let session_input: String = input.to_string();
+    let applied: Applied = respond_after_witness(
         input,
         read_policy_text(),
         Arc::new(StoreLookups),
         legion_repo,
+        move || witness_session(&session_input),
     );
     if let Some(rewrite) = &applied.rewrite {
         best_effort("rewrite prediction", || {
@@ -246,6 +249,36 @@ fn respond(input: &str) -> Value {
         });
     }
     applied.response
+}
+
+/// Runs the witness pass, then the decision. The pass runs on a worker
+/// thread through [`decide`] and is waited for at most `route.deadline_ms`
+/// (the default when the policy cannot be read; the decision reports that
+/// itself). A pass still running then is abandoned: the decision proceeds
+/// unchanged, and the predictions it did not reach stay emitted for a later
+/// run. The worker is left running, as `decide` leaves an overrun, and ends
+/// with the one-shot process.
+fn respond_after_witness(
+    input: &str,
+    policy_text: Result<String, AdapterError>,
+    lookups: Arc<dyn LookupRunner>,
+    legion_repo: Option<String>,
+    witness: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
+) -> Applied {
+    let deadline: Duration = policy_text
+        .as_ref()
+        .ok()
+        .and_then(|text| RouteSettings::from_policy_text(text).ok())
+        .unwrap_or_default()
+        .deadline;
+    let pass = decide(deadline, move || {
+        best_effort("witness pass", witness);
+        Ok(())
+    });
+    if let Err(e) = pass {
+        eprintln!("[legion cmd-check] witness pass abandoned: {e}");
+    }
+    respond_with(input, policy_text, lookups, legion_repo)
 }
 
 /// Witnesses this session's rewrites whose results are now in its
@@ -1605,6 +1638,74 @@ mod tests {
         let applied = apply(&routed, &parsed_payload("gh issue list src/"), &policy());
         assert_denied(&applied.response);
         assert!(applied.rewrite.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stuck_transcript_read_never_holds_the_decision_past_the_deadline() {
+        // The transcript is a FIFO nobody writes: opening it blocks forever,
+        // the slowest transcript read there is. The witness pass is waited
+        // for at most the route deadline and then abandoned; the decision
+        // proceeds unchanged and the pending prediction stays emitted.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo: PathBuf = dir.path().join("session.jsonl");
+        // Shells out rather than calling libc::mkfifo: the binary is no-unsafe.
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo failed");
+
+        let db = crate::db::testutil::test_db();
+        prediction::emit_rewrite_prediction(
+            &db,
+            &AppliedRewrite {
+                tool_use_id: Some("toolu_pending".to_string()),
+                session_id: Some("s1".to_string()),
+                tool_name: "Bash".to_string(),
+                issued: Some("gh issue list".to_string()),
+                constructed: "legion issue list".to_string(),
+                background: false,
+            },
+        )
+        .expect("emits");
+
+        let policy: String = POLICY.replace(r#""deadline_ms": 2000"#, r#""deadline_ms": 200"#);
+        assert_ne!(
+            policy, POLICY,
+            "the test policy must carry the short deadline"
+        );
+        let transcript: PathBuf = fifo.clone();
+        let started = std::time::Instant::now();
+        let applied = respond_after_witness(
+            &payload("gh issue list"),
+            Ok(policy),
+            Arc::new(StubLookups(Lookup::Empty)),
+            None,
+            move || {
+                prediction::witness_pending(&db, "s1", &transcript)?;
+                Ok(())
+            },
+        );
+        let elapsed: Duration = started.elapsed();
+
+        // At least the deadline: the pass really was stuck and waited on,
+        // not finished early by an error.
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "the witness pass ended early ({elapsed:?}); the FIFO did not block"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "the decision waited {elapsed:?} on a stuck witness pass"
+        );
+        assert_eq!(output(&applied.response)["permissionDecision"], "allow");
+        assert!(
+            applied.rewrite.is_some(),
+            "the decision itself is unchanged"
+        );
+        // The abandoned worker still holds the FIFO path open for reading.
+        std::mem::forget(dir);
     }
 
     #[test]
