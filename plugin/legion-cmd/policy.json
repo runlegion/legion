@@ -10,7 +10,17 @@
       "id": "find-file",
       "sym_command": "legion sym etc find-file",
       "interpreter_patterns": []
-    }
+    },
+    { "id": "script-walk-os-walk", "sym_command": "legion sym tree", "interpreter_patterns": ["os.walk"] },
+    { "id": "script-walk-os-scandir", "sym_command": "legion sym tree", "interpreter_patterns": ["os.scandir"] },
+    { "id": "script-walk-os-listdir", "sym_command": "legion sym tree", "interpreter_patterns": ["os.listdir"] },
+    { "id": "script-walk-readdir", "sym_command": "legion sym tree", "interpreter_patterns": ["readdir"] },
+    { "id": "script-walk-rglob", "sym_command": "legion sym tree", "interpreter_patterns": [".rglob("] },
+    { "id": "script-walk-walkdir", "sym_command": "legion sym tree", "interpreter_patterns": ["walkdir"] },
+    { "id": "script-glob-fnmatch", "sym_command": "legion sym etc find-file", "interpreter_patterns": ["fnmatch"] },
+    { "id": "script-glob-glob", "sym_command": "legion sym etc find-file", "interpreter_patterns": ["glob.glob"] },
+    { "id": "script-glob-path-glob", "sym_command": "legion sym etc find-file", "interpreter_patterns": [".glob("] },
+    { "id": "script-grep-subprocess", "sym_command": "legion sym etc find-content", "interpreter_patterns": ["subprocess", "grep"] }
   ],
   "wrappers": [
     { "binary": "env" },
@@ -60,6 +70,214 @@
         "rg": {
           "rules": [
             { "id": "rg-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }
+          ]
+        },
+        "egrep": { "rules": [{ "id": "egrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "fgrep": { "rules": [{ "id": "fgrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "ag": { "rules": [{ "id": "ag-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "ack": { "rules": [{ "id": "ack-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "git grep": { "rules": [{ "id": "git-grep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "zgrep": { "rules": [{ "id": "zgrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "zegrep": { "rules": [{ "id": "zegrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "zfgrep": { "rules": [{ "id": "zfgrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "bzgrep": { "rules": [{ "id": "bzgrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "xzgrep": { "rules": [{ "id": "xzgrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "zstdgrep": { "rules": [{ "id": "zstdgrep-to-sym", "outcome": { "kind": "sym", "job": "find-content" } }] },
+        "find": { "rules": [{ "id": "find-to-sym", "outcome": { "kind": "sym", "job": "find-file" } }] },
+        "fd": { "rules": [{ "id": "fd-to-sym", "outcome": { "kind": "sym", "job": "find-file" } }] },
+        "git ls-files": { "rules": [{ "id": "git-ls-files-to-sym", "outcome": { "kind": "sym", "job": "find-file" } }] },
+        "ls": {
+          "rules": [
+            {
+              "id": "ls-structure-note",
+              "outcome": {
+                "kind": "allow",
+                "note": "if this listing is the shape of an indexed repo's code, `legion sym tree --repo <repo>` (directories and file layout) or `legion sym list --repo <repo>` (modules and their contents) answers it from the index. Your `ls` still runs -- not blocking you: `ls` shows what sym does not (metadata via `ls -l`, and non-source files like READMEs, configs and dotfiles)."
+              }
+            }
+          ]
+        },
+        "sqlite3": {
+          "rules": [
+            {
+              "id": "sqlite3-legion-db",
+              "predicates": [{ "kind": "arg-present", "arg": "legion.db" }],
+              "outcome": {
+                "kind": "deny",
+                "reason": "this command opens legion.db directly; the legion CLI is the sole API for legion state, and raw access bypasses migrations, constraints and the audit log",
+                "instead": "the legion CLI (legion issue view, legion recall, legion bullpen, legion status, ...); file an issue for a CLI command or JSON flag if none exposes the field"
+              }
+            },
+            { "id": "sqlite3-other-db", "outcome": { "kind": "allow" } }
+          ]
+        },
+        "gh": {
+          "rules": [
+            {
+              "id": "gh-unmapped",
+              "outcome": {
+                "kind": "deny",
+                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`), and this gh command has no direct legion equivalent",
+                "instead": "legion --help"
+              }
+            }
+          ]
+        },
+        "gh pr": {
+          "rules": [
+            {
+              "id": "gh-pr-to-legion",
+              "outcome": {
+                "kind": "deny",
+                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`); this gh pr verb is not rewritten because its arguments carry free text or flags legion cannot round-trip",
+                "instead": "legion pr --help (view, checks, comments, reviews, edit, review, merge and close; `legion comment` for comments, `legion pr create` to open)"
+              }
+            }
+          ]
+        },
+        "gh issue": {
+          "rules": [
+            {
+              "id": "gh-issue-to-legion",
+              "outcome": {
+                "kind": "deny",
+                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`); this gh issue verb is not rewritten because its arguments carry free text or flags legion cannot round-trip",
+                "instead": "legion issue --help (view, list, create, close, reopen, edit; `legion comment` for comments)"
+              }
+            }
+          ]
+        },
+        "gh run": {
+          "rules": [
+            {
+              "id": "gh-run-to-pr-checks",
+              "outcome": {
+                "kind": "deny",
+                "reason": "CI status lives on the PR in legion's model, not on the run",
+                "instead": "legion pr checks --repo <repo> --number <n>"
+              }
+            }
+          ]
+        },
+        "gh pr diff": {
+          "rules": [
+            {
+              "id": "gh-pr-diff",
+              "outcome": {
+                "kind": "deny",
+                "reason": "no legion command renders a PR's diff: legion pr view shows metadata and body only, so rewriting to it would hand back something other than what was asked",
+                "instead": "legion pr view --repo <repo> --number <n> (metadata and body; no diff content)"
+              }
+            }
+          ]
+        },
+        "gh pr view": {
+          "rules": [
+            {
+              "id": "gh-pr-view-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion pr view",
+                "reason": "the audited work-source path: legion pr view lands in `legion audit` the way a raw gh call never does",
+                "translatable": { "operands": ["integer"] }
+              }
+            }
+          ]
+        },
+        "gh pr checks": {
+          "rules": [
+            {
+              "id": "gh-pr-checks-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion pr checks",
+                "reason": "the audited work-source path: legion pr checks lands in `legion audit` the way a raw gh call never does",
+                "translatable": { "operands": ["integer"] }
+              }
+            }
+          ]
+        },
+        "gh pr list": {
+          "rules": [
+            {
+              "id": "gh-pr-list-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion pr list",
+                "reason": "the audited work-source path: legion pr list lands in `legion audit` the way a raw gh call never does",
+                "translatable": {}
+              }
+            }
+          ]
+        },
+        "gh issue view": {
+          "rules": [
+            {
+              "id": "gh-issue-view-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion issue view",
+                "reason": "the audited work-source path: legion issue view lands in `legion audit` the way a raw gh call never does",
+                "translatable": { "operands": ["integer"] }
+              }
+            }
+          ]
+        },
+        "gh issue list": {
+          "rules": [
+            {
+              "id": "gh-issue-list-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion issue list",
+                "reason": "the audited work-source path: legion issue list lands in `legion audit` the way a raw gh call never does",
+                "translatable": {}
+              }
+            }
+          ]
+        },
+        "git push": {
+          "rules": [
+            {
+              "id": "git-push-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion push",
+                "reason": "the audited push path (#791): legion push resolves the checkout that has the branch, refuses main/master, and writes an audit row carrying the branch, checkout and head SHA",
+                "translatable": {
+                  "flags": ["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress"]
+                }
+              }
+            }
+          ]
+        },
+        "git commit": {
+          "rules": [
+            {
+              "id": "git-commit-without-message",
+              "predicates": [
+                { "kind": "arg-absent", "arg": "-m" },
+                { "kind": "arg-absent", "arg": "--message" },
+                { "kind": "arg-absent", "arg": "-F" },
+                { "kind": "arg-absent", "arg": "--file" }
+              ],
+              "outcome": {
+                "kind": "deny",
+                "reason": "a git commit with no -m/--message or -F/--file opens an editor, and legion commit needs an explicit message up front",
+                "instead": "legion commit --repo <repo> --message '<type>(<scope>): <summary>' (or --message-file <path>)"
+              }
+            },
+            {
+              "id": "git-commit-to-legion",
+              "outcome": {
+                "kind": "rewrite",
+                "target": "legion commit",
+                "reason": "the audited commit path (#854): legion commit preflights the signer, refuses message-convention violations by name, and writes an audit row for every attempt",
+                "translatable": {
+                  "valued_flags": ["-m", "--message", "-F", "--file"]
+                }
+              }
+            }
           ]
         },
         "rm": {

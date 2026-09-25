@@ -3,7 +3,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-symbol-local-hit-indexed",
     "tool": "Grep",
-    "input": { "pattern": "Symbol" },
+    "input": {
+      "pattern": "Symbol"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -14,7 +16,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-word-boundary-wrapped-symbol",
     "tool": "Grep",
-    "input": { "pattern": "\\bSymbol\\b" },
+    "input": {
+      "pattern": "\\bSymbol\\b"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -25,7 +29,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-cross-repo-hit-only-injects",
     "tool": "Grep",
-    "input": { "pattern": "commonword" },
+    "input": {
+      "pattern": "commonword"
+    },
     "hook_behavior": "inject",
     "route": "deny",
     "agrees": false,
@@ -35,7 +41,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-not-indexed-repo-injects",
     "tool": "Grep",
-    "input": { "pattern": "Symbol" },
+    "input": {
+      "pattern": "Symbol"
+    },
     "hook_behavior": "inject",
     "route": "deny",
     "agrees": false,
@@ -45,7 +53,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-bypass-env-refused-for-local-symbol",
     "tool": "Grep",
-    "input": { "pattern": "Symbol" },
+    "input": {
+      "pattern": "Symbol"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -55,7 +65,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-bypass-env-allowed-for-free-text",
     "tool": "Grep",
-    "input": { "pattern": "commonword" },
+    "input": {
+      "pattern": "commonword"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -65,7 +77,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-regex-heavy-pattern-skips",
     "tool": "Grep",
-    "input": { "pattern": "\\s+\\w+" },
+    "input": {
+      "pattern": "\\s+\\w+"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -75,7 +89,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-single-token-pattern-skips",
     "tool": "Grep",
-    "input": { "pattern": "fn" },
+    "input": {
+      "pattern": "fn"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -85,7 +101,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-multi-token-recall-hits-inject",
     "tool": "Grep",
-    "input": { "pattern": "hook output format" },
+    "input": {
+      "pattern": "hook output format"
+    },
     "hook_behavior": "inject",
     "route": "deny",
     "agrees": false,
@@ -95,7 +113,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-recall-hits-below-threshold-skip",
     "tool": "Grep",
-    "input": { "pattern": "hook output format" },
+    "input": {
+      "pattern": "hook output format"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -105,7 +125,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-no-recall-hits-silent",
     "tool": "Grep",
-    "input": { "pattern": "hook output format" },
+    "input": {
+      "pattern": "hook output format"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -125,7 +147,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-uncovered-repo-skips",
     "tool": "Grep",
-    "input": { "pattern": "find_pending_signals" },
+    "input": {
+      "pattern": "find_pending_signals"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -135,7 +159,9 @@
     "hook": "pre-grep.sh",
     "case": "grep-skip-env-disables-hook",
     "tool": "Grep",
-    "input": { "pattern": "Symbol" },
+    "input": {
+      "pattern": "Symbol"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -145,7 +171,9 @@
     "hook": "pre-grep.sh",
     "case": "glob-pure-wildcard-recursive-skips",
     "tool": "Glob",
-    "input": { "pattern": "**/*.rs" },
+    "input": {
+      "pattern": "**/*.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -156,7 +184,9 @@
     "hook": "pre-grep.sh",
     "case": "glob-pure-extension-skips",
     "tool": "Glob",
-    "input": { "pattern": "*.toml" },
+    "input": {
+      "pattern": "*.toml"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -166,7 +196,9 @@
     "hook": "pre-grep.sh",
     "case": "glob-stars-only-skips",
     "tool": "Glob",
-    "input": { "pattern": "***" },
+    "input": {
+      "pattern": "***"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -176,7 +208,9 @@
     "hook": "pre-grep.sh",
     "case": "glob-semantic-segments-inject-recall",
     "tool": "Glob",
-    "input": { "pattern": "src/**/auth.rs" },
+    "input": {
+      "pattern": "src/**/auth.rs"
+    },
     "hook_behavior": "inject",
     "route": "deny",
     "agrees": false,
@@ -186,18 +220,22 @@
     "hook": "pre-grep.sh",
     "case": "glob-with-path-field",
     "tool": "Glob",
-    "input": { "pattern": "*.rs", "path": "src" },
+    "input": {
+      "pattern": "*.rs",
+      "path": "src"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
     "note": "neither the hook nor route reads Glob's `path`: the hook skips the wildcard, route routes to find-file. DISAGREEMENT: hook allow, route deny."
   },
-
   {
     "hook": "pre-read-sym.sh",
     "case": "read-non-source-extension-passes",
     "tool": "Read",
-    "input": { "file_path": "/repo/README.md" },
+    "input": {
+      "file_path": "/repo/README.md"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -207,7 +245,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-small-source-file-no-limit",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/small.rs" },
+    "input": {
+      "file_path": "/repo/src/small.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -218,7 +258,10 @@
     "hook": "pre-read-sym.sh",
     "case": "read-large-source-limit-150",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs", "limit": 150 },
+    "input": {
+      "file_path": "/repo/src/big.rs",
+      "limit": 150
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -228,7 +271,10 @@
     "hook": "pre-read-sym.sh",
     "case": "read-large-source-limit-200-boundary",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs", "limit": 200 },
+    "input": {
+      "file_path": "/repo/src/big.rs",
+      "limit": 200
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -238,7 +284,10 @@
     "hook": "pre-read-sym.sh",
     "case": "read-large-source-limit-300-under-threshold",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs", "limit": 300 },
+    "input": {
+      "file_path": "/repo/src/big.rs",
+      "limit": 300
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -248,7 +297,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-large-source-no-limit",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs" },
+    "input": {
+      "file_path": "/repo/src/big.rs"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -259,7 +310,10 @@
     "hook": "pre-read-sym.sh",
     "case": "read-large-source-limit-600",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs", "limit": 600 },
+    "input": {
+      "file_path": "/repo/src/big.rs",
+      "limit": 600
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -269,7 +323,10 @@
     "hook": "pre-read-sym.sh",
     "case": "read-offset-without-limit",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs", "offset": 100 },
+    "input": {
+      "file_path": "/repo/src/big.rs",
+      "offset": 100
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -279,7 +336,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-other-source-extension-no-limit",
     "tool": "Read",
-    "input": { "file_path": "src/components/App.tsx" },
+    "input": {
+      "file_path": "src/components/App.tsx"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -289,7 +348,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-shell-script-is-not-a-c-header",
     "tool": "Read",
-    "input": { "file_path": "scripts/run.sh" },
+    "input": {
+      "file_path": "scripts/run.sh"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -299,7 +360,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-bypass-env-allows-with-telemetry",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs" },
+    "input": {
+      "file_path": "/repo/src/big.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -309,7 +372,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-skip-env-disables-hook",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs" },
+    "input": {
+      "file_path": "/repo/src/big.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -319,7 +384,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-nonexistent-file-passes",
     "tool": "Read",
-    "input": { "file_path": "/does/not/exist.rs" },
+    "input": {
+      "file_path": "/does/not/exist.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -329,7 +396,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-not-indexed-repo-passes",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs" },
+    "input": {
+      "file_path": "/repo/src/big.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -339,7 +408,9 @@
     "hook": "pre-read-sym.sh",
     "case": "read-uncovered-repo-passes",
     "tool": "Read",
-    "input": { "file_path": "/repo/src/big.rs" },
+    "input": {
+      "file_path": "/repo/src/big.rs"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -349,18 +420,22 @@
     "hook": "pre-read-sym.sh",
     "case": "read-missing-file-path",
     "tool": "Read",
-    "input": { "limit": 50 },
+    "input": {
+      "limit": 50
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
     "note": "the hook exits silently when file_path is empty (pre-read-sym.sh:49); route's first Read rule reads file_path and cannot resolve, which is the FR-CMD-016 deny for an unresolvable managed rule. DISAGREEMENT: hook allow, route deny (the harness rejects a Read without file_path before either runs)."
   },
-
   {
     "hook": "no-local-memory.sh",
     "case": "write-auto-memory-file",
     "tool": "Write",
-    "input": { "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/MEMORY.md", "content": "# notes" },
+    "input": {
+      "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/MEMORY.md",
+      "content": "# notes"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -371,7 +446,11 @@
     "hook": "no-local-memory.sh",
     "case": "edit-auto-memory-file",
     "tool": "Edit",
-    "input": { "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/notes.md", "old_string": "a", "new_string": "b" },
+    "input": {
+      "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/notes.md",
+      "old_string": "a",
+      "new_string": "b"
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -382,7 +461,15 @@
     "hook": "no-local-memory.sh",
     "case": "multiedit-auto-memory-file",
     "tool": "MultiEdit",
-    "input": { "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/MEMORY.md", "edits": [{ "old_string": "a", "new_string": "b" }] },
+    "input": {
+      "file_path": "/Users/u/.claude/projects/-Volumes-store-legion/memory/MEMORY.md",
+      "edits": [
+        {
+          "old_string": "a",
+          "new_string": "b"
+        }
+      ]
+    },
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
@@ -393,7 +480,10 @@
     "hook": "no-local-memory.sh",
     "case": "write-ordinary-path",
     "tool": "Write",
-    "input": { "file_path": "/repo/src/lib.rs", "content": "pub fn add(a: u32, b: u32) -> u32 { a + b }" },
+    "input": {
+      "file_path": "/repo/src/lib.rs",
+      "content": "pub fn add(a: u32, b: u32) -> u32 { a + b }"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -403,7 +493,11 @@
     "hook": "no-local-memory.sh",
     "case": "edit-ordinary-path",
     "tool": "Edit",
-    "input": { "file_path": "/repo/src/lib.rs", "old_string": "a + b", "new_string": "a.saturating_add(b)" },
+    "input": {
+      "file_path": "/repo/src/lib.rs",
+      "old_string": "a + b",
+      "new_string": "a.saturating_add(b)"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -413,7 +507,15 @@
     "hook": "no-local-memory.sh",
     "case": "multiedit-ordinary-path",
     "tool": "MultiEdit",
-    "input": { "file_path": "/repo/src/lib.rs", "edits": [{ "old_string": "a", "new_string": "b" }] },
+    "input": {
+      "file_path": "/repo/src/lib.rs",
+      "edits": [
+        {
+          "old_string": "a",
+          "new_string": "b"
+        }
+      ]
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -423,7 +525,10 @@
     "hook": "no-local-memory.sh",
     "case": "write-memory-dir-outside-claude-projects",
     "tool": "Write",
-    "input": { "file_path": "/repo/src/memory/notes.md", "content": "x" },
+    "input": {
+      "file_path": "/repo/src/memory/notes.md",
+      "content": "x"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -433,7 +538,10 @@
     "hook": "no-local-memory.sh",
     "case": "write-claude-projects-outside-memory",
     "tool": "Write",
-    "input": { "file_path": "/Users/u/.claude/projects/-x/settings.json", "content": "{}" },
+    "input": {
+      "file_path": "/Users/u/.claude/projects/-x/settings.json",
+      "content": "{}"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -443,7 +551,9 @@
     "hook": "no-local-memory.sh",
     "case": "write-missing-file-path",
     "tool": "Write",
-    "input": { "content": "x" },
+    "input": {
+      "content": "x"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -453,7 +563,10 @@
     "hook": "no-local-memory.sh",
     "case": "write-auto-memory-uncovered-repo",
     "tool": "Write",
-    "input": { "file_path": "/Users/u/.claude/projects/-x/memory/MEMORY.md", "content": "# notes" },
+    "input": {
+      "file_path": "/Users/u/.claude/projects/-x/memory/MEMORY.md",
+      "content": "# notes"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -463,18 +576,23 @@
     "hook": "no-local-memory.sh",
     "case": "write-memory-segment-before-claude-projects",
     "tool": "Write",
-    "input": { "file_path": "/repo/memory/.claude/projects/notes.md", "content": "x" },
+    "input": {
+      "file_path": "/repo/memory/.claude/projects/notes.md",
+      "content": "x"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
     "note": "the hook's regex `\\.claude/projects/.*/memory/` needs `.claude/projects/` BEFORE `/memory/`; route's two field-contains predicates on file_path are order-free and both hold here. DISAGREEMENT: hook allow, route deny. Route is the stricter side; no real auto-memory path has this shape."
   },
-
   {
     "hook": "pre-script-search.sh",
     "case": "write-script-os-walk",
     "tool": "Write",
-    "input": { "file_path": "/repo/tree.py", "content": "import os\nfor root, dirs, files in os.walk(\".\"):\n    print(root)" },
+    "input": {
+      "file_path": "/repo/tree.py",
+      "content": "import os\nfor root, dirs, files in os.walk(\".\"):\n    print(root)"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -486,7 +604,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-rglob",
     "tool": "Write",
-    "input": { "file_path": "/repo/find.py", "content": "from pathlib import Path\nfor f in Path(\".\").rglob(\"*.rs\"):\n    print(f)" },
+    "input": {
+      "file_path": "/repo/find.py",
+      "content": "from pathlib import Path\nfor f in Path(\".\").rglob(\"*.rs\"):\n    print(f)"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -497,7 +618,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-readdirsync",
     "tool": "Write",
-    "input": { "file_path": "/repo/list.js", "content": "const fs = require('fs');\nfor (const e of fs.readdirSync(dir)) console.log(e);" },
+    "input": {
+      "file_path": "/repo/list.js",
+      "content": "const fs = require('fs');\nfor (const e of fs.readdirSync(dir)) console.log(e);"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -508,7 +632,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-fnmatch",
     "tool": "Write",
-    "input": { "file_path": "/repo/match.py", "content": "import fnmatch\nprint(fnmatch.filter(names, \"*.rs\"))" },
+    "input": {
+      "file_path": "/repo/match.py",
+      "content": "import fnmatch\nprint(fnmatch.filter(names, \"*.rs\"))"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -519,7 +646,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-re-search",
     "tool": "Write",
-    "input": { "file_path": "/repo/search.py", "content": "import re\nif re.search(pat, text):\n    print(text)" },
+    "input": {
+      "file_path": "/repo/search.py",
+      "content": "import re\nif re.search(pat, text):\n    print(text)"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -530,7 +660,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-subprocess-grep",
     "tool": "Write",
-    "input": { "file_path": "/repo/search.py", "content": "import subprocess\nsubprocess.run([\"grep\", \"-rn\", \"foo\", \".\"])" },
+    "input": {
+      "file_path": "/repo/search.py",
+      "content": "import subprocess\nsubprocess.run([\"grep\", \"-rn\", \"foo\", \".\"])"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -541,7 +674,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-grep-before-subprocess",
     "tool": "Write",
-    "input": { "file_path": "/repo/search.py", "content": "GREP_BIN = \"grep\"\nimport subprocess\nsubprocess.run([GREP_BIN, \"-rn\", \"foo\", \".\"])" },
+    "input": {
+      "file_path": "/repo/search.py",
+      "content": "GREP_BIN = \"grep\"\nimport subprocess\nsubprocess.run([GREP_BIN, \"-rn\", \"foo\", \".\"])"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -552,7 +688,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-ordinary-script-passes",
     "tool": "Write",
-    "input": { "file_path": "/repo/math.py", "content": "def add(a, b):\n    return a + b" },
+    "input": {
+      "file_path": "/repo/math.py",
+      "content": "def add(a, b):\n    return a + b"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -562,7 +701,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-structured-json-edit-passes",
     "tool": "Write",
-    "input": { "file_path": "/repo/fix.py", "content": "import json\nd = json.load(open(\"f.json\"))\njson.dump(d, open(\"f.json\", \"w\"))" },
+    "input": {
+      "file_path": "/repo/fix.py",
+      "content": "import json\nd = json.load(open(\"f.json\"))\njson.dump(d, open(\"f.json\", \"w\"))"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -572,7 +714,11 @@
     "hook": "pre-script-search.sh",
     "case": "edit-new-string-os-walk",
     "tool": "Edit",
-    "input": { "file_path": "/repo/tree.py", "old_string": "pass", "new_string": "for root, dirs, files in os.walk(\".\"):\n    print(root)" },
+    "input": {
+      "file_path": "/repo/tree.py",
+      "old_string": "pass",
+      "new_string": "for root, dirs, files in os.walk(\".\"):\n    print(root)"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": true,
@@ -583,7 +729,11 @@
     "hook": "pre-script-search.sh",
     "case": "edit-ordinary-change-passes",
     "tool": "Edit",
-    "input": { "file_path": "/repo/math.py", "old_string": "a + b", "new_string": "a - b" },
+    "input": {
+      "file_path": "/repo/math.py",
+      "old_string": "a + b",
+      "new_string": "a - b"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -593,7 +743,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-os-walk-uncovered-repo",
     "tool": "Write",
-    "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
+    "input": {
+      "file_path": "/repo/tree.py",
+      "content": "import os\nos.walk(\".\")"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -603,7 +756,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-os-walk-not-indexed-repo",
     "tool": "Write",
-    "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
+    "input": {
+      "file_path": "/repo/tree.py",
+      "content": "import os\nos.walk(\".\")"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -613,7 +769,10 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-skip-env",
     "tool": "Write",
-    "input": { "file_path": "/repo/tree.py", "content": "import os\nos.walk(\".\")" },
+    "input": {
+      "file_path": "/repo/tree.py",
+      "content": "import os\nos.walk(\".\")"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -623,30 +782,43 @@
     "hook": "pre-script-search.sh",
     "case": "write-script-missing-content",
     "tool": "Write",
-    "input": { "file_path": "/repo/search.py" },
+    "input": {
+      "file_path": "/repo/search.py"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
     "note": "with no content the hook has no text to classify and stays silent; route's script-shape Write rules read content and cannot resolve, which is the FR-CMD-016 deny. DISAGREEMENT: hook allow, route deny (the harness rejects a Write without content before either runs)."
   },
-
   {
     "hook": "no-harness-explore.sh",
     "case": "agent-explore-exact",
     "tool": "Agent",
-    "input": { "subagent_type": "Explore", "prompt": "map the wake FSM", "description": "map FSM states" },
+    "input": {
+      "subagent_type": "Explore",
+      "prompt": "map the wake FSM",
+      "description": "map FSM states"
+    },
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
     "target": "legion:legion-explore",
-    "facts": { "paths": [], "verb": null, "issue_numbers": [], "keywords": [] },
+    "facts": {
+      "paths": [],
+      "verb": null,
+      "issue_numbers": [],
+      "keywords": []
+    },
     "note": "the built-in Explore spawn is rewritten to legion:legion-explore. route names the target; its facts are empty because a Fields call has no command to extract them from. The adapter's build_replacement (#1229) must patch subagent_type to the target in the original tool_input, keeping prompt and description verbatim -- the hook's own lossless requirement."
   },
   {
     "hook": "no-harness-explore.sh",
     "case": "agent-explore-lowercase",
     "tool": "Agent",
-    "input": { "subagent_type": "explore", "prompt": "p" },
+    "input": {
+      "subagent_type": "explore",
+      "prompt": "p"
+    },
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
@@ -657,7 +829,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-explore-uppercase",
     "tool": "Agent",
-    "input": { "subagent_type": "EXPLORE", "prompt": "p" },
+    "input": {
+      "subagent_type": "EXPLORE",
+      "prompt": "p"
+    },
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
@@ -668,7 +843,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-redirect-target-passes",
     "tool": "Agent",
-    "input": { "subagent_type": "legion-explore", "prompt": "p" },
+    "input": {
+      "subagent_type": "legion-explore",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -678,7 +856,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-namespaced-redirect-target-passes",
     "tool": "Agent",
-    "input": { "subagent_type": "legion:legion-explore", "prompt": "p" },
+    "input": {
+      "subagent_type": "legion:legion-explore",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -688,7 +869,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-plan-passes",
     "tool": "Agent",
-    "input": { "subagent_type": "Plan", "prompt": "p" },
+    "input": {
+      "subagent_type": "Plan",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -698,7 +882,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-general-purpose-passes",
     "tool": "Agent",
-    "input": { "subagent_type": "general-purpose", "prompt": "p" },
+    "input": {
+      "subagent_type": "general-purpose",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -708,7 +895,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-code-explorer-substring-passes",
     "tool": "Agent",
-    "input": { "subagent_type": "code-explorer", "prompt": "p" },
+    "input": {
+      "subagent_type": "code-explorer",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -718,7 +908,9 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-missing-subagent-type-passes",
     "tool": "Agent",
-    "input": { "prompt": "p" },
+    "input": {
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -728,7 +920,10 @@
     "hook": "no-harness-explore.sh",
     "case": "agent-explore-uncovered-repo",
     "tool": "Agent",
-    "input": { "subagent_type": "Explore", "prompt": "p" },
+    "input": {
+      "subagent_type": "Explore",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "rewrite",
     "agrees": false,
@@ -739,19 +934,31 @@
     "hook": "no-harness-explore.sh",
     "case": "task-explore-exact",
     "tool": "Task",
-    "input": { "subagent_type": "Explore", "prompt": "p", "description": "d" },
+    "input": {
+      "subagent_type": "Explore",
+      "prompt": "p",
+      "description": "d"
+    },
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
     "target": "legion:legion-explore",
-    "facts": { "paths": [], "verb": null, "issue_numbers": [], "keywords": [] },
+    "facts": {
+      "paths": [],
+      "verb": null,
+      "issue_numbers": [],
+      "keywords": []
+    },
     "note": "the same hook is registered under the Task matcher; the Task tool kind carries the same rules."
   },
   {
     "hook": "no-harness-explore.sh",
     "case": "task-plan-passes",
     "tool": "Task",
-    "input": { "subagent_type": "Plan", "prompt": "p" },
+    "input": {
+      "subagent_type": "Plan",
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
@@ -761,19 +968,25 @@
     "hook": "no-harness-explore.sh",
     "case": "task-missing-subagent-type-passes",
     "tool": "Task",
-    "input": { "prompt": "p" },
+    "input": {
+      "prompt": "p"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
     "note": "untyped Task spawn; both pass."
   },
-
   {
     "hook": "recall-first.sh",
     "case": "webfetch-recall-hits-inject",
     "tool": "WebFetch",
-    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
-    "context": { "recall": "found" },
+    "input": {
+      "url": "https://example.com/docs",
+      "prompt": "how does the sync engine work"
+    },
+    "context": {
+      "recall": "found"
+    },
     "hook_behavior": "inject",
     "route": "allow",
     "agrees": false,
@@ -784,8 +997,13 @@
     "hook": "recall-first.sh",
     "case": "webfetch-no-recall-hits-silent",
     "tool": "WebFetch",
-    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
-    "context": { "recall": "empty" },
+    "input": {
+      "url": "https://example.com/docs",
+      "prompt": "how does the sync engine work"
+    },
+    "context": {
+      "recall": "empty"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -795,7 +1013,10 @@
     "hook": "recall-first.sh",
     "case": "webfetch-recall-not-fetched",
     "tool": "WebFetch",
-    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
+    "input": {
+      "url": "https://example.com/docs",
+      "prompt": "how does the sync engine work"
+    },
     "hook_behavior": "allow",
     "route": "deny",
     "agrees": false,
@@ -805,8 +1026,13 @@
     "hook": "recall-first.sh",
     "case": "webfetch-short-prompt-skips",
     "tool": "WebFetch",
-    "input": { "url": "https://example.com", "prompt": "abc" },
-    "context": { "recall": "empty" },
+    "input": {
+      "url": "https://example.com",
+      "prompt": "abc"
+    },
+    "context": {
+      "recall": "empty"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -816,8 +1042,13 @@
     "hook": "recall-first.sh",
     "case": "webfetch-uncovered-repo-passes",
     "tool": "WebFetch",
-    "input": { "url": "https://example.com/docs", "prompt": "how does the sync engine work" },
-    "context": { "recall": "found" },
+    "input": {
+      "url": "https://example.com/docs",
+      "prompt": "how does the sync engine work"
+    },
+    "context": {
+      "recall": "found"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": false,
@@ -827,10 +1058,1765 @@
     "hook": "recall-first.sh",
     "case": "websearch-clamped-by-default",
     "tool": "WebSearch",
-    "input": { "query": "how does the sync engine work" },
+    "input": {
+      "query": "how does the sync engine work"
+    },
     "hook_behavior": "allow",
     "route": "allow",
     "agrees": true,
     "note": "recall-clamp.conf lists WebSearch, so the hook skips recall for it; the policy carries the clamp as an unconditional allow rule with no recall requirement (data the operator can flip)."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-bare",
+    "tool": "Bash",
+    "input": {
+      "command": "git push"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion push",
+    "note": "a bare push carries no argument beyond the family's own subcommand word, so every argument translates and route names legion push."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-set-upstream-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "git push -u"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion push",
+    "note": "-u/--set-upstream is declared translatable: legion push always sets upstream. -q/-v/--progress are declared too, as the hook treats them as benign."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-absolute-path-git",
+    "tool": "Bash",
+    "input": {
+      "command": "/usr/bin/git push"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion push",
+    "note": "both resolve git by basename."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-remote-operand",
+    "tool": "Bash",
+    "input": {
+      "command": "git push origin"
+    },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion push",
+    "note": "the hook drops the remote and rewrites, since legion push always pushes to origin. The rewrite rule declares no operand: an operand shape cannot say 'only origin', so `git push upstream` would be rewritten to a push to origin. route denies naming legion push. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-remote-and-branch",
+    "tool": "Bash",
+    "input": {
+      "command": "git push origin feat/x"
+    },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion push",
+    "note": "the hook carries the branch into `legion push --branch feat/x`. The rule declares no operands (see push-remote-operand), so route denies naming legion push. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-remote-and-tag",
+    "tool": "Bash",
+    "input": {
+      "command": "git push origin v9.9.9"
+    },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion push",
+    "note": "#915: the hook asks the repository whether the ref is a branch or a tag and rewrites to `legion push --tag v9.9.9`. route performs no I/O and cannot resolve a ref; with no declared operands it denies naming legion push. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-force",
+    "tool": "Bash",
+    "input": {
+      "command": "git push --force"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion push",
+    "note": "--force is not declared translatable; the default fallback denies naming the argument and legion push."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-force-short",
+    "tool": "Bash",
+    "input": {
+      "command": "git push -f origin feat/x"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "-f is not declared translatable."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-force-with-lease",
+    "tool": "Bash",
+    "input": {
+      "command": "git push --force-with-lease"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--force-with-lease is not declared translatable."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-delete",
+    "tool": "Bash",
+    "input": {
+      "command": "git push origin --delete feat/x"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--delete (and -d, --mirror, --prune, --all) are not declared translatable."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-tags-bulk",
+    "tool": "Bash",
+    "input": {
+      "command": "git push --tags"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--tags is not declared translatable."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-refspec",
+    "tool": "Bash",
+    "input": {
+      "command": "git push origin HEAD:main"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook denies a src:dst refspec by shape; route denies because the rule declares no operand at all."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-composed-and",
+    "tool": "Bash",
+    "input": {
+      "command": "git push && echo done"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion push",
+    "note": "#883: the hook denies every composed push, because updatedInput replaces the WHOLE command string. route folds the parts: echo reaches the allow default, the push rewrites, and rewrite outranks allow. The adapter (src/cmd/replacement.rs) then replaces the whole command with the target, dropping `echo done`, which is the #883 hazard. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-composed-pipe",
+    "tool": "Bash",
+    "input": {
+      "command": "git push | tee /tmp/log"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion push",
+    "note": "#883: as push-composed-and. route's facts carry /tmp/log as a path, so today's adapter refuses the replacement (PathOperandsNotCarried) and denies. That is an accident of the path shape, not a compound guard. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-after-leading-command",
+    "tool": "Bash",
+    "input": {
+      "command": "git status && git push"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion push",
+    "note": "#886: the hook denies a push anywhere in a chain. route sees the push after the operator (FR-CMD-007) and rewrites it; the adapter would drop `git status`. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-glued-semicolon",
+    "tool": "Bash",
+    "input": {
+      "command": "git push;"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion push",
+    "note": "#883: the hook's whitespace tokenizer reads `push;` as one word and denies the compound. route's parser reads a plain `git push` followed by an empty list terminator and rewrites it, which is lossless here. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-global-dash-c-path",
+    "tool": "Bash",
+    "input": {
+      "command": "git -C /tmp/x push"
+    },
+    "hook_behavior": "rewrite",
+    "route": "allow",
+    "agrees": false,
+    "note": "the hook walks git's value-taking global options. route's family match drops option words but keeps a separate option value (/tmp/x) in the operand run, so `git push` does not match and the command reaches the allow default. This is the known limitation in evaluate.rs `most_specific_family`, flagged for this issue: fixing it needs per-binary option metadata the policy language does not carry. DISAGREEMENT: hook rewrite, route allow."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-not-a-push",
+    "tool": "Bash",
+    "input": {
+      "command": "git status"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no git family matches `git status`."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-lookalike-subcommand",
+    "tool": "Bash",
+    "input": {
+      "command": "git push-fake"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "subcommand words are matched whole, so push-fake is not push."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-stash-push",
+    "tool": "Bash",
+    "input": {
+      "command": "git stash push"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "the family's subcommand word must be the leading operand; `stash` is."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-mentioned-by-echo",
+    "tool": "Bash",
+    "input": {
+      "command": "echo git push"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "git is an argument to echo, not an invocation."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-legion-push-itself",
+    "tool": "Bash",
+    "input": {
+      "command": "legion push --repo legion"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no family names legion."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "push-uncovered-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "git push"
+    },
+    "hook_behavior": "allow",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion push",
+    "note": "the hook passes every command in a repo legion does not cover (#353). route's Context carries the repo but no rule predicate reads coverage, so the rewrite applies everywhere. DISAGREEMENT: hook allow, route rewrite."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-dash-m",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -m 'fix(cmd): tighten the rule'"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion commit",
+    "note": "-m and its value are declared translatable (valued flag). The hook writes the message to a tempfile for --message-file; route names the target and returns the message among its facts for the adapter."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-long-message-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit --message 'fix(cmd): tighten the rule'"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion commit",
+    "note": "--message is declared as a valued flag."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-message-file",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -F msg.txt"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion commit",
+    "note": "-F/--file is declared as a valued flag."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-absolute-path-git",
+    "tool": "Bash",
+    "input": {
+      "command": "/usr/bin/git commit -m fix"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion commit",
+    "note": "both resolve git by basename."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-single-quoted-substitution-is-inert",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -m 'docs: $(date) stays literal'"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion commit",
+    "note": "single quotes are inert, so the hook rewrites; route's parser reads one quoted word and finds no substitution."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-global-dash-c-path",
+    "tool": "Bash",
+    "input": {
+      "command": "git -C /tmp/other commit -m fix"
+    },
+    "hook_behavior": "rewrite",
+    "route": "allow",
+    "agrees": false,
+    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route keeps the -C value in the operand run, so `git commit` does not match and the command reaches the allow default: the same known limitation as push-global-dash-c-path. DISAGREEMENT: hook rewrite, route allow."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-all-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -a -m fix"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit",
+    "note": "-a is not declared translatable; legion commit only commits the staged index."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-bundled-am",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -am fix"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "a combined short-option cluster is untranslatable unless declared verbatim."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-amend",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit --amend -m fix"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--amend is not declared translatable."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-no-verify",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -n -m fix"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "-n/--no-verify is not declared translatable."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-allow-empty-message",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit --allow-empty-message -m ''"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--allow-empty-message is not declared translatable."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-edit-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -e -m fix"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "-e/--edit/--interactive/--patch are not declared translatable."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-reuse-dash-c",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -C HEAD"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit",
+    "note": "the hook names -C (message reuse). route matches the no-message rule first (no -m, --message, -F or --file), so it denies for a different reason. Same arm."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-bare-opens-editor",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit --repo <repo> --message",
+    "note": "the git-commit-without-message rule denies before the rewrite rule is reached."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-message-equals-form",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit --message=fix"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook refuses the joined form by name. arg-absent compares whole words, so `--message=fix` is not `--message` and route's no-message rule denies with a reason that does not fit (the command does carry a message). Same arm, wrong reason: the policy language has no prefix test on an argument."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-trailing-pathspec",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -m fix src/a.rs"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the rule declares no operand, so a pathspec is untranslatable."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-two-messages",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -m subject -m body"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion commit",
+    "note": "the hook denies more than one -m because its lexer takes exactly one value. route's valued-flag declaration covers each -m and its value, so the arguments translate. Carrying both paragraphs is left to the adapter. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-live-substitution",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -m \"release $(date +%F)\""
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion commit",
+    "note": "the hook denies a live $(...) inside a double-quoted message because the rewrite replaces the shell that would have evaluated it. route resolves `date` inside the substitution (allow default), and the -m value translates, so it rewrites. The message's facts hold unevaluated source text. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-unquoted-metacharacter",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit -m done&&true"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion commit",
+    "note": "the hook denies an unquoted && inside the value. route's parser reads it as a list: the commit rewrites, `true` reaches the allow default, and rewrite outranks allow; the adapter would drop `true`. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-after-leading-command",
+    "tool": "Bash",
+    "input": {
+      "command": "git add -A && git commit -m fix"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion commit",
+    "note": "#886: the hook denies a commit anywhere in a chain. route rewrites the commit and allows `git add`, the fold picks rewrite, and the adapter would replace the whole command, dropping the `git add -A` the commit depends on. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-not-a-commit",
+    "tool": "Bash",
+    "input": {
+      "command": "git status"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no git family matches `git status`."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-lookalike-subcommand",
+    "tool": "Bash",
+    "input": {
+      "command": "git commit-fake -m fix"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "subcommand words are matched whole."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-mentioned-by-echo",
+    "tool": "Bash",
+    "input": {
+      "command": "echo git commit -m fix"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "git is an argument to echo."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-legion-commit-itself",
+    "tool": "Bash",
+    "input": {
+      "command": "legion commit --repo legion --message fix"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no family names legion."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-number",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion pr view",
+    "note": "one integer operand is declared translatable; the number travels in route's facts for the adapter to place."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-absolute-path-pr-view",
+    "tool": "Bash",
+    "input": {
+      "command": "/usr/bin/gh pr view 1"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion pr view",
+    "note": "both resolve gh by basename."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-checks-number",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr checks 42"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion pr checks",
+    "note": "one integer operand is declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-list-bare",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr list"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion pr list",
+    "note": "the empty translatable declaration covers the bare verb."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-issue-view-number",
+    "tool": "Bash",
+    "input": {
+      "command": "gh issue view 7"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion issue view",
+    "note": "one integer operand is declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-issue-list-bare",
+    "tool": "Bash",
+    "input": {
+      "command": "gh issue list"
+    },
+    "hook_behavior": "rewrite",
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion issue list",
+    "note": "the empty translatable declaration covers the bare verb."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-number-flag-form",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view --number 99"
+    },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion pr view",
+    "note": "the hook reads legion's own --number spelling off a gh command. gh has no --number flag, and the rule declares only arguments gh accepts, so route denies naming legion pr view. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-missing-number",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion pr view",
+    "note": "gh resolves an omitted number from the branch and legion has no equivalent, so the hook denies. The rule's operands are an upper bound, and the policy language has no predicate that requires an operand, so route rewrites. legion pr view without --number then fails loudly with a usage error. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-json",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42 --json title"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr view",
+    "note": "--json is not declared translatable; the deny names it and the target."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-json-equals",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42 --json=title"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--json= is not a declared valued flag."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-comments",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42 -c"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "-c/--comments is not declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-cross-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42 -R owner/repo"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "-R/--repo is not declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-view-web",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42 -w"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "-w/--web is not declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-checks-watch",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr checks 42 --watch"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr checks",
+    "note": "--watch (and --required, --fail-fast, -i) are not declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-list-filter-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr list --state closed"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr list",
+    "note": "legion pr list takes no filter, so no flag is declared; any flag denies."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-issue-view-jq",
+    "tool": "Bash",
+    "input": {
+      "command": "gh issue view 7 --jq .title"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "--jq is not declared translatable."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-issue-list-filter-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "gh issue list --label bug"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "any flag denies."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-merge-mapped-deny",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr merge 123"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr --help",
+    "note": "the hook names the exact legion verb (`legion pr merge --repo <r> --number 123`); route's `gh pr` family names the group help, since a static instead cannot fill in the number. Same arm."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-comment-mapped-deny",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr comment 42 --body x"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "free-text writes stay denied; the `gh pr` family covers merge, close, edit, review, comment, comments and create."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-issue-create-mapped-deny",
+    "tool": "Bash",
+    "input": {
+      "command": "gh issue create --title x"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion issue --help",
+    "note": "the `gh issue` family covers create, close, reopen, edit and comment."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-issue-close-mapped-deny",
+    "tool": "Bash",
+    "input": {
+      "command": "gh issue close 5"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "as gh-issue-create-mapped-deny."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-run-list-to-pr-checks",
+    "tool": "Bash",
+    "input": {
+      "command": "gh run list"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr checks",
+    "note": "CI status lives on the PR in legion's model; both name legion pr checks."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-run-view-to-pr-checks",
+    "tool": "Bash",
+    "input": {
+      "command": "gh run view 1"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr checks",
+    "note": "as gh-run-list-to-pr-checks (run watch too)."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-pr-diff-no-equivalent",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr diff 42"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "no diff content",
+    "note": "a rewrite to legion pr view would swap the diff for metadata, so both deny."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-api-unmapped",
+    "tool": "Bash",
+    "input": {
+      "command": "gh api /repos/x/y"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion --help",
+    "note": "no legion counterpart; both point at help rather than inventing a command."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-mentioned-by-echo",
+    "tool": "Bash",
+    "input": {
+      "command": "echo gh pr merge 1"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "gh is an argument to echo, not an invocation."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-composed-pipe-rewrite",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr view 42 | head -5"
+    },
+    "hook_behavior": "deny",
+    "route": "rewrite",
+    "agrees": false,
+    "target": "legion pr view",
+    "note": "the hook denies any composed command that mentions gh. route rewrites the gh stage, allows head, and the fold picks rewrite; the adapter would replace the whole pipeline and drop `| head -5`. DISAGREEMENT: hook deny, route rewrite."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-after-leading-command",
+    "tool": "Bash",
+    "input": {
+      "command": "echo hi && gh pr merge 1"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "#886: route sees gh after the operator and denies it; the strictest part wins."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-composed-without-gh",
+    "tool": "Bash",
+    "input": {
+      "command": "echo hi && cat notes.txt"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "a compound that never invokes gh reaches the allow default."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-uncovered-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "gh pr merge 1"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook passes every command in a repo legion does not cover (#353); no rule predicate reads coverage. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "no-direct-db.sh",
+    "case": "db-sqlite3-bare-legion-db",
+    "tool": "Bash",
+    "input": {
+      "command": "sqlite3 legion.db .tables"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "the legion CLI",
+    "note": "an argument that is exactly legion.db matches the sqlite3-legion-db rule."
+  },
+  {
+    "hook": "no-direct-db.sh",
+    "case": "db-sqlite3-legion-db-by-path",
+    "tool": "Bash",
+    "input": {
+      "command": "sqlite3 ~/.local/share/legion/legion.db 'select count(*) from reflections'"
+    },
+    "hook_behavior": "deny",
+    "route": "allow",
+    "agrees": false,
+    "note": "the hook denies any command whose text contains `legion.db`. arg-present compares whole words, so a path ending in legion.db does not match and the command reaches sqlite3-other-db. Matching it needs a substring or suffix predicate on an argument (arg-contains), which the policy language does not have. DISAGREEMENT: hook deny, route allow."
+  },
+  {
+    "hook": "no-direct-db.sh",
+    "case": "db-copy-legion-db",
+    "tool": "Bash",
+    "input": {
+      "command": "cp ~/.local/share/legion/legion.db /tmp/legion-copy.db"
+    },
+    "hook_behavior": "deny",
+    "route": "allow",
+    "agrees": false,
+    "note": "the hook's substring test covers every binary (cp, mv, rm, dd, cat). The policy carries only the sqlite3 reader family, and a path would need arg-contains to match, so cp reaches the allow default. DISAGREEMENT: hook deny, route allow."
+  },
+  {
+    "hook": "no-direct-db.sh",
+    "case": "db-sqlite3-other-database",
+    "tool": "Bash",
+    "input": {
+      "command": "sqlite3 /tmp/other.db .tables"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "other projects use sqlite3 legitimately; the family's fallback rule allows."
+  },
+  {
+    "hook": "no-direct-db.sh",
+    "case": "db-legion-cli",
+    "tool": "Bash",
+    "input": {
+      "command": "legion status --repo legion"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "the CLI is the sanctioned path."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-symbol-local-hit-blocks",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -r Symbol src/"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym etc find-content",
+    "note": "the hook blocks because `sym def Symbol` resolves locally, a lookup route's context does not carry; route routes grep to the find-content sym job whatever the pattern. Same arm, different instead."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-plain-grep-repo-search-scope-deny",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -rn search_target ."
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym etc find-content",
+    "note": "#886 Decision 2: plain grep over the repository is denied (no gitignore awareness). This is also #1264's kept repo-search case: a grep over repository files is decided as today."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-lossy-context-flag",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -A3 search_target ."
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook names the lossy flag; route denies every grep naming find-content. Covers -l, -c, -o, -v, -w, -x, -P, --exclude and complex --include alike."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-bypass-refused-for-local-symbol",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -r Symbol src/ # legion-bypass: testing"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the comment is not an argument to route; grep routes to sym."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-bypass-allowed-for-free-text",
+    "tool": "Bash",
+    "input": {
+      "command": "grep freetextphrase . # legion-bypass: manual check"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the soft bypass sentinel lets a free-text grep through with telemetry. route has no bypass: the confirm path is #1237. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-rg-rewrites",
+    "tool": "Bash",
+    "input": {
+      "command": "rg search_target"
+    },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "#876: the hook rewrites rg to find-content. A sym job yields a deny naming the sym command (FR-CMD-007); a lossless rewrite TO sym (operator decision 01a0ab48) is not built by any issue. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-git-grep-rewrites",
+    "tool": "Bash",
+    "input": {
+      "command": "git grep search_target"
+    },
+    "hook_behavior": "rewrite",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "#876: the hook rewrites bare git grep (adding --hidden). route's `git grep` family routes to the find-content sym job, a deny. DISAGREEMENT: hook rewrite, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-git-grep-pathspec-passes",
+    "tool": "Bash",
+    "input": {
+      "command": "git grep -n search_target -- src"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "a subdirectory pathspec is unclassifiable to the hook and, with no local symbol, passes silently. route denies every git grep. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-non-symbol-pattern-passes",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -r foo|bar src/"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook passes a pattern that is not symbol-shaped. route routes the grep stage to sym whatever the pattern (the unquoted | also makes this a pipeline into `bar`). DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-cross-repo-hit-passes",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -r commonword src/"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "#458: sym hits only in another repo do not block. route has no sym result. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-compound-grep-first",
+    "tool": "Bash",
+    "input": {
+      "command": "grep fn_main . | wc -l"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "the hook skips its rewrite on a compound and blocks on the local symbol; route's sym part wins the fold (FR-CMD-007)."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-grep-after-pipe-over-repo-file",
+    "tool": "Bash",
+    "input": {
+      "command": "cat src/main.rs | grep fn_main"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook classifies by the leading binary only, so a grep after a pipe passes. FR-CMD-007: a managed binary after a pipe is routed identically. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-env-prefixed-grep",
+    "tool": "Bash",
+    "input": {
+      "command": "LC_ALL=C grep -rn search_target ."
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the leading token is the assignment, so the hook passes; route sees grep behind the environment prefix (FR-CMD-007). DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-sh-c-inline-grep",
+    "tool": "Bash",
+    "input": {
+      "command": "sh -c 'grep -rn foo src'"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook never looks inside sh -c; route re-enters the shell body (FR-CMD-007). DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-1264-grep-of-legion-stdout",
+    "tool": "Bash",
+    "input": {
+      "command": "legion bullpen --repo shingle | grep checkpoint"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "#1264: a grep filtering legion's own stdout searches no repository file. The hook checks the leading binary only (legion), so it already passes this today; the refusals agents hit most likely came from the operator's permissions.deny. #1264 asks that it be allowed. route judges each invocation alone and a sym part wins the fold; the policy language has no predicate on where a stage's input comes from (pipeline context), and FR-CMD-007 routes a managed binary after a pipe identically. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-1264-grep-of-legion-help",
+    "tool": "Bash",
+    "input": {
+      "command": "legion post --help | grep repo"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "#1264: as bgrep-1264-grep-of-legion-stdout, on legion's help text. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-1264-grep-of-tool-results-file",
+    "tool": "Bash",
+    "input": {
+      "command": "grep -n checkpoint /Users/agent/.claude/projects/-Volumes-store-shingle/01ab00ac-session/tool-results/b28u8t62l.txt"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "#1264: a grep over a file the harness saved under ~/.claude/projects/*/*/tool-results/ searches legion's overflowed output, not the repository. The hook passes it when the pattern does not resolve to a local symbol (the path argument is unclassifiable to its rewrite tier). #1264 asks that it be allowed. Matching the directory needs a substring or prefix predicate on an argument (arg-contains), which the policy language does not have. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-find-name-symbol",
+    "tool": "Bash",
+    "input": {
+      "command": "find . -name Symbol"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym etc find-file",
+    "note": "the hook blocks on the local symbol; route routes find to the find-file sym job."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-find-non-symbol-passes",
+    "tool": "Bash",
+    "input": {
+      "command": "find . -name '*.log' -mtime +7"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "a glob pattern is not symbol-shaped, so the hook passes. route routes every find to find-file. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-fd-symbol",
+    "tool": "Bash",
+    "input": {
+      "command": "fd Symbol src/"
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion sym etc find-file",
+    "note": "fd routes to the find-file sym job."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-ag-local-symbol",
+    "tool": "Bash",
+    "input": {
+      "command": "ag fn_main ."
+    },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "note": "ag is left on the hook's ladder (block on the local symbol); route routes ag to find-content."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-ack-cross-repo-passes",
+    "tool": "Bash",
+    "input": {
+      "command": "ack commonword"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "#458 relevance gate passes; route routes ack to find-content. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-git-ls-files-glob",
+    "tool": "Bash",
+    "input": {
+      "command": "git ls-files '*.rs'"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-file",
+    "note": "#829: the hook names the shape, but a glob is not symbol-shaped, so it passes. route routes `git ls-files` to find-file. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-git-log-pickaxe",
+    "tool": "Bash",
+    "input": {
+      "command": "git log -S find_plugin"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "commit history is not sym-indexed, so the policy carries no git log family; the hook passes when the pattern has no local symbol."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-git-log-grep-messages",
+    "tool": "Bash",
+    "input": {
+      "command": "git log --grep worksource"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "commit messages are not sym-indexed; the hook records telemetry and passes."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-git-log-ordinary",
+    "tool": "Bash",
+    "input": {
+      "command": "git log --oneline"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "ordinary history reading."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-non-search-command",
+    "tool": "Bash",
+    "input": {
+      "command": "cargo test --workspace"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no managed binary."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-uncovered-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "git grep Symbol"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "coverage gate (#353): no rule predicate reads coverage. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-zgrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "zgrep search_target logs/app.log.gz"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "RESEARCH-CMD-bounded-tokenizer next_step classifies the zgrep family as content searches; the policy routes zgrep, zegrep, zfgrep, bzgrep, xzgrep and zstdgrep to find-content. The hook's leading-binary list does not name them. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-zegrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "zegrep 'a|b' logs/app.log.gz"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "zgrep family, as bgrep-zgrep-content-search. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-zfgrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "zfgrep search_target logs/app.log.gz"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "zgrep family. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-bzgrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "bzgrep search_target logs/app.log.bz2"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "zgrep family. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-xzgrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "xzgrep search_target logs/app.log.xz"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "zgrep family. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-zstdgrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "zstdgrep search_target logs/app.log.zst"
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "zgrep family. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-egrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "egrep -rn search_target ."
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "egrep and fgrep are grep under another name; the hook's leading-binary list does not name them. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-fgrep-content-search",
+    "tool": "Bash",
+    "input": {
+      "command": "fgrep -rn search_target ."
+    },
+    "hook_behavior": "allow",
+    "route": "deny",
+    "agrees": false,
+    "note": "as bgrep-egrep-content-search. DISAGREEMENT: hook allow, route deny."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-sed-pattern-print",
+    "tool": "Bash",
+    "input": {
+      "command": "sed -n '/fn main/p' src/main.rs"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "RESEARCH-CMD-bounded-tokenizer next_step classifies `sed -n /pat/p FILE` as a content search. The hook passes it, and so does route: no sed rule is shipped. Bash predicates compare whole words, so a sed family cannot tell `/pat/p` from `1,20p`, and routing all of sed -n to sym would deny ordinary line ranges. GAP against the research, not a hook disagreement: it needs an argument pattern predicate."
+  },
+  {
+    "hook": "pre-bash-grep.sh",
+    "case": "bgrep-awk-pattern-filter",
+    "tool": "Bash",
+    "input": {
+      "command": "awk '/fn main/' src/main.rs"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "RESEARCH-CMD-bounded-tokenizer next_step classifies `awk /pat/ FILE` as a content search. No awk rule is shipped: a whole-word predicate cannot tell `/pat/` from `{print $2}`, and an awk family routed to sym would deny every pipeline that ends in awk. GAP against the research, not a hook disagreement: it needs an argument pattern predicate."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-python-os-walk",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"import os; [print(r) for r, d, f in os.walk('.')]\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym tree",
+    "note": "the hook injects a sym tree nudge and never denies. FR-CMD-007: an interpreter one-liner whose job sym serves is routed to sym, never allowed or proxied, even though its body is otherwise opaque. The policy declares the walk primitive as the script-walk-os-walk sym job. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-node-readdir",
+    "tool": "Bash",
+    "input": {
+      "command": "node -e \"console.log(require('fs').readdirSync('.'))\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym tree",
+    "note": "as bash-script-python-os-walk (script-walk-readdir). DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-absolute-path-interpreter",
+    "tool": "Bash",
+    "input": {
+      "command": "/usr/bin/python3 -c \"import os; os.listdir('.')\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym tree",
+    "note": "both resolve the interpreter by basename. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-fnmatch",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"import fnmatch, os; print(fnmatch.filter(os.listdir('src'), '*.rs'))\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "note": "the hook's shape order (tree before file) nudges sym tree; route's sym jobs are tried in policy order and os.listdir's job comes first, so both name sym tree. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-glob",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"import glob; print(glob.glob('**/*.rs', recursive=True))\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-file",
+    "note": "a filename match routes to find-file (script-glob-glob). DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-rglob-read-text",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"import pathlib; [print(f) for f in pathlib.Path('.').rglob('*.rs') if 'foo' in f.read_text()]\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "the hook reads rglob as a tree walk; route's find-content job (rglob and read_text, most specific first) claims it as a content search, FR-CMD-007's own example. DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-subprocess-grep",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"import subprocess; subprocess.run(['grep', '-rn', 'foo', '.'])\""
+    },
+    "hook_behavior": "inject",
+    "route": "deny",
+    "agrees": false,
+    "instead_contains": "legion sym etc find-content",
+    "note": "a grep shelled out from a one-liner routes to find-content (script-grep-subprocess). DISAGREEMENT: hook allow (inject), route deny."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-regex-without-file-read",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"import re; print(re.search('a+', 'caaat'))\""
+    },
+    "hook_behavior": "inject",
+    "route": "proxy",
+    "agrees": false,
+    "note": "the hook nudges find-content on any re.search/re.findall/re.compile/.includes(. Those match strings, not files, so no sym job declares them: a one-liner that only runs a regex over a literal is not a job sym serves, and it proxies opaque like any unclaimed interpreter body (FR-CMD-007). DISAGREEMENT: hook allow (inject), route proxy."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-no-search-primitive",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 -c \"print(1 + 1)\""
+    },
+    "hook_behavior": "allow",
+    "route": "proxy",
+    "agrees": false,
+    "note": "the hook passes an interpreter body with no primitive. route cannot see into a foreign interpreter body and proxies it opaque, on the record, never a silent allow (FR-CMD-007). DISAGREEMENT: hook allow, route proxy."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-named-file",
+    "tool": "Bash",
+    "input": {
+      "command": "python3 tree.py"
+    },
+    "hook_behavior": "allow",
+    "route": "proxy",
+    "agrees": false,
+    "note": "a script named rather than inlined is opaque to both; route proxies it with reason opaque (FR-CMD-007). DISAGREEMENT: hook allow, route proxy."
+  },
+  {
+    "hook": "pre-script-search.sh",
+    "case": "bash-script-non-interpreter",
+    "tool": "Bash",
+    "input": {
+      "command": "cargo build --release"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "no interpreter, no managed binary."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-bare-indexed-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "ls"
+    },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "legion sym tree",
+    "note": "inject, never deny: route's ls rule allows with the sym tree/list note."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-long-listing",
+    "tool": "Bash",
+    "input": {
+      "command": "ls -la"
+    },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note_contains": "not blocking you",
+    "note": "ls -l carries metadata sym cannot reproduce, so both allow."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-subpath-inside-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "ls src/cmd"
+    },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note": "a relative target inside the repo."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-absolute-path-binary",
+    "tool": "Bash",
+    "input": {
+      "command": "/bin/ls src"
+    },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note": "both resolve ls by basename."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-in-pipeline",
+    "tool": "Bash",
+    "input": {
+      "command": "ls src | head -5"
+    },
+    "hook_behavior": "inject",
+    "route": "allow",
+    "agrees": true,
+    "note": "the hook stops collecting targets at the pipe; head reaches the allow default, and the fold keeps the first allow, which carries the ls note."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-scratch-dir-outside-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "ls /tmp/scratch"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": false,
+    "note": "the hook resolves the target against the cwd and stays silent outside the repo's tree. route has no cwd in Context and no path predicate, so it adds its note to every ls. Same arm. DISAGREEMENT of note content on the same arm: the hook is silent, route carries the sym note."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-parent-dir-outside-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "ls .."
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": false,
+    "note": "as ls-scratch-dir-outside-repo. DISAGREEMENT of note content on the same arm: the hook is silent, route carries the sym note."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-not-indexed-repo",
+    "tool": "Bash",
+    "input": {
+      "command": "ls"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": false,
+    "note": "an unindexed repo has no sym tree, so the hook stays silent. Context.index_exists is not a rule predicate. DISAGREEMENT of note content on the same arm: the hook is silent, route carries the sym note."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-bypass-sentinel",
+    "tool": "Bash",
+    "input": {
+      "command": "ls src # legion-bypass: need dotfiles"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": false,
+    "note": "the bypass sentinel suppresses the hook's nudge and writes telemetry; route has no bypass. DISAGREEMENT of note content on the same arm: the hook is silent, route carries the sym note."
+  },
+  {
+    "hook": "pre-bash-ls.sh",
+    "case": "ls-lookalike-binary",
+    "tool": "Bash",
+    "input": {
+      "command": "lsof -i :8080"
+    },
+    "hook_behavior": "allow",
+    "route": "allow",
+    "agrees": true,
+    "note": "lsof is not ls: the family key is matched against the whole basename."
   }
 ]
