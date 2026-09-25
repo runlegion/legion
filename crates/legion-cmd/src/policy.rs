@@ -311,13 +311,164 @@ pub struct SymJob {
 /// A name the policy says wraps a shell command (FR-CMD-007). route re-enters
 /// the wrapped command through [`crate::splitter::scan_at`], so a managed
 /// binary inside is routed like the same binary in first position.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The wrapper's own words before the payload are declared here as data
+/// (#1286): its valueless options, its options that take a value, and how
+/// many leading operands it takes. [`Wrapper::payload_start`] consumes them by
+/// that declaration; an option the declaration does not name is a word route
+/// cannot account for, so the invocation is proxied opaque rather than read.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Wrapper {
     pub binary: String,
     /// A word that must follow the binary for it to wrap a command, e.g.
     /// `exec`/`dlx` for `pnpm`/`npm`/`yarn`. A bare `pnpm <name>` carries no
     /// required word and is an ordinary invocation, not a runner.
     pub required_subcommand: Option<String>,
+    /// The wrapper's own options that take no value, e.g. `--foreground` for
+    /// `timeout`. A single-dash one-letter entry also matches inside a
+    /// clustered word (`-0r`).
+    pub flags: Vec<String>,
+    /// The wrapper's own options that take a value, e.g. `-s`/`--signal` for
+    /// `timeout`. The value is the next word, or attached (`-oL`,
+    /// `--signal=KILL`).
+    pub value_options: Vec<String>,
+    /// How many operands the wrapper takes after its options and before the
+    /// payload, e.g. 1 for `timeout DURATION`.
+    pub operands: usize,
+}
+
+impl Wrapper {
+    /// Whether this wrapper claims an invocation of its binary with `args`.
+    /// A wrapper with no required subcommand claims every one.
+    ///
+    /// A runner's options precede its subcommand (`pnpm -r exec`), so a
+    /// wrapper with a required subcommand claims the invocation when that
+    /// word appears and every word before it could be an option: a word
+    /// starting with `-`, or a single word right after an option, which may
+    /// be that option's value. This test is deliberately looser than the
+    /// declaration: a shape the declaration does not model (`pnpm -- exec`,
+    /// an undeclared option) is still claimed, and [`Wrapper::payload_start`]
+    /// then refuses it, so it is proxied opaque rather than read as an
+    /// ordinary invocation -- an unexpected shape only gets stricter (#1286).
+    /// A word before the subcommand that cannot be an option or its value
+    /// (`pnpm run exec`) means the subcommand word is someone else's operand,
+    /// and the invocation stays ordinary.
+    pub fn wraps(&self, args: &[String]) -> bool {
+        let Some(subcommand) = &self.required_subcommand else {
+            return true;
+        };
+        let Some(position) = args
+            .iter()
+            .position(|a| crate::evaluate::dequote_outer(a) == subcommand)
+        else {
+            return false;
+        };
+        let mut after_option = false;
+        for raw in &args[..position] {
+            let word = crate::evaluate::dequote_outer(raw);
+            let is_option = word.starts_with('-');
+            if !is_option && !after_option {
+                return false;
+            }
+            // A value follows an option, never `--` and never another value.
+            after_option = is_option && word != "--";
+        }
+        true
+    }
+
+    /// The index in `args` where the wrapped command begins, or `None` when
+    /// the wrapper's own words cannot be consumed by its declaration: an
+    /// option it does not declare, a value option with no value, a missing
+    /// required subcommand, or fewer operands than it takes (#1286).
+    ///
+    /// Declared options are read before and after the required subcommand,
+    /// then one `--`, then the declared operands. An index equal to
+    /// `args.len()` means the wrapper wraps no command.
+    pub fn payload_start(&self, args: &[String]) -> Option<usize> {
+        let mut index = self.options_end(args, 0)?;
+        if let Some(subcommand) = &self.required_subcommand {
+            if word_at(args, index) != Some(subcommand.as_str()) {
+                return None;
+            }
+            index = self.options_end(args, index + 1)?;
+        }
+        if word_at(args, index) == Some("--") {
+            index += 1;
+        }
+        let start = index + self.operands;
+        (start <= args.len()).then_some(start)
+    }
+
+    /// The index of the first word from `index` on that is not one of the
+    /// wrapper's options, or `None` when an option there is one it does not
+    /// declare or lacks its value. Options are read getopt-style; a `--` stops
+    /// the read and is left for the caller. Each word is compared as the shell
+    /// sees it (one outer quote pair removed), so a quoted `"-u"` is still an
+    /// option.
+    fn options_end(&self, args: &[String], mut index: usize) -> Option<usize> {
+        while let Some(word) = word_at(args, index) {
+            // A lone `-` is an operand (stdin) unless the wrapper declares it
+            // an option, as `env` does.
+            let is_option =
+                word != "--" && word.starts_with('-') && (word != "-" || self.declares_flag(word));
+            if !is_option {
+                break;
+            }
+            let consumed = self.option_words(word)?;
+            if index + consumed > args.len() {
+                return None;
+            }
+            index += consumed;
+        }
+        Some(index)
+    }
+
+    /// How many words the option `word` spans (1, or 2 when its value is the
+    /// next word), or `None` when the declaration does not name it.
+    fn option_words(&self, word: &str) -> Option<usize> {
+        if self.declares_flag(word) {
+            return Some(1);
+        }
+        if self.declares_value_option(word) {
+            return Some(2);
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            // `--name=value` is one word when `--name` takes a value.
+            let (name, _) = long.split_once('=')?;
+            return self
+                .declares_value_option(&format!("--{name}"))
+                .then_some(1);
+        }
+        // A short cluster (`-0r`, `-oL`, `-uroot`): every letter is a
+        // declared flag until one takes a value, which is the rest of the
+        // word when anything follows it and the next word otherwise.
+        let cluster = word.strip_prefix('-')?;
+        for (pos, letter) in cluster.char_indices() {
+            let option = format!("-{letter}");
+            if self.declares_flag(&option) {
+                continue;
+            }
+            if !self.declares_value_option(&option) {
+                return None;
+            }
+            let attached = pos + letter.len_utf8() < cluster.len();
+            return Some(if attached { 1 } else { 2 });
+        }
+        Some(1)
+    }
+
+    fn declares_flag(&self, word: &str) -> bool {
+        self.flags.iter().any(|f| f == word)
+    }
+
+    fn declares_value_option(&self, word: &str) -> bool {
+        self.value_options.iter().any(|o| o == word)
+    }
+}
+
+/// The word at `index` as the shell sees it, one outer quote pair removed.
+fn word_at(args: &[String], index: usize) -> Option<&str> {
+    args.get(index).map(|a| crate::evaluate::dequote_outer(a))
 }
 
 /// Whether an interpreter body is shell (re-entered) or a foreign language
@@ -369,16 +520,12 @@ impl Policy {
     }
 
     /// The wrapper matching `binary` given its arguments, if the policy names
-    /// one. A wrapper with a required subcommand matches only when that word
-    /// is the first argument.
+    /// one. A wrapper with a required subcommand matches only when
+    /// [`Wrapper::wraps`] finds that word.
     pub fn matching_wrapper(&self, binary: &str, args: &[String]) -> Option<&Wrapper> {
-        self.wrappers.iter().find(|w| {
-            w.binary == binary
-                && match &w.required_subcommand {
-                    None => true,
-                    Some(word) => args.first().map(String::as_str) == Some(word.as_str()),
-                }
-        })
+        self.wrappers
+            .iter()
+            .find(|w| w.binary == binary && w.wraps(args))
     }
 
     /// The interpreter matching `binary`, if the policy names one.
@@ -1211,7 +1358,17 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
     for (index, wrapper_value) in array.iter().enumerate() {
         let wrapper_pointer = child_pointer(pointer, &index.to_string());
         let map = as_object(wrapper_value, &wrapper_pointer)?;
-        check_known_keys(map, &wrapper_pointer, &["binary", "required_subcommand"])?;
+        check_known_keys(
+            map,
+            &wrapper_pointer,
+            &[
+                "binary",
+                "required_subcommand",
+                "flags",
+                "value_options",
+                "operands",
+            ],
+        )?;
         let binary = require_string(map, "binary", &wrapper_pointer)?;
         let required_subcommand = match map.get("required_subcommand") {
             Some(sub) => Some(as_string(
@@ -1220,9 +1377,28 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
             )?),
             None => None,
         };
+        let optional_strings = |key: &str| match map.get(key) {
+            Some(value) => parse_string_array(value, &child_pointer(&wrapper_pointer, key)),
+            None => Ok(Vec::new()),
+        };
+        let flags = optional_strings("flags")?;
+        let value_options = optional_strings("value_options")?;
+        let operands = match map.get("operands") {
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| PolicyError::WrongType {
+                    pointer: child_pointer(&wrapper_pointer, "operands"),
+                    expected: "a non-negative integer".to_string(),
+                })?,
+            None => 0,
+        };
         wrappers.push(Wrapper {
             binary,
             required_subcommand,
+            flags,
+            value_options,
+            operands,
         });
     }
     Ok(wrappers)
@@ -1999,6 +2175,7 @@ mod tests {
             Some(&Wrapper {
                 binary: "pnpm".to_string(),
                 required_subcommand: Some("exec".to_string()),
+                ..Wrapper::default()
             })
         );
         assert!(
@@ -2011,5 +2188,146 @@ mod tests {
             Some(BodyLanguage::Shell)
         );
         assert!(policy.matching_script_carrier("bash").is_some());
+    }
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn wrapper_arguments_parse_from_the_declaration() {
+        let text = r#"{"wrappers": [{"binary": "timeout", "flags": ["-v"],
+            "value_options": ["-s"], "operands": 1}]}"#;
+        let policy = parse_policy(text).expect("valid");
+        assert_eq!(
+            policy.wrappers[0],
+            Wrapper {
+                binary: "timeout".to_string(),
+                required_subcommand: None,
+                flags: vec!["-v".to_string()],
+                value_options: vec!["-s".to_string()],
+                operands: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn wrapper_arguments_of_the_wrong_type_are_rejected() {
+        for (text, pointer, expected) in [
+            (
+                r#"{"wrappers": [{"binary": "timeout", "operands": -1}]}"#,
+                "/wrappers/0/operands",
+                "a non-negative integer",
+            ),
+            (
+                r#"{"wrappers": [{"binary": "timeout", "operands": "1"}]}"#,
+                "/wrappers/0/operands",
+                "a non-negative integer",
+            ),
+            (
+                r#"{"wrappers": [{"binary": "sudo", "flags": "-E"}]}"#,
+                "/wrappers/0/flags",
+                "an array",
+            ),
+            (
+                r#"{"wrappers": [{"binary": "sudo", "value_options": [1]}]}"#,
+                "/wrappers/0/value_options/0",
+                "a string",
+            ),
+        ] {
+            assert_eq!(
+                parse_policy(text).expect_err("wrong type"),
+                PolicyError::WrongType {
+                    pointer: pointer.to_string(),
+                    expected: expected.to_string(),
+                },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_start_consumes_the_declared_words_getopt_style() {
+        let timeout = Wrapper {
+            binary: "timeout".to_string(),
+            flags: vec!["-v".to_string(), "--foreground".to_string()],
+            value_options: vec!["-s".to_string(), "--signal".to_string()],
+            operands: 1,
+            ..Wrapper::default()
+        };
+        for (args, start) in [
+            ("5 cmd", 1),
+            ("-s KILL 5 cmd", 3),
+            ("-sKILL 5 cmd", 2),
+            ("--signal=KILL 5 cmd", 2),
+            ("--signal KILL --foreground 5 cmd", 4),
+            ("-vs KILL 5 cmd", 3),
+            ("-- 5 cmd", 2),
+            // Options stop at the first operand: `-v` here is the command's.
+            ("5 cmd -v", 1),
+            // Consumed to the end: the wrapper wraps no command.
+            ("5", 1),
+        ] {
+            assert_eq!(timeout.payload_start(&words(args)), Some(start), "{args}");
+        }
+        for args in [
+            "",
+            "-s",
+            "-x 5 cmd",
+            "--bogus 5 cmd",
+            "--foreground=1 5 cmd",
+            "-vx 5",
+        ] {
+            assert_eq!(timeout.payload_start(&words(args)), None, "{args}");
+        }
+    }
+
+    #[test]
+    fn payload_start_skips_the_required_subcommand_and_reads_a_lone_dash_by_declaration() {
+        let pnpm_exec = Wrapper {
+            binary: "pnpm".to_string(),
+            required_subcommand: Some("exec".to_string()),
+            flags: vec!["-r".to_string()],
+            value_options: vec!["-C".to_string()],
+            ..Wrapper::default()
+        };
+        // A runner's options precede its subcommand.
+        for (args, start) in [
+            ("exec eslint", 1),
+            ("-r exec eslint", 2),
+            ("-C pkg -r exec eslint", 4),
+            ("exec -- eslint", 2),
+        ] {
+            assert!(pnpm_exec.wraps(&words(args)), "{args}");
+            assert_eq!(pnpm_exec.payload_start(&words(args)), Some(start), "{args}");
+        }
+        // Not the runner: the subcommand is not the word after the options.
+        for args in ["grep", "-r install", "run exec"] {
+            assert!(!pnpm_exec.wraps(&words(args)), "{args}");
+        }
+        // A shape the declaration does not model before the subcommand -- an
+        // undeclared option, a `--` -- is claimed, then refused.
+        for args in [
+            "--bogus exec eslint",
+            "--bogus val exec eslint",
+            "-- exec eslint",
+            "-r -- exec eslint",
+        ] {
+            assert!(pnpm_exec.wraps(&words(args)), "{args}");
+            assert_eq!(pnpm_exec.payload_start(&words(args)), None, "{args}");
+        }
+        // The subcommand word as another command's operand stays ordinary.
+        for args in ["-C pkg run exec", "-- run exec"] {
+            assert!(!pnpm_exec.wraps(&words(args)), "{args}");
+        }
+
+        let env = Wrapper {
+            binary: "env".to_string(),
+            flags: vec!["-".to_string()],
+            ..Wrapper::default()
+        };
+        assert_eq!(env.payload_start(&words("- grep foo")), Some(1));
+        // Undeclared, a lone `-` is an operand, not an option.
+        assert_eq!(Wrapper::default().payload_start(&words("- grep")), Some(0));
     }
 }

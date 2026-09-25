@@ -120,7 +120,9 @@ pub struct Invocation {
 /// enum because the enum is the shared vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnreducedReason {
-    /// A payload carried by a name the policy does not say wraps a command.
+    /// A payload carried by a name the policy says wraps a command, which
+    /// route could not reduce: the wrapper's own words are not ones its
+    /// declaration consumes (#1286).
     WrapperPayload,
     /// A script file named rather than inlined.
     ScriptFile,

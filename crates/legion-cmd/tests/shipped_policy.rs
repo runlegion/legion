@@ -31,9 +31,15 @@ fn mirror_policy() -> Policy {
              "interpreter_patterns": ["rglob", "read_text"]}
         ],
         "wrappers": [
-            {"binary": "env"},
-            {"binary": "npx"},
-            {"binary": "pnpm", "required_subcommand": "exec"}
+            {"binary": "env",
+             "flags": ["-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug"],
+             "value_options": ["-u", "--unset", "-C", "--chdir", "-P"]},
+            {"binary": "npx",
+             "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
+             "value_options": ["-p", "--package", "-w", "--workspace"]},
+            {"binary": "pnpm", "required_subcommand": "exec",
+             "flags": ["-r", "--recursive", "--parallel", "--report-summary", "-w", "--workspace-root"],
+             "value_options": ["--resume-from", "-C", "--dir", "-F", "--filter"]}
         ],
         "interpreters": [
             {"binary": "sh", "flag": "-c", "body": "shell"},
@@ -83,6 +89,81 @@ fn shipped_policy_parses_is_non_empty_and_declares_its_names() {
     assert!(policy.matching_interpreter("python3").is_some());
     assert!(policy.matching_script_carrier("bash").is_some());
     assert!(policy.sym_job("find-content").is_some());
+}
+
+/// The shipped wrapper declarations consume each wrapper's own words up to
+/// the wrapped command (#1286). Checked against the artifact itself, so a
+/// declaration with the wrong arity -- a value option listed as a flag, a
+/// missing operand -- fails here rather than shipping green. This reads the
+/// file but never calls route.
+#[test]
+fn shipped_wrapper_declarations_reach_the_wrapped_command() {
+    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    for (command, wrapped) in [
+        ("timeout 5 chmod -R 777 /", "chmod"),
+        ("timeout -s KILL 5 mkfs.ext4 /dev/sda1", "mkfs.ext4"),
+        ("stdbuf -oL mkfs.ext4 /dev/sda1", "mkfs.ext4"),
+        ("xargs -I{} mkfs.ext4 {}", "mkfs.ext4"),
+        ("sudo -u root mkfs.ext4 /dev/sda1", "mkfs.ext4"),
+        ("sudo -u root git push", "git"),
+        ("nice -n 10 make", "make"),
+        ("nohup make", "make"),
+        ("env -i FOO=1 make", "FOO=1"),
+        ("npx -y eslint .", "eslint"),
+        ("pnpm -r exec grep foo .", "grep"),
+        ("pnpm -C web --filter app exec eslint .", "eslint"),
+        ("pnpm dlx -s cowsay hi", "cowsay"),
+        ("pnpx -s cowsay hi", "cowsay"),
+        ("pnpm dlx --reporter silent cowsay hi", "cowsay"),
+        ("pnpx --reporter=silent cowsay hi", "cowsay"),
+        ("npm --prefix x exec --package=eslint -- eslint .", "eslint"),
+        ("yarn --cwd web exec eslint .", "eslint"),
+        ("yarn dlx -q cowsay hi", "cowsay"),
+        ("bunx --silent --no-install cowsay hi", "cowsay"),
+    ] {
+        let (args, start) = shipped_payload_start(&policy, command);
+        let start =
+            start.unwrap_or_else(|| panic!("`{command}`: the declaration consumes its own words"));
+        assert_eq!(
+            args.get(start).map(String::as_str),
+            Some(wrapped),
+            "`{command}` must reach `{wrapped}`"
+        );
+    }
+
+    // Shapes the declarations do not model are claimed by the wrapper and
+    // refused, so route proxies them opaque -- never the allow default.
+    // npm's `--no` is deliberately undeclared: its arity differs across npm
+    // versions and reports, and leaving it out is safe either way. A `--`
+    // before a runner's subcommand is refused the same way.
+    for command in [
+        "npx --no cowsay hi",
+        "npm exec --no cowsay hi",
+        "env -S 'make'",
+        "pnpm -- exec grep foo .",
+        "pnpm -r -- exec grep foo .",
+        "npm -- exec grep foo .",
+        "yarn -- exec grep foo .",
+    ] {
+        assert_eq!(
+            shipped_payload_start(&policy, command).1,
+            None,
+            "`{command}`"
+        );
+    }
+}
+
+/// Splits `command` on whitespace, finds the shipped wrapper its first word
+/// names, and returns its arguments with where that wrapper's payload starts.
+fn shipped_payload_start(policy: &Policy, command: &str) -> (Vec<String>, Option<usize>) {
+    let mut words = command.split_whitespace().map(str::to_string);
+    let binary = words.next().expect("a wrapper word");
+    let args: Vec<String> = words.collect();
+    let wrapper = policy
+        .matching_wrapper(&binary, &args)
+        .unwrap_or_else(|| panic!("`{command}`: `{binary}` is a shipped wrapper"));
+    let start = wrapper.payload_start(&args);
+    (args, start)
 }
 
 // -- route behavior (inline policy, never touches disk) -----------------------
