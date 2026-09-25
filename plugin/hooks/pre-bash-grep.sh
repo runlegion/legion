@@ -139,11 +139,16 @@ _legion_bashgrep_safe_head() {
 }
 
 # _legion_bashgrep_is_compound CMD -- true (0) when CMD contains a shell
-# chain/pipe/redirect operator OUTSIDE single/double quotes. A wrong
-# rewrite inside a pipeline is worse than no rewrite, so callers skip the
-# REWRITE tier entirely when this returns true.
+# chain/pipe/redirect operator OUTSIDE single/double quotes, or any
+# newline (a second command on its own line; a newline inside a quoted
+# pattern is also counted, which only costs a rewrite). A wrong rewrite
+# inside a pipeline is worse than no rewrite, so callers skip the REWRITE
+# tier entirely when this returns true.
 _legion_bashgrep_is_compound() {
   local cmd="$1"
+  case "$cmd" in
+    *$'\n'*) return 0 ;;
+  esac
   local head
   head="$(_legion_bashgrep_safe_head "$cmd")"
   [ "${#head}" -lt "${#cmd}" ]
@@ -394,12 +399,110 @@ _legion_bashgrep_classify() {
   RW_CMD="${rendered% }"
 }
 
+# _legion_bashgrep_reads_tool_results CMD -- true (0) when the leading
+# `grep` in CMD reads only files under the harness's tool-results directory
+# (~/.claude/projects/<project>/<session>/tool-results/<file>), where the
+# harness saves a Bash result too large to return inline -- legion's own
+# output, not a repository (#1264). Every file argument must match and at
+# least one must be present. Returns false, so the caller keeps today's
+# ladder, for any shape this parse cannot vouch for:
+#   - a compound command: the caller exits for the WHOLE command, so a
+#     second search chained after this grep must never ride along;
+#   - a pattern file (-f, --file, or f inside a short-flag cluster such as
+#     -if), which turns every positional into a file argument;
+#   - recursion or device reads (-r/-R/-d/-D, in a cluster too, or
+#     --recursive/--directories/--devices): a saved tool-results file never
+#     needs them;
+#   - a symlinked ~/.claude or ~/.claude/projects anchor;
+#   - a file argument that is not an existing regular, non-symlink file
+#     whose PHYSICAL directory (symlinks resolved, $HOME too) is still a
+#     <project>/<session>/tool-results directory -- a lexical check alone
+#     lets a symlinked `tool-results` component reach the repo;
+#   - a relative path, or a path with spaces.
+_legion_bashgrep_reads_tool_results() {
+  _legion_bashgrep_is_compound "$1" && return 1
+  local toks=()
+  IFS=$' \t' read -ra toks <<<"$1"
+
+  # One pass collects every positional. The pattern is known to come from
+  # -e/--regexp only once the whole argv is seen (`grep src/x -e PAT f`
+  # makes src/x a file), so which positional is the pattern is decided
+  # after the loop, never at the first positional.
+  local positionals=() pattern_via_e=0 seen_dashdash=0 i j t ch
+  for ((i = 1; i < ${#toks[@]}; i++)); do
+    t="${toks[$i]//[\"\']/}"
+    if [ "$seen_dashdash" -eq 0 ]; then
+      case "$t" in
+        --) seen_dashdash=1; continue ;;
+        --regexp) i=$((i + 1)); pattern_via_e=1; continue ;;
+        --regexp=*) pattern_via_e=1; continue ;;
+        --file | --file=* | --recursive | --dereference-recursive | --directories* | --devices*) return 1 ;;
+        # Any other long flag is skipped. A flag's detached value
+        # (`--context 3`) is then misread as a positional, which fails the
+        # file check below -- a refusal, never a wrong allow.
+        --*) continue ;;
+        -?*)
+          # Short-flag cluster: -e ends it, taking the rest of the token
+          # (or, when last, the next token) as the pattern.
+          for ((j = 1; j < ${#t}; j++)); do
+            ch="${t:$j:1}"
+            case "$ch" in
+              f | r | R | d | D) return 1 ;;
+              e)
+                pattern_via_e=1
+                [ "$j" -eq $((${#t} - 1)) ] && i=$((i + 1))
+                break
+                ;;
+            esac
+          done
+          continue
+          ;;
+      esac
+    fi
+    positionals+=("$t")
+  done
+  [ "$pattern_via_e" -eq 1 ] || positionals=("${positionals[@]:1}")
+  [ "${#positionals[@]}" -gt 0 ] || return 1
+
+  # The anchor itself must be the harness's own directory: were ~/.claude
+  # or ~/.claude/projects a symlink, physical resolution would follow it
+  # and exempt any <x>/<y>/tool-results/<file> under the target.
+  [ -L "${HOME}/.claude" ] || [ -L "${HOME}/.claude/projects" ] && return 1
+  local projects dir
+  projects="$(cd -P -- "${HOME}/.claude/projects" 2>/dev/null && pwd -P)" || return 1
+  for t in "${positionals[@]}"; do
+    # The command text is unexpanded: resolve the home spellings it uses.
+    case "$t" in
+      \~/*) t="${HOME}/${t#\~/}" ;;
+      \$HOME/*) t="${HOME}/${t#\$HOME/}" ;;
+      \$\{HOME\}/*) t="${HOME}/${t#\$\{HOME\}/}" ;;
+    esac
+    case "$t" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    [ -f "$t" ] && [ ! -L "$t" ] || return 1
+    dir="$(cd -P -- "${t%/*}" 2>/dev/null && pwd -P)" || return 1
+    case "$dir" in
+      "$projects"/*) ;;
+      *) return 1 ;;
+    esac
+    [[ "${dir#"$projects"/}" =~ ^[^/]+/[^/]+/tool-results$ ]] || return 1
+  done
+}
+
 # Universal gate: skip uncovered repos.
 legion_hook_covered || exit 0
 
 # Detect leading search binary; pass through if none.
 BINARY=$(legion_prequery_bash_binary "$COMMAND")
 if [ -z "$BINARY" ]; then
+  exit 0
+fi
+
+# A grep of a harness tool-results file filters legion's own saved output,
+# not the repository, so it is not a search this ladder governs (#1264).
+if [ "$BINARY" = "grep" ] && _legion_bashgrep_reads_tool_results "$COMMAND"; then
   exit 0
 fi
 
