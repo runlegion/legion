@@ -1191,13 +1191,54 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    /// The legion-cmd router's adapter surface (#1229). Only `--hook` exists
-    /// today; the operator and scripting mode ships in the cmd-check issue.
+    /// Show what the legion-cmd router decides for a command, and why,
+    /// without running the command.
+    ///
+    /// Operator and scripting mode (#1230): `legion cmd-check [--tool TOOL]
+    /// -- <COMMAND>`, or `legion cmd-check --tool TOOL --input <JSON>` for a
+    /// tool other than Bash. Prints the Decision arm, its reason (the proxy
+    /// reason, or the deny's command to run instead), the facts route
+    /// extracted, the replacement for a rewrite, and the elapsed time;
+    /// `--json` prints the same report as JSON. The command is never run.
+    /// Every decision exits 0, deny included; an unreadable policy, an
+    /// overrun, or an internal error is reported as a deny naming it.
+    ///
+    /// Hook mode (#1229): `--hook` reads one PreToolUse hook payload (JSON)
+    /// on stdin and writes one hook response (JSON) on stdout, always
+    /// exiting 0. It does not run the command either; the harness does.
     CmdCheck {
-        /// Read one PreToolUse hook payload (JSON) on stdin and write one
-        /// hook response (JSON) on stdout. Always exits 0 with a response.
-        #[arg(long)]
+        /// Hook mode: read one PreToolUse hook payload (JSON) on stdin and
+        /// write one hook response (JSON) on stdout. Always exits 0 with a
+        /// response.
+        #[arg(long, conflicts_with_all = ["repo", "tool", "input", "json", "policy", "command"])]
         hook: bool,
+
+        /// The repo a required recall lookup is scoped to (default:
+        /// LEGION_REPO, else derived from the current directory).
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// The tool the call is checked as (default: Bash). A positional
+        /// command becomes its `tool_input.command`.
+        #[arg(long)]
+        tool: Option<String>,
+
+        /// The call's `tool_input` as JSON, for a tool other than Bash.
+        #[arg(long, requires = "tool", conflicts_with = "command")]
+        input: Option<String>,
+
+        /// Print the report as JSON for scripts.
+        #[arg(long)]
+        json: bool,
+
+        /// Read this policy file instead of the shipped default, to test a
+        /// policy edit before shipping it.
+        #[arg(long, value_name = "PATH")]
+        policy: Option<PathBuf>,
+
+        /// The command to check, after `--`. It is never run.
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
     },
 }
 

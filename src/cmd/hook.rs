@@ -13,6 +13,13 @@
 //! policy, and a panic anywhere into a deny with a reason. Nothing here
 //! falls through to running the raw command.
 //!
+//! The operator mode (`legion cmd-check -- <command>`, #1230,
+//! `crate::cli::cmd_check`) runs the same core: [`read_policy_text`] and
+//! [`route_call`] (policy loading, the settings, the repo, the lookup
+//! pre-pass, route, all under the deadline), [`replacement_for`], and the
+//! error deny from [`error_deny_text`]. Only the rendering differs: this
+//! module writes a hook response, the operator mode a report.
+//!
 //! # The response shapes (Claude Code hook contract)
 //!
 //! `hookSpecificOutput.permissionDecision` is `allow`, `deny` or `ask`; its
@@ -71,8 +78,8 @@ use std::thread;
 use std::time::Duration;
 
 use legion_cmd::{
-    AskDetails, Context, Deciding, Decision, Lookup, ManagedTarget, Policy, Routed, ToolCall,
-    parse_policy, required_lookups, route,
+    AskDetails, Context, Deciding, Decision, Facts, Lookup, ManagedTarget, Policy, Routed,
+    ToolCall, parse_policy, required_lookups, route,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -94,7 +101,7 @@ const PLUGIN_ROOT_ENV: &str = "CLAUDE_PLUGIN_ROOT";
 
 /// `plugin/hooks/lib/prelude.sh`'s repo override (#614): when set, every
 /// hook resolves the same repo identity from it, and so does this adapter.
-const LEGION_REPO_ENV: &str = "LEGION_REPO";
+pub(crate) const LEGION_REPO_ENV: &str = "LEGION_REPO";
 
 const HOOK_EVENT: &str = "PreToolUse";
 
@@ -129,10 +136,7 @@ impl HookPayload {
     /// The Bash command this payload carries, if any. Every message that
     /// names the command back to the agent goes through here.
     fn command(&self) -> Option<&str> {
-        self.tool_input
-            .get("command")
-            .and_then(Value::as_str)
-            .filter(|command| !command.is_empty())
+        command_in(&self.tool_input)
     }
 
     /// The value a rewrite replaces -- the Bash command, or an Agent/Task
@@ -148,10 +152,19 @@ impl HookPayload {
     }
 }
 
+/// The Bash command a `tool_input` carries, if any, for a message that names
+/// the command back to its reader. Reads the one field; never scans it.
+pub(crate) fn command_in(tool_input: &Value) -> Option<&str> {
+    tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
+}
+
 /// Every way the adapter itself fails, each closed (FR-CMD-009). The deny
 /// the agent sees names the variant and its detail.
 #[derive(Debug, thiserror::Error)]
-enum AdapterError {
+pub(crate) enum AdapterError {
     #[error("payload: {0}")]
     Payload(String),
     #[error("policy: {0}")]
@@ -195,7 +208,7 @@ fn guarded(build: impl FnOnce() -> Value) -> Value {
     }
 }
 
-fn panic_message(payload: &Box<dyn Any + Send>) -> String {
+pub(crate) fn panic_message(payload: &Box<dyn Any + Send>) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
         return (*text).to_string();
     }
@@ -211,16 +224,14 @@ fn respond(input: &str) -> Value {
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
     respond_with(
         input,
-        read_policy_text(),
+        read_policy_text(None),
         Arc::new(StoreLookups),
         legion_repo,
     )
 }
 
 /// The adapter over injected sources, so a test drives every branch without
-/// touching the environment or the store. Reads and parses the policy first
-/// (a local file, outside the deadline), then runs repo derivation, the
-/// lookups, and route on a worker thread under `route.deadline_ms`.
+/// touching the environment or the store.
 fn respond_with(
     input: &str,
     policy_text: Result<String, AdapterError>,
@@ -231,37 +242,61 @@ fn respond_with(
         Ok(payload) => payload,
         Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None),
     };
-    let policy_text: String = match policy_text {
-        Ok(text) => text,
-        Err(e) => return deny_for_error(&e, Some(&payload)),
-    };
-    let settings: RouteSettings = match RouteSettings::from_policy_text(&policy_text) {
-        Ok(settings) => settings,
-        Err(e) => {
-            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload));
-        }
-    };
-    let policy: Policy = match parse_policy(&policy_text) {
-        Ok(policy) => policy,
-        Err(e) => {
-            return deny_for_error(&AdapterError::PolicyRead(e.to_string()), Some(&payload));
-        }
-    };
-
     let call = ToolCall {
         tool: payload.tool_name.clone(),
         input: payload.tool_input.clone(),
     };
-    let cwd: Option<String> = payload.cwd.clone();
-    let outcome: Result<Routed, AdapterError> = decide(settings.deadline, move || {
-        let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
-        let ctx: Context = fetch_context(&policy, &call, repo, lookups.as_ref())?;
-        Ok(route(&policy, &call, &ctx))
-    });
-    match outcome {
+    match route_call(policy_text, call, lookups, legion_repo, payload.cwd.clone()) {
         Ok(routed) => apply(&routed, &payload),
         Err(e) => deny_for_error(&e, Some(&payload)),
     }
+}
+
+/// The decision core both modes run (FR-CMD-017). Parses the policy and its
+/// settings first (the text is a local file, read outside the deadline), then
+/// runs repo derivation, the lookup pre-pass, and route on a worker thread
+/// under `route.deadline_ms`. Every failure is an [`AdapterError`], which
+/// each mode turns into a deny (FR-CMD-009, FR-CMD-016).
+pub(crate) fn route_call(
+    policy_text: Result<String, AdapterError>,
+    call: ToolCall,
+    lookups: Arc<dyn LookupRunner>,
+    legion_repo: Option<String>,
+    cwd: Option<String>,
+) -> Result<Routed, AdapterError> {
+    let policy_text: String = policy_text?;
+    let settings: RouteSettings = RouteSettings::from_policy_text(&policy_text)
+        .map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+    let policy: Policy =
+        parse_policy(&policy_text).map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+    decide(settings.deadline, move || {
+        let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
+        let ctx: Context = fetch_context(&policy, &call, repo, lookups.as_ref())?;
+        Ok(route(&policy, &call, &ctx))
+    })
+}
+
+/// The replacement `tool_input` for a rewrite, built from route's facts
+/// (FR-CMD-003); `None` for every other arm. A replacement that cannot be
+/// built is a [`AdapterError::Replacement`], a deny in both modes.
+pub(crate) fn replacement_for(
+    routed: &Routed,
+    original: &Value,
+) -> Result<Option<Value>, AdapterError> {
+    match &routed.decision {
+        Decision::Rewrite { target, .. } => {
+            rewritten_input(target, &routed.facts, original).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn rewritten_input(
+    target: &ManagedTarget,
+    facts: &Facts,
+    original: &Value,
+) -> Result<Value, AdapterError> {
+    build_replacement(target, facts, original).map_err(|e| AdapterError::Replacement(e.to_string()))
 }
 
 /// Runs `work` on a worker thread and waits at most `deadline` for its
@@ -338,7 +373,7 @@ fn fetch_context(
 
 /// Performs the recall and consult lookups a rule requires. A seam so tests
 /// drive the adapter without the store.
-trait LookupRunner: Send + Sync {
+pub(crate) trait LookupRunner: Send + Sync {
     fn recall(&self, repo: &str, query: &str) -> error::Result<Lookup>;
     fn consult(&self, query: &str) -> error::Result<Lookup>;
 }
@@ -346,7 +381,7 @@ trait LookupRunner: Send + Sync {
 /// The production runner: BM25 over the local store. BM25 only, no embedding
 /// model -- loading the model per hook invocation would spend the decision
 /// deadline on setup, which is the failure the deadline exists to catch.
-struct StoreLookups;
+pub(crate) struct StoreLookups;
 
 impl LookupRunner for StoreLookups {
     fn recall(&self, repo: &str, query: &str) -> error::Result<Lookup> {
@@ -379,12 +414,16 @@ fn lookup_from(result: RecallResult) -> Lookup {
     }
 }
 
-/// Reads the policy file: `LEGION_CMD_POLICY`, else
-/// `${CLAUDE_PLUGIN_ROOT}/legion-cmd/policy.json`. Neither set is a
+/// Reads the policy file: `explicit` when given (the operator mode's
+/// `--policy`), else `LEGION_CMD_POLICY`, else
+/// `${CLAUDE_PLUGIN_ROOT}/legion-cmd/policy.json`. None of them is a
 /// `PolicyRead` failure, which denies: no policy is not an empty policy, but
 /// it is refused the same way (FR-CMD-016).
-fn read_policy_text() -> Result<String, AdapterError> {
-    let path: PathBuf = policy_path()?;
+pub(crate) fn read_policy_text(explicit: Option<&Path>) -> Result<String, AdapterError> {
+    let path: PathBuf = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => policy_path()?,
+    };
     std::fs::read_to_string(&path)
         .map_err(|e| AdapterError::PolicyRead(format!("{}: {e}", path.display())))
 }
@@ -448,9 +487,9 @@ fn apply(routed: &Routed, payload: &HookPayload) -> Value {
         },
         Decision::Proxy { .. } => pass_through(None),
         Decision::Rewrite { target, reason } => {
-            match build_replacement(target, &routed.facts, &payload.tool_input) {
+            match rewritten_input(target, &routed.facts, &payload.tool_input) {
                 Ok(updated) => rewrite_response(payload.rewritten_value(), target, reason, updated),
-                Err(e) => deny_for_error(&AdapterError::Replacement(e.to_string()), Some(payload)),
+                Err(e) => deny_for_error(&e, Some(payload)),
             }
         }
         Decision::Deny(details) => deny_response(&format!(
@@ -524,10 +563,18 @@ fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload
 /// the failure, and the command to run instead is `legion cmd-check` over the
 /// same command, so the agent and the operator can see what route decides.
 fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
-    deny_response(&format!(
-        "legion-cmd could not decide this command ({err}) -- instead: legion cmd-check -- {}",
-        quoted_command(payload.and_then(HookPayload::command))
-    ))
+    let (reason, instead) = error_deny_text(err, payload.and_then(HookPayload::command));
+    deny_response(&format!("{reason} -- instead: {instead}"))
+}
+
+/// The reason and the command to run instead for a deny over an adapter
+/// failure, shared by both modes so the operator mode reports the deny the
+/// hook would send.
+pub(crate) fn error_deny_text(err: &AdapterError, command: Option<&str>) -> (String, String) {
+    (
+        format!("legion-cmd could not decide this command ({err})"),
+        format!("legion cmd-check -- {}", quoted_command(command)),
+    )
 }
 
 fn deny_response(reason: &str) -> Value {

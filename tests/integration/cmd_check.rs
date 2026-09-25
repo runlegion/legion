@@ -147,14 +147,119 @@ fn an_ask_without_a_confirmation_is_refused_with_the_question() {
     );
 }
 
-#[test]
-fn cmd_check_without_hook_is_refused_not_silent() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let out = run_with_stdin(legion_cmd(dir.path()).args(["cmd-check"]), b"");
-    assert!(!out.status.success());
+// -- the operator and scripting mode (#1230) ---------------------------------
+
+/// Runs `legion cmd-check <args>` with the shipped policy passed by
+/// `--policy`, requiring exit 0; returns stdout.
+fn operator_output(data_dir: &std::path::Path, args: &[&str]) -> String {
+    let policy = shipped_policy_path();
+    let out = legion_cmd(data_dir)
+        .args(["cmd-check", "--policy"])
+        .arg(&policy)
+        .args(args)
+        .env_remove("LEGION_CMD_POLICY")
+        .env_remove("CLAUDE_PLUGIN_ROOT")
+        .output()
+        .expect("legion runs");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("not implemented"),
-        "stderr: {}",
+        out.status.success(),
+        "a decision exits 0\nstderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn cmd_check_reports_a_deny_with_its_reason_facts_and_elapsed_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text = operator_output(dir.path(), &["--", "rm", "-rf", "build"]);
+    assert!(text.contains("decision: deny"), "{text}");
+    assert!(text.contains("unrecoverable"), "{text}");
+    assert!(text.contains("instead:"), "{text}");
+    assert!(text.contains("facts:"), "{text}");
+    assert!(text.contains("elapsed:"), "{text}");
+}
+
+#[test]
+fn cmd_check_json_reports_a_rewrite_with_its_built_replacement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stdout = operator_output(
+        dir.path(),
+        &[
+            "--json",
+            "--tool",
+            "Agent",
+            "--input",
+            r#"{"subagent_type": "Explore", "prompt": "map the router"}"#,
+        ],
+    );
+    let report: Value = serde_json::from_str(&stdout).expect("one JSON report");
+    assert_eq!(report["decision"]["kind"], "rewrite");
+    assert_eq!(report["decision"]["target"], "legion:legion-explore");
+    assert_eq!(
+        report["replacement"],
+        serde_json::json!({"subagent_type": "legion:legion-explore", "prompt": "map the router"})
+    );
+    assert!(report["facts"].is_object());
+    assert!(report["elapsed"].is_object());
+}
+
+#[test]
+fn cmd_check_never_runs_the_command_it_checks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    let command = format!("touch {}", marker.display());
+    let text = operator_output(dir.path(), &["--", &command]);
+    assert!(text.contains("decision: allow"), "{text}");
+    assert!(!marker.exists(), "cmd-check ran the command it checked");
+}
+
+#[test]
+fn cmd_check_reports_an_unreadable_policy_as_a_deny_and_exits_0() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("no-such-policy.json");
+    let out = legion_cmd(dir.path())
+        .args(["cmd-check", "--json", "--policy"])
+        .arg(&missing)
+        .args(["--", "echo", "hi"])
+        .output()
+        .expect("legion runs");
+    assert!(out.status.success(), "a deny is a decision, not a failure");
+    let report: Value = serde_json::from_slice(&out.stdout).expect("JSON report");
+    assert_eq!(report["decision"]["kind"], "deny");
+    let reason = report["decision"]["reason"].as_str().expect("reason");
+    assert!(reason.contains("policy:"), "got: {reason}");
+    assert!(reason.contains("no-such-policy.json"), "got: {reason}");
+}
+
+#[test]
+fn cmd_check_usage_errors_exit_non_zero_with_a_legion_prefix() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for args in [
+        vec!["cmd-check", "--tool", "Bsh", "--", "ls"],
+        vec!["cmd-check", "--tool", "Edit", "--input", "{ not json"],
+        vec!["cmd-check"],
+    ] {
+        let out = legion_cmd(dir.path()).args(&args).output().expect("runs");
+        assert!(!out.status.success(), "{args:?} must fail");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with("[legion]"), "{args:?} stderr: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?} printed a report");
+    }
+}
+
+#[test]
+fn cmd_check_help_describes_both_modes_and_that_the_command_is_not_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = legion_cmd(dir.path())
+        .args(["cmd-check", "--help"])
+        .output()
+        .expect("runs");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("without running the command"), "{help}");
+    assert!(help.contains("Operator and scripting mode"), "{help}");
+    assert!(help.contains("Hook mode"), "{help}");
+    assert!(help.contains("--input"), "{help}");
+    assert!(help.contains("--policy"), "{help}");
 }
