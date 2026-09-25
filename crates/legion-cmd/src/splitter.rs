@@ -339,7 +339,8 @@ fn is_plain_item(item: &CommandPrefixOrSuffixItem, depth: u8) -> bool {
 /// and a bare parameter reference (`$X`, `${X}`, `$1`, `$@`). A command
 /// substitution (`$(...)` or backquotes), an arithmetic expansion, and every
 /// parameter expansion that carries embedded shell text (a default value, a
-/// pattern, an array subscript) are not, since each can run a command.
+/// pattern, an array subscript) or is indirect (`${!x}`) are not, since each
+/// can run a command.
 fn is_plain_word(word: &ast::Word, depth: u8) -> bool {
     parse_word_pieces(&word.value, depth)
         .is_ok_and(|pieces| pieces.iter().all(|piece| is_plain_piece(&piece.piece)))
@@ -356,9 +357,13 @@ fn is_plain_piece(piece: &WordPiece) -> bool {
         | WordPiece::GettextDoubleQuotedSequence(pieces) => {
             pieces.iter().all(|p| is_plain_piece(&p.piece))
         }
-        WordPiece::ParameterExpansion(word::ParameterExpr::Parameter { parameter, .. }) => {
-            !matches!(parameter, word::Parameter::NamedWithIndex { .. })
-        }
+        // An indirect reference (`${!x}`) dereferences the runtime value as
+        // parameter syntax, whose subscript can run a command substitution, so
+        // it is never plain -- the same as a literal subscript.
+        WordPiece::ParameterExpansion(word::ParameterExpr::Parameter {
+            parameter,
+            indirect,
+        }) => !indirect && !matches!(parameter, word::Parameter::NamedWithIndex { .. }),
         WordPiece::ParameterExpansion(_)
         | WordPiece::CommandSubstitution(_)
         | WordPiece::BackquotedCommandSubstitution(_)
@@ -2083,6 +2088,7 @@ mod tests {
             "git push origin main",
             "FOO=1 git push",
             "git push origin \"$BRANCH\"",
+            "git push origin ${x}",
             "git push > out.txt",
         ] {
             assert!(scan(text).expect("parses").single_simple, "`{text}`");
@@ -2105,6 +2111,8 @@ mod tests {
             "git push `echo main`",
             "git push \"$(echo main)\"",
             "git push ${X:-$(echo main)}",
+            "echo ${!x}",
+            "${!x} foo",
             "git push $((1 + 2))",
             "FOO=$(> out.txt) git push",
             "git push > \"$(> out.txt)\"",
