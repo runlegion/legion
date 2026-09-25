@@ -424,6 +424,9 @@ pub fn refuse_rewrite_dropping_shell_words(
         (false, true) => "its environment-assignment prefix",
         (false, false) => return part,
     };
+    // Every rewrite comes from `resolve_rule`, which always names its rule,
+    // so the fallback arm cannot fire today; it keeps the deny readable if a
+    // rewrite is ever produced without one.
     let rule = match &part.deciding {
         Deciding::Rule { id, .. } => format!("rule '{id}'"),
         _ => "a rewrite rule".to_string(),

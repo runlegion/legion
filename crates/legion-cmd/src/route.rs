@@ -635,6 +635,12 @@ mod tests {
             ("sh -c 'gh pr list' > out.txt", "redirect"),
             ("(gh pr list) > out.txt", "redirect"),
             ("{ gh pr list; } 2>/dev/null", "redirect"),
+            ("gh pr list <<EOF\nx\nEOF", "redirect"),
+            ("gh pr list 3>&1", "redirect"),
+            ("FOO=1 sh -c 'gh pr list'", "environment-assignment prefix"),
+            ("( { gh pr list; } ) > out.txt", "redirect"),
+            ("{ gh pr list | head; } > out.txt", "redirect"),
+            ("f() { gh pr list; } > out.txt", "redirect"),
         ] {
             let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
             match &routed.decision {

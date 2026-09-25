@@ -616,11 +616,7 @@ fn walk_command(
             let first_inner = scan.invocations.len();
             walk_compound_command_tagged(text, compound, depth, tag, seq_position, scan);
             if let Some(redirects) = redirects {
-                // A redirect on a subshell or group applies to every command
-                // inside it, so each is marked redirected.
-                for invocation in &mut scan.invocations[first_inner..] {
-                    invocation.redirected = true;
-                }
+                mark_redirected(&mut scan.invocations[first_inner..]);
                 walk_redirect_list(text, redirects, depth, scan);
             }
         }
@@ -1150,6 +1146,7 @@ fn walk_process_substitution(text: &str, subshell: &SubshellCommand, depth: u8, 
 }
 
 fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mut Scan) {
+    let first_inner = scan.invocations.len();
     walk_compound_command_tagged(
         text,
         &body.0,
@@ -1159,7 +1156,18 @@ fn walk_function_body(text: &str, body: &ast::FunctionBody, depth: u8, scan: &mu
         scan,
     );
     if let Some(redirects) = &body.1 {
+        // `f() { cmd; } > out.txt` redirects every call of `f`, so each
+        // command in the body is marked the same as in a redirected group.
+        mark_redirected(&mut scan.invocations[first_inner..]);
         walk_redirect_list(text, redirects, depth, scan);
+    }
+}
+
+/// Marks every invocation walked inside a compound command or function body
+/// that carries a redirect: the redirect applies to each command inside it.
+fn mark_redirected(inner: &mut [Invocation]) {
+    for invocation in inner {
+        invocation.redirected = true;
     }
 }
 
@@ -1378,10 +1386,21 @@ mod tests {
             assert!(scan.invocations[0].redirected, "`{command}`");
             assert_eq!(scan.invocations[0].args, vec!["pr", "list"], "`{command}`");
         }
-        for command in ["(gh pr list) > out.txt", "{ gh pr list; } 2>/dev/null"] {
+        for command in [
+            "gh pr list <<EOF\nx\nEOF",
+            "gh pr list 3>&1",
+            "(gh pr list) > out.txt",
+            "{ gh pr list; } 2>/dev/null",
+            "( { gh pr list; } ) > out.txt",
+            "f() { gh pr list; } > out.txt",
+        ] {
             let scan = scan(command).expect("parses");
             assert!(scan.invocations[0].redirected, "`{command}`");
         }
+        // A redirect on a group wrapping a pipeline applies to every stage.
+        let grouped = scan("{ gh pr list | head; } > out.txt").expect("parses");
+        assert_eq!(grouped.invocations.len(), 2);
+        assert!(grouped.invocations.iter().all(|i| i.redirected));
         let scan = scan("gh pr list | tee out.txt > /dev/null").expect("parses");
         assert!(
             !scan.invocations[0].redirected,
