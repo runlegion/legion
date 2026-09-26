@@ -548,6 +548,25 @@ impl Policy {
         self.sym_jobs.iter().find(|j| j.id == id)
     }
 
+    /// The resolver the no-go check expands a command with (FR-CMD-025): the
+    /// built-in wrappers and shell interpreters first, then this policy's own,
+    /// so a wrapped no-go command is resolved whether or not the policy file
+    /// declares its wrapper, and a policy declaration of the same binary can
+    /// never narrow the built-in one. It carries no rules: only the no-go
+    /// check expands with it.
+    pub(crate) fn no_go_resolver(&self) -> Policy {
+        let mut wrappers = nogo::builtin_no_go_wrappers();
+        wrappers.extend(self.wrappers.iter().cloned());
+        let mut interpreters = nogo::builtin_no_go_interpreters();
+        interpreters.extend(self.interpreters.iter().cloned());
+        Policy {
+            wrappers,
+            interpreters,
+            script_carriers: self.script_carriers.clone(),
+            ..Policy::default()
+        }
+    }
+
     /// Every no-go entry route checks (FR-CMD-025): the built-in entries
     /// first, then the entries this policy adds. The built-ins are not
     /// policy data, so no policy file can remove one; listing them first

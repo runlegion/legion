@@ -17,6 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::{BodyLanguage, Interpreter, Wrapper};
 use crate::splitter::{self, Invocation, Position, ScanError};
 
 /// One no-go entry (FR-CMD-025). It matches on parsed arguments from the
@@ -201,6 +202,93 @@ const DISK_DEVICES: [&str; 8] = [
     "/dev/disk",
     "/dev/rdisk",
 ];
+
+/// The wrappers the built-in no-go check resolves on its own (FR-CMD-025):
+/// the entries hold when the policy file is absent or empty, wrapper variants
+/// included, so `sudo` and `env` cannot depend on the file declaring them.
+/// Each declaration matches the shipped policy's own. Only the no-go check
+/// uses these; every other routing decision reads the policy's wrappers
+/// alone (FR-CMD-007, FR-CMD-011).
+pub(crate) fn builtin_no_go_wrappers() -> Vec<Wrapper> {
+    vec![
+        Wrapper {
+            binary: "env".to_string(),
+            flags: strings(&[
+                "-",
+                "-i",
+                "--ignore-environment",
+                "-0",
+                "--null",
+                "-v",
+                "--debug",
+            ]),
+            value_options: strings(&["-u", "--unset", "-C", "--chdir", "-P"]),
+            ..Wrapper::default()
+        },
+        Wrapper {
+            binary: "sudo".to_string(),
+            flags: strings(&[
+                "-A",
+                "--askpass",
+                "-b",
+                "--background",
+                "-B",
+                "--bell",
+                "-E",
+                "--preserve-env",
+                "-H",
+                "--set-home",
+                "-k",
+                "--reset-timestamp",
+                "-n",
+                "--non-interactive",
+                "-N",
+                "--no-update",
+                "-P",
+                "--preserve-groups",
+                "-S",
+                "--stdin",
+            ]),
+            value_options: strings(&[
+                "-u",
+                "--user",
+                "-g",
+                "--group",
+                "-C",
+                "--close-from",
+                "-D",
+                "--chdir",
+                "-p",
+                "--prompt",
+                "-R",
+                "--chroot",
+                "-r",
+                "--role",
+                "-t",
+                "--type",
+                "-T",
+                "--command-timeout",
+                "-U",
+                "--other-user",
+            ]),
+            ..Wrapper::default()
+        },
+    ]
+}
+
+/// The shell interpreters whose `-c` body the built-in no-go check re-enters
+/// on its own (FR-CMD-025), for the same reason as
+/// [`builtin_no_go_wrappers`].
+pub(crate) fn builtin_no_go_interpreters() -> Vec<Interpreter> {
+    ["sh", "bash"]
+        .into_iter()
+        .map(|binary| Interpreter {
+            binary: binary.to_string(),
+            flag: "-c".to_string(),
+            body: BodyLanguage::Shell,
+        })
+        .collect()
+}
 
 /// The built-in entries, embedded in the binary (FR-CMD-025). Present when
 /// the policy file is absent or empty.
@@ -506,6 +594,30 @@ mod tests {
 
     fn invocations(command: &str) -> Vec<Invocation> {
         splitter::scan(command).expect("parses").invocations
+    }
+
+    #[test]
+    fn the_builtin_no_go_resolvers_match_the_shipped_policy_declarations() {
+        // The built-in declarations are a copy the no-go check holds without
+        // the policy file; the shipped file must not drift from them.
+        let shipped = crate::parse_policy(include_str!("../../../plugin/legion-cmd/policy.json"))
+            .expect("the shipped policy parses");
+        for builtin in builtin_no_go_wrappers() {
+            let declared = shipped
+                .wrappers
+                .iter()
+                .find(|w| w.binary == builtin.binary && w.required_subcommand.is_none())
+                .unwrap_or_else(|| panic!("shipped policy declares {}", builtin.binary));
+            assert_eq!(declared, &builtin, "{}", builtin.binary);
+        }
+        for builtin in builtin_no_go_interpreters() {
+            assert_eq!(
+                shipped.matching_interpreter(&builtin.binary),
+                Some(&builtin),
+                "{}",
+                builtin.binary
+            );
+        }
     }
 
     fn matched(command: &str) -> Option<String> {

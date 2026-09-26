@@ -12,6 +12,8 @@
 //! check, and a requoted `~` or `$VAR` would store a key the hook never
 //! computes. So more than one word is a usage error, never rebuilt.
 
+use std::path::PathBuf;
+
 use chrono::Utc;
 use clap::Subcommand;
 use legion_cmd::{Policy, parse_policy};
@@ -75,7 +77,7 @@ fn run_confirm(reason: Option<String>, command: &str) -> Result<(), ConfirmError
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or(ConfirmError::NoSession(SESSION_ENV))?;
-    let policy: Policy = read_policy()?;
+    let policy: Policy = read_policy(configured_policy_path())?;
     let cwd: String = std::env::current_dir()
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
@@ -103,11 +105,14 @@ fn run_confirm(reason: Option<String>, command: &str) -> Result<(), ConfirmError
 }
 
 /// The policy whose no-go entries a confirmation is checked against. With no
-/// policy file configured in this environment, the built-in entries alone
-/// apply (they hold with an empty policy); a configured file that cannot be
-/// read or parsed refuses the confirmation rather than checking less.
-fn read_policy() -> Result<Policy, ConfirmError> {
-    let Some(path) = configured_policy_path() else {
+/// policy file configured in this environment -- the normal state in an
+/// agent's own Bash -- the built-in entries alone apply: they hold with an
+/// empty policy, wrapper variants included, because route resolves the
+/// wrappers the built-in check needs itself (FR-CMD-025). A configured file
+/// that cannot be read or parsed refuses the confirmation rather than
+/// checking less.
+fn read_policy(configured: Option<PathBuf>) -> Result<Policy, ConfirmError> {
+    let Some(path) = configured else {
         return Ok(Policy::default());
     };
     let text = std::fs::read_to_string(&path)
@@ -228,6 +233,40 @@ mod tests {
         }
         assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
         assert!(log.records().expect("read").is_empty());
+    }
+
+    #[test]
+    fn a_wrapped_no_go_command_is_refused_with_no_policy_configured() {
+        // The normal agent Bash: neither LEGION_CMD_POLICY nor
+        // CLAUDE_PLUGIN_ROOT is set, so no policy file is read. The built-in
+        // no-go check still sees through the wrapper (FR-CMD-025, FR-CMD-026).
+        let db = test_db();
+        let (log, _dir) = log();
+        let now = Utc::now();
+        // `configured_policy_path()` is None exactly when both are unset.
+        let policy: Policy = read_policy(None).expect("no policy configured is not an error");
+        for typed in [
+            "env FOO=bar mkfs.ext4 /dev/sda1",
+            "sudo mkfs.ext4 /dev/sda1",
+        ] {
+            let argv: Vec<String> = words(&[typed]);
+            let command: &str = command_arg(&argv).expect("one argument");
+            let err = confirm(&request(command), &policy, &db, &log, now)
+                .expect_err("a no-go command is never confirmed");
+            match err {
+                ConfirmError::NoGo { entry } => assert_eq!(entry, "mkfs-device", "{typed}"),
+                other => panic!("`{typed}` expected NoGo, got {other:?}"),
+            }
+        }
+        assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
+        assert!(log.records().expect("read").is_empty());
+    }
+
+    #[test]
+    fn a_configured_policy_that_cannot_be_read_refuses_the_confirmation() {
+        let err = read_policy(Some(PathBuf::from("/nowhere/legion-cmd/policy.json")))
+            .expect_err("fails closed");
+        assert!(matches!(err, ConfirmError::Policy(_)), "{err:?}");
     }
 
     #[test]

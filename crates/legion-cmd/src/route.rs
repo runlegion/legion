@@ -53,10 +53,7 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     // and before the empty-policy deny, so the built-in entries hold when the
     // policy file is empty. Nothing below can override a match: no
     // confirmation, operator prompt, or other entry is consulted.
-    if let Ok(expanded) = &expanded
-        && let Some(hit) = evaluate::decide_no_go(policy, &expanded.invocations)
-    {
-        let mut facts = extract_facts(&expanded.invocations, None);
+    if let Some((hit, mut facts)) = no_go_hit(policy, command, expanded.as_ref().ok()) {
         facts.command_key = command_key;
         return Routed {
             decision: hit.decision,
@@ -130,6 +127,28 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         deciding: winner.deciding,
         confirmed,
     }
+}
+
+/// The no-go entry `command` hits, with the facts of the expansion it hit in.
+/// Checked twice: over `expanded`, the policy's own expansion, and over the
+/// expansion by [`Policy::no_go_resolver`], which resolves the built-in
+/// wrappers and shell interpreters whether or not the policy file declares
+/// them (FR-CMD-025). Either hit refuses, so a policy file can add wrapper
+/// resolution but never take the built-in resolution away. Pure: two scans
+/// of the same string, no I/O (NFR-CMD-001).
+fn no_go_hit(
+    policy: &Policy,
+    command: &str,
+    expanded: Option<&Expanded>,
+) -> Option<(PartOutcome, Facts)> {
+    let hit_in = |expanded: &Expanded| {
+        evaluate::decide_no_go(policy, &expanded.invocations)
+            .map(|hit| (hit, extract_facts(&expanded.invocations, None)))
+    };
+    expanded.and_then(hit_in).or_else(|| {
+        let resolved: Expanded = expand_command(&policy.no_go_resolver(), command).ok()?;
+        hit_in(&resolved)
+    })
 }
 
 /// True when `part` is an ask a policy entry produced -- the only ask a
@@ -1319,23 +1338,75 @@ mod tests {
     }
 
     #[test]
+    fn wrapper_variants_are_refused_with_no_wrappers_in_the_policy() {
+        // FR-CMD-025: the built-in entries hold when the policy file is absent
+        // or empty, and wrapper variants hit the same entry. So the no-go
+        // check resolves sudo, env, and sh/bash -c itself, without the policy
+        // file's wrapper declarations.
+        let mut missed: Vec<String> = Vec::new();
+        for (name, p) in [("default", Policy::default()), ("{}", policy("{}"))] {
+            for command in [
+                "sudo rm -rf /",
+                "env rm -rf /",
+                "sh -c 'rm -rf /'",
+                "bash -c 'rm -rf /'",
+                "echo hi | sudo rm -rf /",
+                "true && env rm -rf /",
+                "sudo -u root rm -rf /",
+                "env FOO=bar mkfs.ext4 /dev/sda1",
+                "sudo mkfs.ext4 /dev/sda1",
+                "sudo env FOO=1 sh -c 'dd if=/dev/zero of=/dev/sda'",
+            ] {
+                let routed = route(&p, &bash(command), &Context::default());
+                if !matches!(routed.deciding, Deciding::NoGo { .. }) {
+                    missed.push(format!("{name}: {command}"));
+                    continue;
+                }
+                assert_no_go(&routed, command);
+            }
+        }
+        assert!(missed.is_empty(), "not refused as no-go: {missed:#?}");
+    }
+
+    #[test]
+    fn builtin_wrapper_resolution_does_not_change_other_routing_under_an_empty_policy() {
+        // Only the no-go match gains the built-in wrappers: every other
+        // command under an empty policy still takes the empty-policy deny.
+        for command in ["sudo echo hi", "env FOO=1 ls", "sh -c 'echo hi'"] {
+            let routed = route(&Policy::default(), &bash(command), &Context::default());
+            assert!(
+                !matches!(routed.deciding, Deciding::NoGo { .. }),
+                "{command}"
+            );
+            match routed.decision {
+                Decision::Deny(details) => {
+                    assert_ne!(details.instead(), crate::NO_GO_INSTEAD, "{command}")
+                }
+                other => panic!("`{command}` expected the empty-policy deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn an_entry_added_in_the_policy_file_is_refused_like_a_builtin_entry() {
         let p = policy(
             r#"{"no_go": [{"id": "shred-disk", "binaries": ["shred"],
                 "predicates": [{"kind": "operand", "prefixes": ["/dev/"]}]}]}"#,
         );
-        let routed = route(&p, &bash("sudo shred /dev/sda"), &Context::default());
-        // `sudo` is not a wrapper in this policy, so only the direct form is
-        // checked here; the built-in wrapper variants are covered above.
-        assert!(!matches!(routed.deciding, Deciding::NoGo { .. }));
-        let routed = route(&p, &bash("shred /dev/sda"), &Context::default());
-        assert_no_go(&routed, "shred /dev/sda");
-        assert_eq!(
-            routed.deciding,
-            Deciding::NoGo {
-                id: "shred-disk".to_string()
-            }
-        );
+        // `sudo` is not a wrapper in this policy, but the no-go check resolves
+        // it itself (FR-CMD-025), so an added entry's wrapper variant is
+        // refused like a built-in one's.
+        for command in ["shred /dev/sda", "sudo shred /dev/sda"] {
+            let routed = route(&p, &bash(command), &Context::default());
+            assert_no_go(&routed, command);
+            assert_eq!(
+                routed.deciding,
+                Deciding::NoGo {
+                    id: "shred-disk".to_string()
+                },
+                "{command}"
+            );
+        }
     }
 
     #[test]
