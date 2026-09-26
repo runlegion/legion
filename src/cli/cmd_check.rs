@@ -1,7 +1,8 @@
 //! `legion cmd-check`: the CLI surface over the legion-cmd router.
 //!
 //! Two modes. `--hook` (#1229) reads one PreToolUse payload on stdin and
-//! writes one hook response. The operator and scripting mode (#1230) shows
+//! writes one hook response; `--deny-patterns` (#1237) beside it prints the
+//! no-go permissions mirror. The operator and scripting mode (#1230) shows
 //! what route decides for one tool call, and why, without running it:
 //!
 //! ```text
@@ -83,7 +84,9 @@ fn check_with(
     let started = Instant::now();
     let original: Value = call.input.clone();
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let (routed, policy) = route_call(policy_text, call, lookups, legion_repo, cwd)?;
+        // No session work: a dry run never records, notifies, or uses up a
+        // confirmation (#1237).
+        let (routed, policy) = route_call(policy_text, call, lookups, legion_repo, cwd, None)?;
         let replacement = replacement_for(&routed, &policy, &original)?;
         Ok((routed, replacement))
     }))
@@ -150,6 +153,24 @@ pub(crate) fn handle_cmd_check(
         print!("{}", render_text(&report));
     }
     Ok(())
+}
+
+/// `legion cmd-check --deny-patterns` (#1237): prints the no-go
+/// permissions mirror and exits 0. Clap refuses it beside any other option.
+pub(crate) fn handle_deny_patterns() -> error::Result<()> {
+    println!("{}", deny_patterns_json()?);
+    Ok(())
+}
+
+/// The permissions.deny patterns mirroring every built-in no-go entry
+/// (FR-CMD-025), as one JSON array in entry order, for plugin setup
+/// (`plugin/hooks/lib/deny-mirror.sh`) to merge into the harness settings.
+fn deny_patterns_json() -> error::Result<String> {
+    let patterns: Vec<&str> = legion_cmd::BUILTIN_DENY_PATTERNS
+        .iter()
+        .flat_map(|(_, patterns)| patterns.iter().copied())
+        .collect();
+    Ok(serde_json::to_string(&patterns)?)
 }
 
 /// Builds the tool call from the flags: the one positional argument, used
@@ -715,6 +736,24 @@ mod tests {
         )
         .expect_err("invalid JSON");
         assert!(err.contains("--input is not valid JSON"), "{err}");
+    }
+
+    #[test]
+    fn the_deny_patterns_are_one_json_array_covering_every_builtin_entry() {
+        let text = deny_patterns_json().expect("serializes");
+        let patterns: Vec<String> = serde_json::from_str(&text).expect("a JSON string array");
+        for (id, entry_patterns) in legion_cmd::BUILTIN_DENY_PATTERNS {
+            assert!(
+                entry_patterns
+                    .iter()
+                    .all(|p| patterns.contains(&p.to_string())),
+                "{id} missing"
+            );
+        }
+        assert_eq!(
+            legion_cmd::BUILTIN_DENY_PATTERNS.len(),
+            legion_cmd::builtin_no_go().len()
+        );
     }
 
     #[test]

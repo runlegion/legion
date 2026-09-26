@@ -1,5 +1,6 @@
 {
   "route": { "deadline_ms": 7000 },
+  "no_go": [],
   "sym_jobs": [
     {
       "id": "find-content",
@@ -81,6 +82,12 @@
       "value_options": ["-p", "--package"]
     },
     {
+      "binary": "bun",
+      "required_subcommand": "x",
+      "flags": ["--bun", "--silent", "--verbose", "--no-install"],
+      "value_options": ["-p", "--package"]
+    },
+    {
       "binary": "pnpm",
       "required_subcommand": "exec",
       "flags": ["-r", "--recursive", "--parallel", "--report-summary", "-w", "--workspace-root"],
@@ -99,16 +106,24 @@
       "value_options": ["-p", "--package", "-w", "--workspace", "--prefix"]
     },
     {
+      "binary": "npm",
+      "required_subcommand": "x",
+      "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
+      "value_options": ["-p", "--package", "-w", "--workspace", "--prefix"]
+    },
+    {
       "binary": "yarn",
       "required_subcommand": "exec",
       "flags": ["--silent", "--verbose"],
-      "value_options": ["--cwd"]
+      "value_options": ["--cwd"],
+      "selectors": ["workspace", "workspaces"]
     },
     {
       "binary": "yarn",
       "required_subcommand": "dlx",
       "flags": ["-q", "--quiet"],
-      "value_options": ["-p", "--package"]
+      "value_options": ["-p", "--package"],
+      "selectors": ["workspace", "workspaces"]
     }
   ],
   "interpreters": [

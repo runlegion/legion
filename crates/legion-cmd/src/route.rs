@@ -12,25 +12,24 @@ use serde_json::Value;
 use crate::Context;
 use crate::decision::{Deciding, Decision, Facts, Routed, ToolCall};
 use crate::evaluate::{self, PartOutcome};
+use crate::nogo;
 use crate::policy::{BodyLanguage, Policy, ToolKind};
 use crate::splitter::{self, Invocation, ScanError, Unreduced, UnreducedReason};
 
 /// The one routing entry point. Pure (NFR-CMD-001): no filesystem, network, or
 /// database, and its output depends only on `policy`, `call` and `ctx`.
 pub fn route(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
-    // FR-CMD-025's no-go list is checked here, before any rule -- an ordered
-    // first step #1237 fills in. It is intentionally empty in this issue.
-
-    // An empty or unparsable policy denies every command (FR-CMD-016). An
-    // unparsable policy never becomes a `Policy`, so the adapter denies before
-    // calling route; an empty one is caught here.
-    if policy.is_empty() {
-        return empty_policy_deny();
-    }
-
     match call.tool.as_str() {
         "Bash" => route_bash(policy, call, ctx),
-        other => route_fields(policy, other, call, ctx),
+        other => {
+            // An empty or unparsable policy denies every command (FR-CMD-016).
+            // An unparsable policy never becomes a `Policy`, so the adapter
+            // denies before calling route; an empty one is caught here.
+            if policy.is_empty() {
+                return empty_policy_deny();
+            }
+            route_fields(policy, other, call, ctx)
+        }
     }
 }
 
@@ -45,12 +44,48 @@ pub(crate) fn bash_command(call: &ToolCall) -> &str {
 }
 
 fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
+    // Without the built-in resolver the no-go check could not see through a
+    // wrapper, so every Bash command is refused rather than checked less
+    // (FR-CMD-025). A test rules this out for every build.
+    if nogo::builtin_no_go_resolver().is_none() {
+        return Routed {
+            decision: deny(
+                "the built-in no-go resolver did not load from the embedded policy",
+                "rebuild legion from a tree whose plugin/legion-cmd/policy.json parses",
+            ),
+            facts: Facts::default(),
+            deciding: Deciding::Default,
+            confirmed: false,
+        };
+    }
     let command: &str = bash_command(call);
+    let expanded = expand_command(policy, command);
+    // The command's key, once: a no-go hit and a confirmation both carry it.
+    let command_key = nogo::command_key(command).ok();
+
+    // The no-go list is checked before any other policy entry (FR-CMD-025),
+    // and before the empty-policy deny, so the built-in entries hold when the
+    // policy file is empty. Nothing below can override a match: no
+    // confirmation, operator prompt, or other entry is consulted.
+    if let Some((hit, mut facts)) = no_go_hit(policy, command, expanded.as_ref().ok()) {
+        facts.command_key = command_key;
+        return Routed {
+            decision: hit.decision,
+            facts,
+            deciding: hit.deciding,
+            confirmed: false,
+        };
+    }
+
+    // An empty policy denies every other command (FR-CMD-016).
+    if policy.is_empty() {
+        return empty_policy_deny();
+    }
     if command.trim().is_empty() {
         return allow_routed();
     }
 
-    let expanded = match expand_command(policy, command) {
+    let expanded = match expanded {
         Ok(expanded) => expanded,
         // A parse error of the command the agent ran routes ask (FR-CMD-006):
         // the command is refused with a question and a reason to the agent.
@@ -62,6 +97,7 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
                 ),
                 facts: Facts::default(),
                 deciding: Deciding::ParseError,
+                confirmed: false,
             };
         }
     };
@@ -78,6 +114,14 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
         parts.push(evaluate::decide_region(policy, region));
     }
 
+    let confirmation: Option<&String> = command_key
+        .as_ref()
+        .and_then(|key| ctx.confirmations.get(key));
+    let answered: bool = confirmation.is_some() && parts.iter().any(is_rule_ask);
+    if let Some(reason) = confirmation {
+        parts = answer_asks(parts, reason);
+    }
+
     let mut winner = evaluate::combine(parts);
     // A rewrite replaces the whole command, so it is kept only for exactly one
     // simple command (FR-CMD-008); the shape comes from route's own parse, so
@@ -85,12 +129,80 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     if !expanded.single_simple {
         winner = evaluate::refuse_compound_rewrite(winner);
     }
-    let facts = extract_facts(&expanded.invocations, winner.verb.clone());
+    let mut facts = extract_facts(&expanded.invocations, winner.verb.clone());
+    facts.command_key = command_key;
+    // A confirmation is used only when the command goes on to run or to the
+    // operator prompt; a deny -- from another part, or from the compound
+    // refusal above -- leaves it unused.
+    let confirmed = answered && !matches!(winner.decision, Decision::Deny(_));
     Routed {
         decision: winner.decision,
         facts,
         deciding: winner.deciding,
+        confirmed,
     }
+}
+
+/// The no-go entry `command` hits, with the facts of the expansion it hit in.
+/// Checked twice: over `expanded`, the policy's own expansion, and over the
+/// expansion by [`Policy::no_go_resolver`], which resolves the built-in
+/// wrappers and shell interpreters whether or not the policy file declares
+/// them (FR-CMD-025). Either hit refuses, so a policy file can add wrapper
+/// resolution but never take the built-in resolution away. The second scan
+/// is skipped when the policy already declares every built-in resolver
+/// first, as the shipped file does. Pure: at most two scans of the same
+/// string, no I/O (NFR-CMD-001).
+fn no_go_hit(
+    policy: &Policy,
+    command: &str,
+    expanded: Option<&Expanded>,
+) -> Option<(PartOutcome, Facts)> {
+    let hit_in = |expanded: &Expanded| {
+        evaluate::decide_no_go(policy, &expanded.invocations)
+            .map(|hit| (hit, extract_facts(&expanded.invocations, None)))
+    };
+    expanded.and_then(hit_in).or_else(|| {
+        let resolver: Policy = policy.no_go_resolver()?;
+        let resolved: Expanded = expand_command(&resolver, command).ok()?;
+        hit_in(&resolved)
+    })
+}
+
+/// True when `part` is an ask a policy entry produced -- the only ask a
+/// confirmation answers (a parse error has no key, so it is never confirmed).
+fn is_rule_ask(part: &PartOutcome) -> bool {
+    matches!(part.decision, Decision::Ask(_)) && matches!(part.deciding, Deciding::Rule { .. })
+}
+
+/// Treats every policy ask in `parts` as answered by the agent's confirmation
+/// (FR-CMD-026, FR-CMD-006). An entry not marked as needing the operator
+/// becomes allow, so the command earns whatever its other parts decide. A
+/// marked entry becomes an ask with the operator mark set, carrying the
+/// agent's `reason` for the operator prompt.
+fn answer_asks(parts: Vec<PartOutcome>, reason: &str) -> Vec<PartOutcome> {
+    parts
+        .into_iter()
+        .map(|part| {
+            let (Decision::Ask(details), Deciding::Rule { id, .. }) =
+                (&part.decision, &part.deciding)
+            else {
+                return part;
+            };
+            let (decision, needs_operator) = if part.operator_mark {
+                (ask(details.question(), reason), true)
+            } else {
+                (Decision::Allow { note: None }, false)
+            };
+            PartOutcome {
+                decision,
+                deciding: Deciding::Rule {
+                    id: id.clone(),
+                    needs_operator,
+                },
+                ..part
+            }
+        })
+        .collect()
 }
 
 fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> Routed {
@@ -104,6 +216,7 @@ fn route_fields(policy: &Policy, tool: &str, call: &ToolCall, ctx: &Context) -> 
         decision: outcome.decision,
         facts: Facts::default(),
         deciding: outcome.deciding,
+        confirmed: false,
     }
 }
 
@@ -306,6 +419,7 @@ fn extract_facts(invocations: &[Invocation], verb: Option<String>) -> Facts {
         verb,
         issue_numbers,
         keywords,
+        command_key: None,
     }
 }
 
@@ -324,6 +438,7 @@ fn empty_policy_deny() -> Routed {
         ),
         facts: Facts::default(),
         deciding: Deciding::Default,
+        confirmed: false,
     }
 }
 
@@ -332,6 +447,7 @@ fn allow_routed() -> Routed {
         decision: Decision::Allow { note: None },
         facts: Facts::default(),
         deciding: Deciding::Default,
+        confirmed: false,
     }
 }
 
@@ -1086,5 +1202,457 @@ mod tests {
         let routed = route(&p, &call, &Context::default());
         assert_eq!(routed.decision, Decision::Allow { note: None });
         assert_eq!(routed.deciding, Deciding::Default);
+    }
+
+    // -- no-go list (FR-CMD-025) ------------------------------------------
+
+    /// A policy whose own entries would allow, rewrite, proxy, or ask every
+    /// no-go binary, so a no-go deny can only come from the no-go check.
+    fn permissive_policy() -> Policy {
+        policy(
+            r#"{
+            "wrappers": [{"binary": "env"}, {"binary": "sudo"}],
+            "interpreters": [
+                {"binary": "sh", "flag": "-c", "body": "shell"},
+                {"binary": "python3", "flag": "-c", "body": "foreign"}
+            ],
+            "tools": {"Bash": {"families": {
+                "rm": {"rules": [{"id": "rm-allow", "outcome": {"kind": "allow"}}]},
+                "mkfs.ext4": {"rules": [{"id": "mkfs-proxy", "outcome": {"kind": "proxy", "reason": "binary"}}]},
+                "dd": {"rules": [{"id": "dd-rewrite", "outcome": {"kind": "rewrite", "target": "legion x",
+                    "reason": "r", "translatable": {"operands": ["any", "any"]}}}]},
+                "git push": {"rules": [{"id": "push-ask", "outcome": {"kind": "ask", "question": "push?",
+                    "reason": "pushes", "needs_operator": true}}]},
+                "chmod": {"rules": [{"id": "chmod-allow", "outcome": {"kind": "allow"}}]}
+            }}}
+        }"#,
+        )
+    }
+
+    fn assert_no_go(routed: &Routed, command: &str) {
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert_eq!(details.instead(), crate::NO_GO_INSTEAD, "{command}")
+            }
+            other => panic!("`{command}` must be a no-go deny, got {other:?}"),
+        }
+        assert!(
+            matches!(routed.deciding, Deciding::NoGo { .. }),
+            "`{command}` must name a no-go entry, got {:?}",
+            routed.deciding
+        );
+        assert!(!routed.confirmed);
+    }
+
+    #[test]
+    fn every_builtin_entry_and_its_variants_is_refused_even_when_a_policy_entry_matches() {
+        let p = permissive_policy();
+        for command in [
+            "rm -rf /",
+            "rm -fr /",
+            "rm -r -f /",
+            "rm / -rf",
+            "rm -rf /*",
+            "rm -rf ~",
+            "rm -rf $HOME",
+            "mkfs.ext4 /dev/sda1",
+            "dd if=/dev/zero of=/dev/sda",
+            ":(){ :|:& };:",
+            "chmod -R 777 /",
+            "chown -R nobody /",
+            "git push --force origin main",
+            "git push -f origin master",
+            "git push --force-with-lease origin main",
+            "sudo rm -rf /",
+            "env rm -rf /",
+            "sh -c 'rm -rf /'",
+            "echo hi | rm -rf /",
+            "true && rm -rf /",
+            "true; rm -rf /",
+            "FOO=1 rm -rf /",
+            "git push origin +main",
+            "sudo git push origin +main",
+            "sh -c 'git push origin +HEAD:main'",
+            "echo hi | git push origin +main",
+            "true && git push origin +master",
+        ] {
+            assert_no_go(&route(&p, &bash(command), &Context::default()), command);
+        }
+    }
+
+    #[test]
+    fn a_no_go_command_outranks_the_compound_and_redirect_rewrite_refusals() {
+        // #1277 refuses a rewrite inside a compound command and #1282 one
+        // carrying a redirect or assignment. A no-go part in the same command
+        // must still get the no-go deny, never either rewrite refusal.
+        for command in [
+            "gh pr list && rm -rf /",
+            "rm -rf / ; gh pr list",
+            "gh pr list | sh -c 'rm -rf /'",
+            "gh pr list > out.txt && git push origin +main",
+            "GIT_TRACE=1 gh pr list || :(){ :|:& };:",
+        ] {
+            let routed = route(&gh_pr_list_policy(), &bash(command), &Context::default());
+            assert_no_go(&routed, command);
+        }
+    }
+
+    #[test]
+    fn a_forced_push_to_another_branch_is_not_a_no_go_match() {
+        let routed = route(
+            &permissive_policy(),
+            &bash("git push --force origin feature"),
+            &Context::default(),
+        );
+        assert!(matches!(routed.decision, Decision::Ask(_)));
+        assert!(!matches!(routed.deciding, Deciding::NoGo { .. }));
+    }
+
+    #[test]
+    fn a_no_go_match_is_refused_even_with_a_confirmation_for_that_exact_command() {
+        let command = "git push --force origin main";
+        let key = nogo::command_key(command).expect("key");
+        let ctx = Context {
+            confirmations: [(key, "I need to".to_string())].into_iter().collect(),
+            ..Context::default()
+        };
+        let routed = route(&permissive_policy(), &bash(command), &ctx);
+        assert_no_go(&routed, command);
+    }
+
+    #[test]
+    fn a_no_go_match_never_prompts_the_operator() {
+        // The operator is prompted only by an ask carrying the operator mark;
+        // a no-go match is a deny naming the no-go entry, never that.
+        let routed = route(
+            &permissive_policy(),
+            &bash("git push -f origin main"),
+            &Context::default(),
+        );
+        assert!(!matches!(
+            routed.deciding,
+            Deciding::Rule {
+                needs_operator: true,
+                ..
+            }
+        ));
+        assert_no_go(&routed, "git push -f origin main");
+    }
+
+    #[test]
+    fn the_builtin_entries_are_present_when_the_policy_file_is_absent_or_empty() {
+        for p in [Policy::default(), policy("{}"), policy(r#"{"no_go": []}"#)] {
+            assert_no_go(
+                &route(&p, &bash("rm -rf /"), &Context::default()),
+                "rm -rf /",
+            );
+            // Everything else still takes the empty-policy deny.
+            match route(&p, &bash("echo hi"), &Context::default()).decision {
+                Decision::Deny(details) => assert_ne!(details.instead(), crate::NO_GO_INSTEAD),
+                other => panic!("expected the empty-policy deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn wrapper_variants_are_refused_with_no_wrappers_in_the_policy() {
+        // FR-CMD-025: the built-in entries hold when the policy file is absent
+        // or empty, and wrapper variants hit the same entry. So the no-go
+        // check resolves sudo, env, and sh/bash -c itself, without the policy
+        // file's wrapper declarations.
+        let mut missed: Vec<String> = Vec::new();
+        for (name, p) in [("default", Policy::default()), ("{}", policy("{}"))] {
+            for command in [
+                "sudo rm -rf /",
+                "env rm -rf /",
+                "sh -c 'rm -rf /'",
+                "bash -c 'rm -rf /'",
+                "echo hi | sudo rm -rf /",
+                "true && env rm -rf /",
+                "sudo -u root rm -rf /",
+                "env FOO=bar mkfs.ext4 /dev/sda1",
+                "sudo mkfs.ext4 /dev/sda1",
+                "sudo env FOO=1 sh -c 'dd if=/dev/zero of=/dev/sda'",
+            ] {
+                let routed = route(&p, &bash(command), &Context::default());
+                if !matches!(routed.deciding, Deciding::NoGo { .. }) {
+                    missed.push(format!("{name}: {command}"));
+                    continue;
+                }
+                assert_no_go(&routed, command);
+            }
+        }
+        assert!(missed.is_empty(), "not refused as no-go: {missed:#?}");
+    }
+
+    #[test]
+    fn every_shipped_wrapper_and_shell_interpreter_form_is_refused_with_no_policy() {
+        // FR-CMD-025's wrapper variants are the positions FR-CMD-007
+        // resolves: every wrapper and shell interpreter the shipped policy
+        // declares. Each one, around a built-in no-go, is refused under an
+        // empty policy, where no file declares the wrapper.
+        let shipped: Policy = parse_policy(include_str!("../../../plugin/legion-cmd/policy.json"))
+            .expect("the shipped policy parses");
+        let mut forms: Vec<String> = Vec::new();
+        for wrapper in &shipped.wrappers {
+            let mut words: Vec<String> = vec![wrapper.binary.clone()];
+            words.extend(wrapper.required_subcommand.clone());
+            words.extend(std::iter::repeat_n("5".to_string(), wrapper.operands));
+            forms.push(format!("{} rm -rf /", words.join(" ")));
+            forms.push(format!("{} mkfs.ext4 /dev/sda1", words.join(" ")));
+            // A workspace selector pair before the subcommand (#1293).
+            for selector in &wrapper.selectors {
+                let mut selected: Vec<String> =
+                    vec![wrapper.binary.clone(), selector.clone(), "web".to_string()];
+                selected.extend(words.iter().skip(1).cloned());
+                forms.push(format!("{} rm -rf /", selected.join(" ")));
+            }
+        }
+        for interpreter in &shipped.interpreters {
+            if interpreter.body == BodyLanguage::Shell {
+                forms.push(format!(
+                    "{} {} 'rm -rf /'",
+                    interpreter.binary, interpreter.flag
+                ));
+            }
+        }
+        // Review reproductions. The device must be an argument route can
+        // see: `echo /dev/sda1 | xargs -I{} mkfs.ext4 {}` hands it over
+        // stdin, and the shipped policy does not refuse that form either.
+        forms.push("timeout 5 mkfs.ext4 /dev/sda1".to_string());
+        forms.push("nohup rm -rf /".to_string());
+        forms.push("echo go | xargs -I{} mkfs.ext4 /dev/sda1".to_string());
+
+        let missed: Vec<&String> = forms
+            .iter()
+            .filter(|command| {
+                !matches!(
+                    route(&Policy::default(), &bash(command), &Context::default()).deciding,
+                    Deciding::NoGo { .. }
+                )
+            })
+            .collect();
+        assert!(missed.is_empty(), "not refused as no-go: {missed:#?}");
+    }
+
+    #[test]
+    fn the_second_no_go_scan_is_skipped_only_when_the_policy_already_resolves_every_builtin() {
+        let shipped: Policy = parse_policy(include_str!("../../../plugin/legion-cmd/policy.json"))
+            .expect("the shipped policy parses");
+        assert!(shipped.no_go_resolver().is_none());
+        assert!(Policy::default().no_go_resolver().is_some());
+        // A narrower sudo declared first would shadow the built-in one, so
+        // the resolver still runs and the wrapped form is still refused.
+        let narrow = policy(r#"{"wrappers": [{"binary": "sudo"}]}"#);
+        assert!(narrow.no_go_resolver().is_some());
+        assert_no_go(
+            &route(&narrow, &bash("sudo -u root rm -rf /"), &Context::default()),
+            "sudo -u root rm -rf /",
+        );
+    }
+
+    #[test]
+    fn builtin_wrapper_resolution_does_not_change_other_routing_under_an_empty_policy() {
+        // Only the no-go match gains the built-in wrappers: every other
+        // command under an empty policy still takes the empty-policy deny.
+        for command in ["sudo echo hi", "env FOO=1 ls", "sh -c 'echo hi'"] {
+            let routed = route(&Policy::default(), &bash(command), &Context::default());
+            assert!(
+                !matches!(routed.deciding, Deciding::NoGo { .. }),
+                "{command}"
+            );
+            match routed.decision {
+                Decision::Deny(details) => {
+                    assert_ne!(details.instead(), crate::NO_GO_INSTEAD, "{command}")
+                }
+                other => panic!("`{command}` expected the empty-policy deny, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_entry_added_in_the_policy_file_is_refused_like_a_builtin_entry() {
+        let p = policy(
+            r#"{"no_go": [{"id": "shred-disk", "binaries": ["shred"],
+                "predicates": [{"kind": "operand", "prefixes": ["/dev/"]}]}]}"#,
+        );
+        // `sudo` is not a wrapper in this policy, but the no-go check resolves
+        // it itself (FR-CMD-025), so an added entry's wrapper variant is
+        // refused like a built-in one's.
+        for command in ["shred /dev/sda", "sudo shred /dev/sda"] {
+            let routed = route(&p, &bash(command), &Context::default());
+            assert_no_go(&routed, command);
+            assert_eq!(
+                routed.deciding,
+                Deciding::NoGo {
+                    id: "shred-disk".to_string()
+                },
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_file_that_tries_to_override_a_builtin_entry_leaves_it_in_force() {
+        // An added entry reusing the built-in id with a narrower match cannot
+        // replace it: the built-in is checked first and still matches.
+        let p = policy(
+            r#"{"no_go": [{"id": "rm-recursive-force-root", "binaries": ["rm"],
+                "predicates": [{"kind": "operand", "equals": ["/nothing"]}]}]}"#,
+        );
+        assert_no_go(
+            &route(&p, &bash("rm -rf /"), &Context::default()),
+            "rm -rf /",
+        );
+        // A key that tries to disable or remove entries is not policy data at
+        // all: the file is rejected, and the adapter denies on an unparsable
+        // policy (FR-CMD-016), so nothing is weakened.
+        assert!(parse_policy(r#"{"no_go_disable": ["rm-recursive-force-root"]}"#).is_err());
+        assert!(
+            parse_policy(r#"{"no_go": [{"id": "x", "binaries": ["rm"], "enabled": false}]}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_no_go_command_inside_an_opaque_body_is_proxied_opaque_not_denied() {
+        let routed = route(
+            &permissive_policy(),
+            &bash("python3 -c \"import os; os.system('rm -rf /')\""),
+            &Context::default(),
+        );
+        assert_eq!(
+            routed.decision,
+            Decision::Proxy {
+                reason: ProxyReason::Opaque
+            }
+        );
+    }
+
+    // -- confirmations (FR-CMD-026, FR-CMD-006) ----------------------------
+
+    fn confirm_policy() -> Policy {
+        policy(
+            r#"{"tools": {"Bash": {"families": {
+                "curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
+                    "question": "fetch?", "reason": "network"}}]},
+                "gh pr": {"rules": [{"id": "gh-pr", "outcome": {"kind": "ask",
+                    "question": "touch the PR?", "reason": "PRs", "needs_operator": true}}]},
+                "xxd": {"rules": [{"id": "xxd", "outcome": {"kind": "proxy", "reason": "binary"}}]},
+                "shutdown": {"rules": [{"id": "shutdown", "outcome": {"kind": "deny",
+                    "reason": "no", "instead": "ask the operator"}}]}
+            }}}}"#,
+        )
+    }
+
+    fn confirmed_ctx(command: &str, reason: &str) -> Context {
+        Context {
+            confirmations: [(nogo::command_key(command).expect("key"), reason.to_string())]
+                .into_iter()
+                .collect(),
+            ..Context::default()
+        }
+    }
+
+    #[test]
+    fn without_a_confirmation_an_ask_carries_no_operator_mark() {
+        for command in ["curl example.com", "gh pr merge 1"] {
+            let routed = route(&confirm_policy(), &bash(command), &Context::default());
+            assert!(matches!(routed.decision, Decision::Ask(_)), "{command}");
+            assert!(matches!(
+                routed.deciding,
+                Deciding::Rule {
+                    needs_operator: false,
+                    ..
+                }
+            ));
+            assert!(!routed.confirmed);
+        }
+    }
+
+    #[test]
+    fn a_confirmed_ask_not_needing_the_operator_is_allowed_and_marks_the_confirmation_used() {
+        let ctx = confirmed_ctx("curl example.com", "fetching the release notes");
+        let routed = route(&confirm_policy(), &bash("curl example.com"), &ctx);
+        assert_eq!(routed.decision, Decision::Allow { note: None });
+        assert!(routed.confirmed);
+    }
+
+    #[test]
+    fn a_confirmed_ask_earns_what_the_rest_of_the_command_decides() {
+        let ctx = confirmed_ctx("curl example.com | xxd", "inspect bytes");
+        let routed = route(&confirm_policy(), &bash("curl example.com | xxd"), &ctx);
+        assert_eq!(
+            routed.decision,
+            Decision::Proxy {
+                reason: ProxyReason::Binary
+            }
+        );
+        assert!(routed.confirmed);
+
+        // A deny elsewhere in the command still wins, and the confirmation
+        // is left unused.
+        let ctx = confirmed_ctx("curl example.com; shutdown now", "why not");
+        let routed = route(
+            &confirm_policy(),
+            &bash("curl example.com; shutdown now"),
+            &ctx,
+        );
+        assert!(matches!(routed.decision, Decision::Deny(_)));
+        assert!(!routed.confirmed);
+    }
+
+    #[test]
+    fn a_confirmed_ask_needing_the_operator_prompts_with_the_agents_reason() {
+        let ctx = confirmed_ctx("gh pr merge 1", "the review approved it");
+        let routed = route(&confirm_policy(), &bash("gh pr merge 1"), &ctx);
+        match &routed.decision {
+            Decision::Ask(details) => assert_eq!(details.reason(), "the review approved it"),
+            other => panic!("expected ask, got {other:?}"),
+        }
+        assert_eq!(
+            routed.deciding,
+            Deciding::Rule {
+                id: "gh-pr".to_string(),
+                needs_operator: true
+            }
+        );
+        assert!(routed.confirmed);
+    }
+
+    #[test]
+    fn a_confirmation_matches_on_parsed_arguments_not_the_literal_string() {
+        let ctx = confirmed_ctx("curl example.com", "r");
+        let same = route(&confirm_policy(), &bash("curl   'example.com'"), &ctx);
+        assert_eq!(same.decision, Decision::Allow { note: None });
+        let different = route(&confirm_policy(), &bash("curl example.org"), &ctx);
+        assert!(matches!(different.decision, Decision::Ask(_)));
+        assert!(!different.confirmed);
+    }
+
+    #[test]
+    fn an_in_command_confirmation_marker_is_still_asked() {
+        for command in [
+            "LEGION_CONFIRMED=1 curl example.com",
+            "curl example.com --confirmed",
+            "curl example.com # confirmed: I need it",
+        ] {
+            let routed = route(&confirm_policy(), &bash(command), &Context::default());
+            assert!(matches!(routed.decision, Decision::Ask(_)), "{command}");
+            assert!(!routed.confirmed, "{command}");
+        }
+    }
+
+    #[test]
+    fn facts_carry_the_command_key() {
+        let routed = route(
+            &confirm_policy(),
+            &bash("curl example.com"),
+            &Context::default(),
+        );
+        assert_eq!(
+            routed.facts.command_key,
+            Some(nogo::command_key("curl example.com").expect("key"))
+        );
     }
 }

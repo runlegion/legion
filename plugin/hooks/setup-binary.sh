@@ -128,6 +128,25 @@ if [ "$NEED_BINARY" = true ]; then
   install_binary || echo "[legion] binary install failed (exit $?)" >&2
 fi
 
+# -- legion-cmd no-go permissions mirror (#1237) ------------------------------
+# Merge the binary's built-in no-go entries into the user settings'
+# permissions.deny (FR-CMD-025): a second layer behind legion-cmd's own
+# argument match. Adds missing patterns only; never removes or reorders the
+# operator's entries, and leaves a settings file that is not valid JSON alone.
+MIRROR_BIN="${BINARY_PATH}"
+if [ ! -x "$MIRROR_BIN" ]; then
+  MIRROR_BIN=$(command -v legion 2>/dev/null || true)
+fi
+if [ -n "$MIRROR_BIN" ] && [ -x "$MIRROR_BIN" ] && [ -n "${HOME:-}" ]; then
+  DENY_PATTERNS=$("$MIRROR_BIN" cmd-check --deny-patterns 2>/dev/null || true)
+  if [ -n "$DENY_PATTERNS" ]; then
+    # shellcheck source=lib/deny-mirror.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/lib/deny-mirror.sh"
+    legion_merge_deny_patterns "$HOME/.claude/settings.json" "$DENY_PATTERNS" \
+      || echo "[legion] could not write the permissions.deny mirror" >&2
+  fi
+fi
+
 # -- Daemon auto-start --------------------------------------------------------
 # Spawn the background daemon (channel server + watch loop) if not already
 # running. This runs here, not in session-start.sh, because session-start

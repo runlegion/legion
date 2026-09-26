@@ -41,7 +41,10 @@ fn hook_output(data_dir: &std::path::Path, policy: &std::path::Path, input: &[u8
     let out = run_with_stdin(
         legion_cmd(data_dir)
             .args(["cmd-check", "--hook"])
-            .env("LEGION_CMD_POLICY", policy),
+            .env("LEGION_CMD_POLICY", policy)
+            // The incident log (#1237) lives in legion's telemetry dir; keep
+            // it inside the test's own directory.
+            .env("XDG_STATE_HOME", data_dir),
         input,
     );
     assert!(
@@ -118,6 +121,23 @@ fn a_missing_policy_file_denies_instead_of_running_the_command() {
         reason.contains("legion cmd-check -- 'echo hi'"),
         "got: {reason}"
     );
+}
+
+#[test]
+fn a_missing_policy_file_still_refuses_and_records_a_no_go_command() {
+    // FR-CMD-025: the built-in no-go list applies when the file is absent.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("no-such-policy.json");
+    let out = hook_output(dir.path(), &missing, &payload("rm -rf /"));
+    assert_eq!(out["permissionDecision"], "deny");
+    let reason = out["permissionDecisionReason"].as_str().expect("reason");
+    assert!(
+        reason.contains("none: this command never runs"),
+        "got: {reason}"
+    );
+    let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
+        .expect("incident log written");
+    assert_eq!(log.lines().count(), 1);
 }
 
 #[test]
@@ -274,6 +294,39 @@ fn cmd_check_refuses_more_than_one_word_after_the_separator() {
         "[legion] error: pass the command as one quoted argument, or use --tool/--input"
     );
     assert!(out.stdout.is_empty(), "a refused command printed a report");
+}
+
+#[test]
+fn cmd_confirm_refuses_more_than_one_word_after_the_separator() {
+    // `legion cmd confirm` takes the command the same way (#1237): split
+    // argv is refused rather than rebuilt -- exit 2, the usage message, and
+    // nothing written: no store, no incident log, no confirmation.
+    let data = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let out = legion_cmd(data.path())
+        .env("XDG_STATE_HOME", state.path())
+        .env("CLAUDE_CODE_SESSION_ID", "s1")
+        .env_remove("LEGION_CMD_POLICY")
+        .args(["cmd", "confirm", "--reason", "needed"])
+        .args(["--", "arr[i[0]]=x", "rm", "-rf", "build"])
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        "[legion] error: pass the command as one quoted argument: \
+         legion cmd confirm --reason <why> -- '<command>'"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "a refused command printed a confirmation"
+    );
+    let written: Vec<PathBuf> = [data.path(), state.path()]
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(dir).expect("read dir"))
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert!(written.is_empty(), "a refused confirm wrote {written:?}");
 }
 
 #[test]
@@ -708,4 +761,106 @@ fn an_unopenable_store_still_applies_the_decision_and_records_no_prediction() {
         "a file, not a data dir",
         "the unopenable path was changed"
     );
+}
+
+/// Runs `legion cmd confirm` in session `s1` against the shipped policy.
+fn confirm(data_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    run_with_stdin(
+        legion_cmd(data_dir)
+            .args(["cmd", "confirm"])
+            .args(args)
+            .env("LEGION_CMD_POLICY", shipped_policy_path())
+            .env("CLAUDE_CODE_SESSION_ID", "s1")
+            .env("XDG_STATE_HOME", data_dir),
+        b"",
+    )
+}
+
+#[test]
+fn a_confirmed_ask_runs_once_through_the_real_binary() {
+    // #1237: the agent confirms the asked command with a reason; the next
+    // attempt in the same session proceeds, and the one after is asked again.
+    // The shipped curl rule needs the operator, so the confirmed attempt is
+    // the harness permission prompt carrying the agent's reason.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = confirm(
+        dir.path(),
+        &[
+            "--reason",
+            "fetching the release notes",
+            "--",
+            "curl https://example.com",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let first = hook_output(
+        dir.path(),
+        &shipped_policy_path(),
+        &payload("curl  'https://example.com'"),
+    );
+    assert_eq!(first["permissionDecision"], "ask");
+    assert_eq!(
+        first["permissionDecisionReason"],
+        "fetching the release notes"
+    );
+    let second = hook_output(
+        dir.path(),
+        &shipped_policy_path(),
+        &payload("curl https://example.com"),
+    );
+    assert_eq!(second["permissionDecision"], "deny");
+}
+
+#[test]
+fn confirm_refuses_a_missing_reason_and_a_no_go_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = confirm(dir.path(), &["--", "curl https://example.com"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--reason is required"));
+
+    let empty = confirm(
+        dir.path(),
+        &["--reason", "", "--", "curl https://example.com"],
+    );
+    assert!(!empty.status.success());
+
+    let no_go = confirm(dir.path(), &["--reason", "cleanup", "--", "sudo rm -rf /"]);
+    assert!(!no_go.status.success());
+    assert!(String::from_utf8_lossy(&no_go.stderr).contains("no-go"));
+
+    // Nothing was recorded: the command is still asked.
+    let out = hook_output(
+        dir.path(),
+        &shipped_policy_path(),
+        &payload("curl https://example.com"),
+    );
+    assert_eq!(out["permissionDecision"], "deny");
+}
+
+#[test]
+fn a_no_go_command_is_refused_and_recorded_through_the_real_binary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for command in ["rm -rf /", "sudo rm -rf /", "sh -c 'rm -rf /'"] {
+        let out = hook_output(dir.path(), &shipped_policy_path(), &payload(command));
+        assert_eq!(out["permissionDecision"], "deny", "{command}");
+        let reason = out["permissionDecisionReason"].as_str().expect("reason");
+        assert!(
+            reason.contains("none: this command never runs"),
+            "{command}: {reason}"
+        );
+        assert!(reason.contains("This attempt was recorded."), "{reason}");
+    }
+    let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
+        .expect("incident log written under XDG_STATE_HOME");
+    assert_eq!(log.lines().count(), 3);
+    // The first hit sent the operator notice through the real signal path;
+    // no send failure was recorded on its row.
+    let first: Value = serde_json::from_str(log.lines().next().expect("a row")).expect("json");
+    assert_eq!(first["hit_count"], 1);
+    assert!(first["notice_error"].is_null(), "row: {first}");
 }

@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 
 use crate::decision::{ManagedTarget, ProxyReason};
+use crate::nogo::{self, NoGoEntry, NoGoPredicate};
+use crate::splitter::Position;
 
 /// The tool a set of rules governs. The policy is organized by tool kind first
 /// (FR-CMD-011), then, within Bash, by managed-binary family.
@@ -107,8 +109,7 @@ pub struct Family {
 /// no per-family code (FR-CMD-011).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
-    /// Unique across the whole policy (the ledger records it; #1237 keys
-    /// confirmations by it).
+    /// Unique across the whole policy: the incident records name it (#1237).
     pub id: String,
     /// All must hold for the rule to match.
     pub predicates: Vec<Predicate>,
@@ -197,8 +198,8 @@ pub enum RuleOutcome {
         question: String,
         reason: String,
         /// Whether the command needs the operator after the agent confirms
-        /// (FR-CMD-006). route never copies this into its output in this
-        /// issue; #1237 adds the path that reads it.
+        /// (FR-CMD-006). route acts on it only once a confirmation answers the
+        /// ask (#1237).
         needs_operator: bool,
     },
     /// Route this command to the named sym job.
@@ -288,8 +289,8 @@ pub enum FallbackDecision {
     Ask {
         question: String,
         reason: String,
-        /// Carried like [`RuleOutcome::Ask`]'s mark; route never copies it
-        /// into its output (FR-CMD-006).
+        /// Carried like [`RuleOutcome::Ask`]'s mark; route acts on it only once
+        /// a confirmation answers the ask (FR-CMD-006, FR-CMD-026).
         needs_operator: bool,
     },
 }
@@ -335,6 +336,13 @@ pub struct Wrapper {
     /// How many operands the wrapper takes after its options and before the
     /// payload, e.g. 1 for `timeout DURATION`.
     pub operands: usize,
+    /// Words that each take exactly one following word and are the wrapper's
+    /// own, accepted only before the required subcommand (#1293): a workspace
+    /// selector such as `workspace <name>` or `workspaces foreach` for `yarn`.
+    /// A selector is not an option, so without this declaration `yarn
+    /// workspace web exec` would never be claimed and would reach its payload
+    /// unrouted.
+    pub selectors: Vec<String>,
 }
 
 impl Wrapper {
@@ -367,26 +375,39 @@ impl Wrapper {
         for raw in &args[..position] {
             let word = crate::evaluate::dequote_outer(raw);
             let is_option = word.starts_with('-');
-            if !is_option && !after_option {
+            // A declared selector reads like a value option: the word after it
+            // is its own (#1293).
+            let is_selector = self.declares_selector(word);
+            if !is_option && !is_selector && !after_option {
                 return false;
             }
-            // A value follows an option, never `--` and never another value.
-            after_option = is_option && word != "--";
+            // A value follows an option or a selector, never `--` and never
+            // another value.
+            after_option = (is_option && word != "--") || is_selector;
         }
         true
     }
 
     /// The index in `args` where the wrapped command begins, or `None` when
     /// the wrapper's own words cannot be consumed by its declaration: an
-    /// option it does not declare, a value option with no value, a missing
-    /// required subcommand, or fewer operands than it takes (#1286).
+    /// option it does not declare, a value option with no value, a selector
+    /// with no following word, a missing required subcommand, or fewer
+    /// operands than it takes (#1286, #1293).
     ///
     /// Declared options are read before and after the required subcommand,
-    /// then one `--`, then the declared operands. An index equal to
-    /// `args.len()` means the wrapper wraps no command.
+    /// with any `<selector> <word>` pairs (each followed by options) between
+    /// the leading options and the subcommand, then one `--`, then the
+    /// declared operands. An index equal to `args.len()` means the wrapper
+    /// wraps no command.
     pub fn payload_start(&self, args: &[String]) -> Option<usize> {
         let mut index = self.options_end(args, 0)?;
         if let Some(subcommand) = &self.required_subcommand {
+            while word_at(args, index).is_some_and(|word| self.declares_selector(word)) {
+                if index + 2 > args.len() {
+                    return None;
+                }
+                index = self.options_end(args, index + 2)?;
+            }
             if word_at(args, index) != Some(subcommand.as_str()) {
                 return None;
             }
@@ -464,6 +485,10 @@ impl Wrapper {
     fn declares_value_option(&self, word: &str) -> bool {
         self.value_options.iter().any(|o| o == word)
     }
+
+    fn declares_selector(&self, word: &str) -> bool {
+        self.selectors.iter().any(|s| s == word)
+    }
 }
 
 /// The word at `index` as the shell sees it, one outer quote pair removed.
@@ -505,6 +530,10 @@ pub struct Policy {
     pub wrappers: Vec<Wrapper>,
     pub interpreters: Vec<Interpreter>,
     pub script_carriers: Vec<ScriptCarrier>,
+    /// No-go entries the policy file adds (FR-CMD-025). They extend the
+    /// built-in list and can never remove or weaken it: see
+    /// [`Policy::no_go_entries`].
+    pub no_go: Vec<NoGoEntry>,
 }
 
 impl Policy {
@@ -541,6 +570,54 @@ impl Policy {
     /// The sym job with this id, if any.
     pub fn sym_job(&self, id: &str) -> Option<&SymJob> {
         self.sym_jobs.iter().find(|j| j.id == id)
+    }
+
+    /// The resolver the no-go check expands a command with (FR-CMD-025): the
+    /// built-in wrappers and interpreters first, then this policy's own, so a
+    /// wrapped no-go command is resolved whether or not the policy file
+    /// declares its wrapper, and a policy declaration of the same binary can
+    /// never narrow the built-in one. It carries no rules: only the no-go
+    /// check expands with it.
+    ///
+    /// `None` when this policy's own declarations already begin with every
+    /// built-in one, as the shipped file's do: the resolver would then pick
+    /// the same declaration for every name, so its expansion is the policy's
+    /// own and a second scan would find nothing new. Also `None` when the
+    /// built-in resolver is unavailable; route refuses every Bash command
+    /// before it gets here in that case.
+    pub(crate) fn no_go_resolver(&self) -> Option<Policy> {
+        let builtin: &Policy = nogo::builtin_no_go_resolver()?;
+        if self.wrappers.starts_with(&builtin.wrappers)
+            && self.interpreters.starts_with(&builtin.interpreters)
+        {
+            return None;
+        }
+        Some(Policy {
+            wrappers: builtin
+                .wrappers
+                .iter()
+                .chain(&self.wrappers)
+                .cloned()
+                .collect(),
+            interpreters: builtin
+                .interpreters
+                .iter()
+                .chain(&self.interpreters)
+                .cloned()
+                .collect(),
+            script_carriers: self.script_carriers.clone(),
+            ..Policy::default()
+        })
+    }
+
+    /// Every no-go entry route checks (FR-CMD-025): the built-in entries
+    /// first, then the entries this policy adds. The built-ins are not
+    /// policy data, so no policy file can remove one; listing them first
+    /// means an added entry that reuses a built-in id never takes its place.
+    pub fn no_go_entries(&self) -> Vec<NoGoEntry> {
+        let mut entries = nogo::builtin_no_go();
+        entries.extend(self.no_go.iter().cloned());
+        entries
     }
 }
 
@@ -605,6 +682,12 @@ pub enum PolicyError {
     #[error("{pointer}: sym job id is empty")]
     EmptySymJobId { pointer: String },
 
+    #[error("{pointer}: unknown command position '{position}'")]
+    UnknownPosition { pointer: String, position: String },
+
+    #[error("{pointer}: no-go entry must name at least one binary or binary prefix")]
+    NoGoWithoutBinary { pointer: String },
+
     #[error("{pointer}: duplicate rule id '{id}', first defined at {first}")]
     DuplicateRuleId {
         pointer: String,
@@ -639,12 +722,13 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
             "interpreters",
             "script_carriers",
             "route",
+            "no_go",
         ],
     )?;
 
     // Ids are unique across the whole policy -- rule ids and sym-job ids share
-    // one namespace, because the ledger records the id and #1237 keys
-    // confirmations by it, and `Deciding::Rule.id` carries either kind.
+    // one namespace, because an incident record names the id (#1237) and
+    // `Deciding::Rule.id` carries either kind.
     let mut seen_ids: HashMap<String, String> = HashMap::new();
 
     // Sym jobs first, so an action's sym-job reference can be validated.
@@ -672,12 +756,18 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         None => BTreeMap::new(),
     };
 
+    let no_go = match root.get("no_go") {
+        Some(value) => parse_no_go(value, "/no_go")?,
+        None => Vec::new(),
+    };
+
     Ok(Policy {
         tools,
         sym_jobs,
         wrappers,
         interpreters,
         script_carriers,
+        no_go,
     })
 }
 
@@ -1340,6 +1430,152 @@ fn parse_sym_jobs(
     Ok(jobs)
 }
 
+/// Parses the policy file's `no_go` entries (FR-CMD-025): the same predicate
+/// shape as the built-in entries. Each entry is validated like every other
+/// policy entry -- an unknown field is an error, never a silently weaker
+/// entry.
+fn parse_no_go(value: &Value, pointer: &str) -> Result<Vec<NoGoEntry>, PolicyError> {
+    let array = as_array(value, pointer)?;
+    let mut entries = Vec::with_capacity(array.len());
+    for (index, entry_value) in array.iter().enumerate() {
+        let entry_pointer = child_pointer(pointer, &index.to_string());
+        let map = as_object(entry_value, &entry_pointer)?;
+        check_known_keys(
+            map,
+            &entry_pointer,
+            &[
+                "id",
+                "binaries",
+                "binary_prefixes",
+                "position",
+                "predicates",
+            ],
+        )?;
+        let id = require_string(map, "id", &entry_pointer)?;
+        if id.is_empty() {
+            return Err(PolicyError::EmptyRuleId {
+                pointer: child_pointer(&entry_pointer, "id"),
+                id,
+            });
+        }
+        let binaries = optional_string_array(map, "binaries", &entry_pointer)?;
+        let binary_prefixes = optional_string_array(map, "binary_prefixes", &entry_pointer)?;
+        if binaries.is_empty() && binary_prefixes.is_empty() {
+            return Err(PolicyError::NoGoWithoutBinary {
+                pointer: entry_pointer,
+            });
+        }
+        let position = match map.get("position") {
+            Some(raw) => {
+                let position_pointer = child_pointer(&entry_pointer, "position");
+                let name = as_string(raw, &position_pointer)?;
+                Some(parse_position(&name).ok_or(PolicyError::UnknownPosition {
+                    pointer: position_pointer,
+                    position: name,
+                })?)
+            }
+            None => None,
+        };
+        let predicates = match map.get("predicates") {
+            Some(raw) => parse_no_go_predicates(raw, &child_pointer(&entry_pointer, "predicates"))?,
+            None => Vec::new(),
+        };
+        entries.push(NoGoEntry {
+            id,
+            binaries,
+            binary_prefixes,
+            position,
+            predicates,
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_no_go_predicates(value: &Value, pointer: &str) -> Result<Vec<NoGoPredicate>, PolicyError> {
+    let array = as_array(value, pointer)?;
+    let mut predicates = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        let item_pointer = child_pointer(pointer, &index.to_string());
+        let map = as_object(item, &item_pointer)?;
+        let kind = require_string(map, "kind", &item_pointer)?;
+        let predicate = match kind.as_str() {
+            "flag" => {
+                check_known_keys(map, &item_pointer, &["kind", "short", "long"])?;
+                let short_pointer = child_pointer(&item_pointer, "short");
+                let mut short = Vec::new();
+                for (i, flag) in optional_string_array(map, "short", &item_pointer)?
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut chars = flag.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => short.push(c),
+                        _ => {
+                            return Err(PolicyError::WrongType {
+                                pointer: child_pointer(&short_pointer, &i.to_string()),
+                                expected: "a one-character flag".to_string(),
+                            });
+                        }
+                    }
+                }
+                NoGoPredicate::Flag {
+                    short,
+                    long: optional_string_array(map, "long", &item_pointer)?,
+                }
+            }
+            "operand" => {
+                check_known_keys(
+                    map,
+                    &item_pointer,
+                    &["kind", "equals", "prefixes", "suffixes"],
+                )?;
+                NoGoPredicate::Operand {
+                    equals: optional_string_array(map, "equals", &item_pointer)?,
+                    prefixes: optional_string_array(map, "prefixes", &item_pointer)?,
+                    suffixes: optional_string_array(map, "suffixes", &item_pointer)?,
+                }
+            }
+            "forced-refspec" => {
+                check_known_keys(map, &item_pointer, &["kind", "names"])?;
+                NoGoPredicate::ForcedRefspec {
+                    names: optional_string_array(map, "names", &item_pointer)?,
+                }
+            }
+            _ => {
+                return Err(PolicyError::UnknownPredicateKind {
+                    pointer: child_pointer(&item_pointer, "kind"),
+                    kind,
+                });
+            }
+        };
+        predicates.push(predicate);
+    }
+    Ok(predicates)
+}
+
+fn optional_string_array(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    pointer: &str,
+) -> Result<Vec<String>, PolicyError> {
+    match map.get(key) {
+        Some(value) => parse_string_array(value, &child_pointer(pointer, key)),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// A [`Position`] by its kebab-case wire name.
+fn parse_position(name: &str) -> Option<Position> {
+    match name {
+        "first" => Some(Position::First),
+        "after-operator" => Some(Position::AfterOperator),
+        "after-assignment" => Some(Position::AfterAssignment),
+        "substitution" => Some(Position::Substitution),
+        "function-body" => Some(Position::FunctionBody),
+        _ => None,
+    }
+}
+
 fn parse_string_array(value: &Value, pointer: &str) -> Result<Vec<String>, PolicyError> {
     let array = as_array(value, pointer)?;
     let mut out = Vec::with_capacity(array.len());
@@ -1367,6 +1603,7 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
                 "flags",
                 "value_options",
                 "operands",
+                "selectors",
             ],
         )?;
         let binary = require_string(map, "binary", &wrapper_pointer)?;
@@ -1383,6 +1620,7 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
         };
         let flags = optional_strings("flags")?;
         let value_options = optional_strings("value_options")?;
+        let selectors = optional_strings("selectors")?;
         let operands = match map.get("operands") {
             Some(value) => value
                 .as_u64()
@@ -1399,6 +1637,7 @@ fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyEr
             flags,
             value_options,
             operands,
+            selectors,
         });
     }
     Ok(wrappers)
@@ -2197,7 +2436,7 @@ mod tests {
     #[test]
     fn wrapper_arguments_parse_from_the_declaration() {
         let text = r#"{"wrappers": [{"binary": "timeout", "flags": ["-v"],
-            "value_options": ["-s"], "operands": 1}]}"#;
+            "value_options": ["-s"], "operands": 1, "selectors": ["workspace"]}]}"#;
         let policy = parse_policy(text).expect("valid");
         assert_eq!(
             policy.wrappers[0],
@@ -2207,6 +2446,7 @@ mod tests {
                 flags: vec!["-v".to_string()],
                 value_options: vec!["-s".to_string()],
                 operands: 1,
+                selectors: vec!["workspace".to_string()],
             }
         );
     }
@@ -2233,6 +2473,11 @@ mod tests {
                 r#"{"wrappers": [{"binary": "sudo", "value_options": [1]}]}"#,
                 "/wrappers/0/value_options/0",
                 "a string",
+            ),
+            (
+                r#"{"wrappers": [{"binary": "yarn", "selectors": "workspace"}]}"#,
+                "/wrappers/0/selectors",
+                "an array",
             ),
         ] {
             assert_eq!(
@@ -2329,5 +2574,54 @@ mod tests {
         assert_eq!(env.payload_start(&words("- grep foo")), Some(1));
         // Undeclared, a lone `-` is an operand, not an option.
         assert_eq!(Wrapper::default().payload_start(&words("- grep")), Some(0));
+    }
+
+    #[test]
+    fn payload_start_consumes_selector_pairs_before_the_required_subcommand() {
+        let yarn_exec = Wrapper {
+            binary: "yarn".to_string(),
+            required_subcommand: Some("exec".to_string()),
+            flags: vec!["--silent".to_string()],
+            value_options: vec!["--cwd".to_string()],
+            selectors: vec!["workspace".to_string(), "workspaces".to_string()],
+            ..Wrapper::default()
+        };
+        // Any number of pairs, each optionally followed by declared options;
+        // a selector's word may itself be the subcommand word.
+        for (args, start) in [
+            ("workspace web exec grep", 3),
+            ("workspaces foreach exec grep", 3),
+            ("--cwd x workspace web exec grep", 5),
+            ("workspace web --silent exec grep", 4),
+            ("workspace a workspace b exec grep", 5),
+            ("workspace exec exec grep", 3),
+        ] {
+            assert!(yarn_exec.wraps(&words(args)), "{args}");
+            assert_eq!(yarn_exec.payload_start(&words(args)), Some(start), "{args}");
+        }
+        // Claimed, then refused: an undeclared option after a pair, or a
+        // selector whose word is missing.
+        for args in [
+            "workspaces foreach -A exec grep",
+            "workspace web --bogus exec grep",
+        ] {
+            assert!(yarn_exec.wraps(&words(args)), "{args}");
+            assert_eq!(yarn_exec.payload_start(&words(args)), None, "{args}");
+        }
+        assert_eq!(yarn_exec.payload_start(&words("workspace")), None);
+        // A script run through a selector names no subcommand: ordinary.
+        for args in [
+            "workspace web grep",
+            "workspace web build",
+            "workspace web run exec",
+        ] {
+            assert!(!yarn_exec.wraps(&words(args)), "{args}");
+        }
+        // A selector is read only before the subcommand: after it, the word is
+        // the payload's.
+        assert_eq!(
+            yarn_exec.payload_start(&words("exec workspace web")),
+            Some(1)
+        );
     }
 }

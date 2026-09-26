@@ -94,19 +94,24 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use legion_cmd::{
-    AskDetails, Context, Deciding, Decision, Lookup, ManagedTarget, Policy, RewriteSpec, Routed,
-    Rule, RuleOutcome, ToolCall, ToolRules, parse_policy, required_lookups, route,
+    AskDetails, CommandKey, Context, Deciding, Decision, Lookup, ManagedTarget, Policy,
+    RewriteSpec, Routed, Rule, RuleOutcome, ToolCall, ToolRules, parse_policy, required_lookups,
+    route,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::cmd::config::RouteSettings;
+use crate::cmd::confirm::{live_confirmations, use_confirmation, was_used};
+use crate::cmd::incident::{IncidentLog, Origin};
 use crate::cmd::prediction::{self, AppliedRewrite};
 use crate::cmd::replacement::{build_replacement, rewritable_field};
 use crate::db::Database;
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
+use crate::telemetry::CmdIncidentRecord;
 use crate::timerange::TimeRange;
 
 /// Names the policy file directly. Checked before the plugin-root default so
@@ -139,9 +144,11 @@ const DEFAULT_ALLOW_NOTE: &str =
     "legion-cmd: no policy rule governs this command; it runs under the default allow";
 
 /// The PreToolUse payload fields the adapter acts on. Unknown fields are
-/// ignored, not rejected: the harness may add fields. `tool_use_id`,
-/// `session_id` and `transcript_path` serve only the rewrite prediction and
-/// its witness (#1272); no decision reads them.
+/// ignored, not rejected: the harness may add fields. `session_id` binds the
+/// confirmations the adapter reads and the incident records it writes to the
+/// session (#1237). `tool_use_id`, `transcript_path` and `session_id` also
+/// serve the rewrite prediction and its witness (#1272), which no decision
+/// reads.
 #[derive(Debug, Deserialize)]
 struct HookPayload {
     tool_name: String,
@@ -202,6 +209,13 @@ pub(crate) enum AdapterError {
     DeadlineExceeded { deadline_ms: u64 },
     #[error("panic: {0}")]
     Panic(String),
+    /// The confirmation store could not be read (FR-CMD-026).
+    #[error("confirmations: {0}")]
+    Confirmations(String),
+    /// An incident record, or the use of a confirmation, could not be written;
+    /// the command is refused even if it was confirmed (FR-CMD-027).
+    #[error("incident record: {0}")]
+    Record(String),
 }
 
 /// `legion cmd-check --hook`: reads one PreToolUse payload (JSON) on stdin and
@@ -305,6 +319,7 @@ fn respond(input: &str, after: &mut AfterResponse) -> Value {
         deadline,
         policy_text,
         Arc::new(StoreLookups),
+        Arc::new(LocalCmdStore),
         legion_repo,
         move || match session_input {
             Some(session_input) => witness_session(&session_input),
@@ -375,11 +390,12 @@ fn respond_beside_witness(
     deadline: Duration,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
+    store: Arc<dyn CmdStore>,
     legion_repo: Option<String>,
     witness: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
 ) -> (Applied, Option<PendingWitness>) {
     let pending: Option<PendingWitness> = PendingWitness::start(deadline, witness);
-    let applied: Applied = respond_with(input, policy_text, lookups, legion_repo);
+    let applied: Applied = respond_with(input, policy_text, lookups, store, legion_repo);
     (applied, pending)
 }
 
@@ -464,12 +480,57 @@ fn best_effort(what: &str, work: impl FnOnce() -> Result<(), Box<dyn std::error:
     }
 }
 
+/// Where the adapter reads confirmations and writes incident records. A seam
+/// so tests drive the adapter against a temporary store and log.
+trait CmdStore: Send + Sync {
+    /// The local legion store holding the confirmations.
+    fn open(&self) -> error::Result<Database>;
+    /// The incident log in legion's local telemetry.
+    fn log(&self) -> IncidentLog;
+    /// The agent a repo's commands are recorded under.
+    fn agent_for(&self, repo: &str) -> String;
+    /// Sends a first no-go hit's operator notice (FR-CMD-027).
+    fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()>;
+}
+
+/// The production store: the node's legion database and telemetry log.
+struct LocalCmdStore;
+
+impl CmdStore for LocalCmdStore {
+    fn open(&self) -> error::Result<Database> {
+        crate::cli::util::open_db()
+    }
+    fn log(&self) -> IncidentLog {
+        IncidentLog::production()
+    }
+    fn agent_for(&self, repo: &str) -> String {
+        crate::cmd::incident::agent_for(repo)
+    }
+    fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()> {
+        crate::cmd::incident::send_notice(record)
+    }
+}
+
+/// The hook mode's session work around route (#1237): pending drops before
+/// the lookups, live confirmations into the Context, and the incident record
+/// and confirmation use after route. The operator mode passes none to
+/// [`route_call`], so a dry run never records, notifies, or uses up a
+/// confirmation.
+pub(crate) struct SessionWork {
+    store: Arc<dyn CmdStore>,
+    /// The payload's `session_id`, when it names one.
+    session: Option<String>,
+    /// The command as the agent issued it, for the incident record.
+    issued: String,
+}
+
 /// The adapter over injected sources, so a test drives every branch without
 /// touching the environment or the store.
 fn respond_with(
     input: &str,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
+    store: Arc<dyn CmdStore>,
     legion_repo: Option<String>,
 ) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
@@ -480,7 +541,22 @@ fn respond_with(
         tool: payload.tool_name.clone(),
         input: payload.tool_input.clone(),
     };
-    match route_call(policy_text, call, lookups, legion_repo, payload.cwd.clone()) {
+    let session = SessionWork {
+        store,
+        session: payload.session_id.clone().filter(|s| !s.is_empty()),
+        issued: match payload.command() {
+            Some(command) => command.to_string(),
+            None => format!("{} {}", payload.tool_name, payload.tool_input),
+        },
+    };
+    match route_call(
+        policy_text,
+        call,
+        lookups,
+        legion_repo,
+        payload.cwd.clone(),
+        Some(session),
+    ) {
         Ok((routed, policy)) => apply(&routed, &payload, &policy),
         Err(e) => deny_for_error(&e, Some(&payload)).into(),
     }
@@ -492,26 +568,86 @@ fn respond_with(
 /// under `route.deadline_ms`. Returns route's result with the policy it
 /// decided under, which [`replacement_for`] reads to find a rewrite's rule.
 /// Every failure is an [`AdapterError`], which each mode turns into a deny
-/// (FR-CMD-009, FR-CMD-016).
+/// (FR-CMD-009, FR-CMD-016). `session` is the hook mode's [`SessionWork`],
+/// run inside the same deadline; the operator mode passes `None`.
 pub(crate) fn route_call(
     policy_text: Result<String, AdapterError>,
     call: ToolCall,
     lookups: Arc<dyn LookupRunner>,
     legion_repo: Option<String>,
     cwd: Option<String>,
+    session: Option<SessionWork>,
 ) -> Result<(Routed, Arc<Policy>), AdapterError> {
-    let policy_text: String = policy_text?;
-    let settings: RouteSettings = RouteSettings::from_policy_text(&policy_text)
-        .map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
-    let policy: Arc<Policy> =
-        Arc::new(parse_policy(&policy_text).map_err(|e| AdapterError::PolicyRead(e.to_string()))?);
+    // A policy file that cannot be read still leaves the built-in no-go list
+    // in force (FR-CMD-025): route runs over an empty policy, so a no-go
+    // match is refused (and, in the hook mode, recorded and notified), and
+    // every other command is denied with the read error exactly as before. A
+    // file that reads but does not parse is a different failure and denies
+    // outright.
+    let (policy, settings, unread): (Arc<Policy>, RouteSettings, Option<AdapterError>) =
+        match policy_text {
+            Err(e) => (
+                Arc::new(Policy::default()),
+                RouteSettings::default(),
+                Some(e),
+            ),
+            Ok(text) => {
+                let settings: RouteSettings = RouteSettings::from_policy_text(&text)
+                    .map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+                let policy: Policy =
+                    parse_policy(&text).map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+                (Arc::new(policy), settings, None)
+            }
+        };
     let worker_policy: Arc<Policy> = Arc::clone(&policy);
     let routed: Routed = decide(settings.deadline, move || {
         let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
-        let ctx: Context = fetch_context(&worker_policy, &call, repo, lookups.as_ref())?;
-        Ok(route(&worker_policy, &call, &ctx))
+        let now: DateTime<Utc> = Utc::now();
+        // The hook's confirmation and incident-record work (#1237). Pending
+        // drops are written before the adapter's own work (FR-CMD-027).
+        let opened: Option<(SessionWork, Database, IncidentLog)> = match session {
+            None => None,
+            Some(work) => {
+                let db: Database = work
+                    .store
+                    .open()
+                    .map_err(|e| AdapterError::Confirmations(e.to_string()))?;
+                let log: IncidentLog = work.store.log();
+                log.record_pending_drops(&|id: &str| was_used(&db, id), now)
+                    .map_err(|e| AdapterError::Record(e.to_string()))?;
+                Some((work, db, log))
+            }
+        };
+
+        let mut ctx: Context =
+            fetch_context(&worker_policy, &call, repo.clone(), lookups.as_ref())?;
+        if let Some((work, db, _)) = &opened
+            && let Some(session) = &work.session
+        {
+            ctx.confirmations = live_confirmations(db, session, now)
+                .map_err(|e| AdapterError::Confirmations(e.to_string()))?;
+        }
+        let routed: Routed = route(&worker_policy, &call, &ctx);
+
+        if let Some((work, db, log)) = opened {
+            let repo: String = repo.unwrap_or_default();
+            let origin = Origin {
+                command: work.issued,
+                agent: work.store.agent_for(&repo),
+                repo,
+                session_id: work.session.unwrap_or_default(),
+                cwd: cwd.unwrap_or_default(),
+            };
+            record_outcome(&routed, &origin, &db, &log, now, &|record| {
+                work.store.notify(record)
+            })?;
+        }
+        Ok(routed)
     })?;
-    Ok((routed, policy))
+    match unread {
+        Some(read_error) if !matches!(routed.deciding, Deciding::NoGo { .. }) => Err(read_error),
+        _ => Ok((routed, policy)),
+    }
 }
 
 /// The replacement `tool_input` for a rewrite, built from route's facts
@@ -695,15 +831,23 @@ pub(crate) fn read_policy_text(explicit: Option<&Path>) -> Result<String, Adapte
 }
 
 fn policy_path() -> Result<PathBuf, AdapterError> {
+    configured_policy_path().ok_or_else(|| {
+        AdapterError::PolicyRead(format!(
+            "neither {POLICY_PATH_ENV} nor {PLUGIN_ROOT_ENV} is set; no policy file to read"
+        ))
+    })
+}
+
+/// The policy file the environment names: `LEGION_CMD_POLICY`, else
+/// `${CLAUDE_PLUGIN_ROOT}/legion-cmd/policy.json`, else `None`. Shared with
+/// `legion cmd confirm`, which reads the same file for its no-go entries.
+pub(crate) fn configured_policy_path() -> Option<PathBuf> {
     if let Ok(path) = std::env::var(POLICY_PATH_ENV) {
-        return Ok(PathBuf::from(path));
+        return Some(PathBuf::from(path));
     }
-    if let Ok(root) = std::env::var(PLUGIN_ROOT_ENV) {
-        return Ok(PathBuf::from(root).join("legion-cmd").join("policy.json"));
-    }
-    Err(AdapterError::PolicyRead(format!(
-        "neither {POLICY_PATH_ENV} nor {PLUGIN_ROOT_ENV} is set; no policy file to read"
-    )))
+    std::env::var(PLUGIN_ROOT_ENV)
+        .ok()
+        .map(|root| PathBuf::from(root).join("legion-cmd").join("policy.json"))
 }
 
 /// The repo a recall lookup is scoped to (see the module doc). `LEGION_REPO`
@@ -711,7 +855,7 @@ fn policy_path() -> Result<PathBuf, AdapterError> {
 /// neither yields a name that passes [`is_safe_repo_name`]. An unsafe
 /// `LEGION_REPO` is `None`, not a fall-through to `cwd`: an explicit override
 /// that fails validation is a misconfiguration, not a hint.
-fn repo_for(legion_repo: Option<&str>, cwd: Option<&str>) -> Option<String> {
+pub(crate) fn repo_for(legion_repo: Option<&str>, cwd: Option<&str>) -> Option<String> {
     let candidate: Option<String> = match legion_repo.filter(|value| !value.is_empty()) {
         Some(value) => Some(value.to_string()),
         None => cwd.and_then(repo_name_from_cwd),
@@ -744,6 +888,74 @@ fn is_safe_repo_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// What the agent reads after a refusal whose incident record was written
+/// (FR-CMD-027). Every path that reaches [`apply`] with a no-go hit or an ask
+/// to the agent has written its record first; a failed write is a deny from
+/// [`deny_for_error`] instead, which never claims a record.
+const RECORDED_NOTE: &str = "This attempt was recorded.";
+
+/// Writes the incident record route's outcome calls for (FR-CMD-027) and uses
+/// up the confirmation route reports it used (FR-CMD-026). A no-go hit and an
+/// ask are recorded, the ask at both stages: put to the agent, and at the
+/// operator prompt, the second stage of an ask the agent already confirmed,
+/// which carries the agent's reason. Any failure refuses the command, even a
+/// confirmed one.
+fn record_outcome(
+    routed: &Routed,
+    origin: &Origin,
+    db: &Database,
+    log: &IncidentLog,
+    now: DateTime<Utc>,
+    notify: &dyn Fn(&CmdIncidentRecord) -> error::Result<()>,
+) -> Result<(), AdapterError> {
+    let key: Option<&CommandKey> = routed.facts.command_key.as_ref();
+    let failed = |e: error::LegionError| AdapterError::Record(e.to_string());
+    match (&routed.decision, &routed.deciding) {
+        (Decision::Deny(_), Deciding::NoGo { id }) => {
+            log.record_no_go(origin, id, key.map(CommandKey::as_str), now, notify)
+                .map_err(failed)?;
+        }
+        // The operator prompt: the second stage of an ask the agent already
+        // confirmed, recorded with the agent's reason it carries.
+        (
+            Decision::Ask(details),
+            Deciding::Rule {
+                id,
+                needs_operator: true,
+            },
+        ) => {
+            log.record_ask(
+                origin,
+                Some(id.as_str()),
+                key.map(CommandKey::as_str),
+                Some(details.reason()),
+                now,
+            )
+            .map_err(failed)?;
+        }
+        (Decision::Ask(_), deciding) => {
+            let entry: Option<&str> = match deciding {
+                Deciding::Rule { id, .. } | Deciding::NoGo { id } => Some(id.as_str()),
+                Deciding::ParseError | Deciding::Default => None,
+            };
+            log.record_ask(origin, entry, key.map(CommandKey::as_str), None, now)
+                .map_err(failed)?;
+        }
+        _ => {}
+    }
+    if routed.confirmed {
+        let key: &CommandKey = key.ok_or_else(|| {
+            AdapterError::Record("route used a confirmation for a command with no key".to_string())
+        })?;
+        if !use_confirmation(db, &origin.session_id, key, now).map_err(failed)? {
+            return Err(AdapterError::Record(
+                "the confirmation route used is no longer live".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Applies route's Decision to the hook response (FR-CMD-017). `policy` is
 /// the policy route decided under, read only to find a rewrite's rule. A
 /// rewrite whose replacement was built is also returned as the
@@ -765,11 +977,14 @@ fn apply(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Applied {
                 Err(e) => deny_for_error(&e, Some(payload)).into(),
             };
         }
-        Decision::Deny(details) => deny_response(&format!(
-            "{} -- instead: {}",
-            details.reason(),
-            details.instead()
-        )),
+        Decision::Deny(details) => {
+            let mut reason = format!("{} -- instead: {}", details.reason(), details.instead());
+            if matches!(routed.deciding, Deciding::NoGo { .. }) {
+                reason.push_str(". ");
+                reason.push_str(RECORDED_NOTE);
+            }
+            deny_response(&reason)
+        }
         Decision::Ask(details) => ask_response(details, &routed.deciding, payload),
     };
     response.into()
@@ -867,7 +1082,7 @@ fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload
         return hook_output(decision_fields("ask", details.reason()));
     }
     deny_response(&format!(
-        "{} -- {}. To confirm: legion cmd confirm --reason <why> -- {}",
+        "{} -- {}. {RECORDED_NOTE} To confirm: legion cmd confirm --reason <why> -- {}",
         details.question(),
         details.reason(),
         quoted_command(payload.command())
@@ -1003,6 +1218,54 @@ mod tests {
         }
     }
 
+    /// A confirmation store and incident log in a temporary directory.
+    struct TempStore {
+        dir: tempfile::TempDir,
+        /// The entry of every operator notice sent, in order.
+        notices: Mutex<Vec<String>>,
+        /// When set, every notice fails with this text.
+        notice_failure: Option<String>,
+    }
+
+    impl TempStore {
+        fn db_path(&self) -> PathBuf {
+            self.dir.path().join("legion.db")
+        }
+        fn log_path(&self) -> PathBuf {
+            self.dir.path().join("cmd-incidents.jsonl")
+        }
+    }
+
+    impl CmdStore for TempStore {
+        fn open(&self) -> error::Result<Database> {
+            Database::open(&self.db_path())
+        }
+        fn log(&self) -> IncidentLog {
+            IncidentLog::at(self.log_path())
+        }
+        fn agent_for(&self, repo: &str) -> String {
+            format!("agent-of-{repo}")
+        }
+        fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()> {
+            if let Some(failure) = &self.notice_failure {
+                return Err(error::LegionError::Telemetry(failure.clone()));
+            }
+            self.notices
+                .lock()
+                .expect("notices lock")
+                .push(record.entry.clone().unwrap_or_default());
+            Ok(())
+        }
+    }
+
+    fn temp_store() -> Arc<TempStore> {
+        Arc::new(TempStore {
+            dir: tempfile::tempdir().expect("tempdir"),
+            notices: Mutex::new(Vec::new()),
+            notice_failure: None,
+        })
+    }
+
     const REPO_CWD: &str = "/repo/legion";
 
     /// A policy that exercises every arm: `rm -rf` denies, `gh issue list`
@@ -1076,6 +1339,7 @@ mod tests {
             input,
             Ok(policy.to_string()),
             Arc::new(StubLookups(Lookup::Empty)),
+            temp_store(),
             None,
         )
     }
@@ -1162,6 +1426,7 @@ mod tests {
                 "/nowhere/policy.json: missing".to_string(),
             )),
             Arc::new(StubLookups(Lookup::Empty)),
+            temp_store(),
             None,
         )
         .response;
@@ -1232,6 +1497,7 @@ mod tests {
                 id: "ls".to_string(),
                 needs_operator: false,
             },
+            confirmed: false,
         };
         let response = apply(&routed, &parsed_payload("ls"), &policy()).response;
         assert!(output(&response).get("additionalContext").is_none());
@@ -1252,6 +1518,7 @@ mod tests {
                 id: "edit-rewrite".to_string(),
                 needs_operator: false,
             },
+            confirmed: false,
         };
         let payload: HookPayload = serde_json::from_value(json!({
             "tool_name": "Edit",
@@ -1279,6 +1546,7 @@ mod tests {
                 id: "agent-explore-to-legion".to_string(),
                 needs_operator: false,
             },
+            confirmed: false,
         };
         let payload: HookPayload = serde_json::from_value(json!({
             "tool_name": "Agent",
@@ -1357,6 +1625,7 @@ mod tests {
                 id: "gh-issue-list".to_string(),
                 needs_operator: false,
             },
+            confirmed: false,
         };
         let response = apply(&routed, &parsed_payload("gh issue list src/"), &policy()).response;
         assert_denied(&response);
@@ -1404,6 +1673,7 @@ mod tests {
                 id: "no-such-rule".to_string(),
                 needs_operator: false,
             },
+            confirmed: false,
         };
         let applied = apply(&routed, &parsed_payload("gh issue list"), &policy());
         assert!(
@@ -1440,8 +1710,8 @@ mod tests {
 
     #[test]
     fn an_ask_from_route_is_refused_with_question_reason_and_confirm_hint() {
-        // route never sets the operator mark in this slice (#1227), so every
-        // ask it returns takes the refusal path, whatever the rule says.
+        // Without a confirmation route leaves the operator mark unset, so the
+        // ask takes the refusal path, whatever the rule says (#1237).
         let response = respond_stub(&payload("gh pr merge 7"), POLICY);
         assert_denied(&response);
         let text = reason(&response);
@@ -1466,6 +1736,7 @@ mod tests {
                 id: "gh-pr".to_string(),
                 needs_operator,
             },
+            confirmed: false,
         }
     }
 
@@ -1502,11 +1773,396 @@ mod tests {
         let routed = Routed {
             decision: Decision::Deny(DenyDetails::no_go("never").expect("valid")),
             facts: Facts::default(),
-            deciding: Deciding::Default,
+            deciding: Deciding::NoGo {
+                id: "fork-bomb".to_string(),
+            },
+            confirmed: false,
         };
         let response = apply(&routed, &parsed_payload("forbidden"), &policy()).response;
         assert_denied(&response);
         assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(reason(&response).ends_with(RECORDED_NOTE));
+    }
+
+    // -- no-go, confirmations, and incident records (#1237) --------------------
+
+    /// POLICY plus an unmarked ask for `curl`.
+    fn confirm_policy() -> String {
+        POLICY.replacen(
+            "\"xxd\": {",
+            r#""curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
+                "question": "fetch it?", "reason": "network"}}]},
+            "xxd": {"#,
+            1,
+        )
+    }
+
+    fn session_payload(command: &str, session: &str) -> String {
+        json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "session_id": session,
+            "cwd": REPO_CWD
+        })
+        .to_string()
+    }
+
+    fn run(store: &Arc<TempStore>, command: &str, session: &str) -> Value {
+        respond_with(
+            &session_payload(command, session),
+            Ok(confirm_policy()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store.clone(),
+            None,
+        )
+        .response
+    }
+
+    fn records(store: &TempStore) -> Vec<crate::telemetry::CmdIncidentRecord> {
+        store.log().records().expect("read log")
+    }
+
+    fn agent_confirms(store: &TempStore, command: &str, session: &str, at: DateTime<Utc>) {
+        let db = store.open().expect("db");
+        let request = crate::cmd::confirm::ConfirmRequest {
+            origin: Origin {
+                command: command.to_string(),
+                agent: "agent-of-legion".to_string(),
+                repo: "legion".to_string(),
+                session_id: session.to_string(),
+                cwd: REPO_CWD.to_string(),
+            },
+            reason: Some("the agent's reason".to_string()),
+        };
+        let policy = parse_policy(&confirm_policy()).expect("policy");
+        crate::cmd::confirm::confirm(&request, &policy, &db, &store.log(), at, &|_| Ok(()))
+            .expect("confirmed");
+    }
+
+    #[test]
+    fn a_no_go_hit_is_refused_recorded_in_full_and_counted_per_session_and_entry() {
+        let store = temp_store();
+        let response = run(&store, "rm -rf /", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(reason(&response).contains(RECORDED_NOTE));
+
+        let first = &records(&store)[0];
+        assert_eq!(first.kind, crate::telemetry::CmdIncidentKind::NoGo);
+        assert_eq!(first.command, "rm -rf /");
+        assert_eq!(first.agent, "agent-of-legion");
+        assert_eq!(first.repo, "legion");
+        assert_eq!(first.session_id, "s1");
+        assert_eq!(first.cwd, REPO_CWD);
+        assert_eq!(first.entry.as_deref(), Some("rm-recursive-force-root"));
+        assert_eq!(first.hit_count, Some(1));
+
+        run(&store, "rm -fr /", "s1");
+        run(&store, "rm -rf /", "s2");
+        let counts: Vec<Option<u64>> = records(&store).iter().map(|r| r.hit_count).collect();
+        assert_eq!(counts, vec![Some(1), Some(2), Some(1)]);
+    }
+
+    #[test]
+    fn the_first_no_go_hit_in_a_session_notifies_the_operator_once_per_entry() {
+        let store = temp_store();
+        run(&store, "rm -rf /", "s1");
+        run(&store, "rm -fr /", "s1");
+        run(&store, ":(){ :|:& };:", "s1");
+        run(&store, "rm -rf /", "s2");
+        assert_eq!(
+            store.notices.lock().expect("notices lock").clone(),
+            vec![
+                "rm-recursive-force-root".to_string(),
+                "fork-bomb".to_string(),
+                "rm-recursive-force-root".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_notice_that_fails_to_send_is_recorded_and_the_command_stays_refused() {
+        let store = Arc::new(TempStore {
+            dir: tempfile::tempdir().expect("tempdir"),
+            notices: Mutex::new(Vec::new()),
+            notice_failure: Some("inbox unreachable".to_string()),
+        });
+        let response = run(&store, "rm -rf /", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(
+            records(&store)[0]
+                .notice_error
+                .as_deref()
+                .is_some_and(|e| e.contains("inbox unreachable"))
+        );
+    }
+
+    #[test]
+    fn an_unreadable_policy_still_refuses_records_and_notifies_a_no_go_hit() {
+        // FR-CMD-025: the built-ins apply when the policy file is absent.
+        let store = temp_store();
+        let unread = || {
+            Err(AdapterError::PolicyRead(
+                "/plugin/legion-cmd/policy.json: No such file".to_string(),
+            ))
+        };
+        let response = respond_with(
+            &session_payload("rm -rf /", "s1"),
+            unread(),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store.clone(),
+            None,
+        )
+        .response;
+        assert_denied(&response);
+        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(reason(&response).contains(RECORDED_NOTE));
+        let rows = records(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::NoGo);
+        assert_eq!(
+            store.notices.lock().expect("notices lock").clone(),
+            vec!["rm-recursive-force-root".to_string()]
+        );
+
+        // Every other command is still denied with the read error, as before.
+        let response = respond_with(
+            &session_payload("echo hi", "s1"),
+            unread(),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store.clone(),
+            None,
+        )
+        .response;
+        assert_denied(&response);
+        assert!(reason(&response).contains("policy: /plugin/legion-cmd/policy.json"));
+        assert_eq!(records(&store).len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_policy_refuses_records_and_notifies_wrapped_no_go_hits() {
+        // The wrapped forms, not just the bare one: with no policy file the
+        // built-in no-go check resolves the wrapper itself (FR-CMD-025), and
+        // each hit is refused, recorded once, and notified once.
+        for (command, entry) in [
+            ("sudo rm -rf /", "rm-recursive-force-root"),
+            ("env FOO=bar mkfs.ext4 /dev/sda1", "mkfs-device"),
+            ("sh -c 'rm -rf /'", "rm-recursive-force-root"),
+            ("timeout 5 mkfs.ext4 /dev/sda1", "mkfs-device"),
+        ] {
+            let store = temp_store();
+            let response = respond_with(
+                &session_payload(command, "s1"),
+                Err(AdapterError::PolicyRead(
+                    "/plugin/legion-cmd/policy.json: No such file".to_string(),
+                )),
+                Arc::new(StubLookups(Lookup::Empty)),
+                store.clone(),
+                None,
+            )
+            .response;
+            assert_denied(&response);
+            assert!(
+                reason(&response).contains(legion_cmd::NO_GO_INSTEAD),
+                "{command}"
+            );
+            assert!(reason(&response).contains(RECORDED_NOTE), "{command}");
+            let rows = records(&store);
+            assert_eq!(rows.len(), 1, "{command}");
+            assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::NoGo);
+            assert_eq!(rows[0].command, command);
+            assert_eq!(rows[0].entry.as_deref(), Some(entry), "{command}");
+            assert_eq!(
+                store.notices.lock().expect("notices lock").clone(),
+                vec![entry.to_string()],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_is_recorded_and_the_refusal_says_so() {
+        let store = temp_store();
+        let response = run(&store, "curl example.com", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains(RECORDED_NOTE));
+        let rows = records(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::Ask);
+        assert_eq!(rows[0].entry.as_deref(), Some("curl-ask"));
+    }
+
+    #[test]
+    fn a_confirmed_command_runs_once_and_a_second_run_is_asked_again() {
+        let store = temp_store();
+        agent_confirms(&store, "curl example.com", "s1", Utc::now());
+        let response = run(&store, "curl   'example.com'", "s1");
+        assert!(output(&response).get("permissionDecision").is_none());
+        let again = run(&store, "curl example.com", "s1");
+        assert_denied(&again);
+        assert!(reason(&again).contains("fetch it?"));
+    }
+
+    #[test]
+    fn a_confirmation_does_not_cross_sessions_commands_or_its_ten_minutes() {
+        let store = temp_store();
+        agent_confirms(&store, "curl example.com", "s1", Utc::now());
+        assert_denied(&run(&store, "curl example.com", "s2"));
+        assert_denied(&run(&store, "curl example.org", "s1"));
+
+        let stale = temp_store();
+        agent_confirms(
+            &stale,
+            "curl example.com",
+            "s1",
+            Utc::now() - chrono::Duration::minutes(11),
+        );
+        assert_denied(&run(&stale, "curl example.com", "s1"));
+    }
+
+    #[test]
+    fn a_confirmed_operator_ask_prompts_with_the_agents_reason_and_uses_the_confirmation() {
+        let store = temp_store();
+        agent_confirms(&store, "gh pr merge 7", "s1", Utc::now());
+        let response = run(&store, "gh pr merge 7", "s1");
+        let out = output(&response);
+        assert_eq!(out["permissionDecision"], "ask");
+        assert_eq!(out["permissionDecisionReason"], "the agent's reason");
+        // The confirmation was used by that prompt: an operator refusal leaves
+        // nothing to reuse, and the next attempt is asked again.
+        let again = run(&store, "gh pr merge 7", "s1");
+        assert_denied(&again);
+        assert!(reason(&again).contains("touch the PR?"));
+    }
+
+    #[test]
+    fn the_operator_prompt_stage_of_a_confirmed_ask_writes_an_ask_record() {
+        // FR-CMD-027: an ask is recorded at both stages. The operator stage
+        // carries the agent's reason, which is what tells it from the first
+        // ask, and it is never later read as a drop: its confirmation came
+        // before it.
+        let store = temp_store();
+        let now = Utc::now();
+        agent_confirms(&store, "gh pr merge 7", "s1", now);
+        let response = run(&store, "gh pr merge 7", "s1");
+        assert_eq!(output(&response)["permissionDecision"], "ask");
+        let asks: Vec<crate::telemetry::CmdIncidentRecord> = records(&store)
+            .into_iter()
+            .filter(|r| r.kind == crate::telemetry::CmdIncidentKind::Ask)
+            .collect();
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert_eq!(asks[0].entry.as_deref(), Some("gh-pr"));
+        assert_eq!(asks[0].command, "gh pr merge 7");
+        assert_eq!(asks[0].reason.as_deref(), Some("the agent's reason"));
+        let db = store.open().expect("db");
+        let drops = store
+            .log()
+            .record_pending_drops(
+                &|id: &str| was_used(&db, id),
+                now + chrono::Duration::minutes(11),
+            )
+            .expect("drops");
+        assert_eq!(drops, 0, "the operator-stage ask is not a drop");
+    }
+
+    #[test]
+    fn an_ask_whose_record_cannot_be_written_is_refused_naming_the_failure() {
+        let store = temp_store();
+        std::fs::write(store.log_path(), "").expect("create log");
+        let mut perms = std::fs::metadata(store.log_path())
+            .expect("log exists")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(store.log_path(), perms).expect("chmod");
+        let response = run(&store, "curl example.com", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains("incident record:"));
+        assert!(!reason(&response).contains(RECORDED_NOTE));
+    }
+
+    #[test]
+    fn a_confirmed_command_whose_confirmation_cannot_be_used_up_is_refused() {
+        // A confirmed run writes one thing before it proceeds: the use of its
+        // confirmation in the store. When that write fails the command is
+        // refused, even though it was confirmed.
+        let store = temp_store();
+        agent_confirms(&store, "curl example.com", "s1", Utc::now());
+        {
+            let db = store.open().expect("db");
+            db.conn
+                .execute_batch(
+                    "CREATE TRIGGER refuse_use BEFORE UPDATE ON cmd_confirmations \
+                     BEGIN SELECT RAISE(ABORT, 'store is read-only'); END;",
+                )
+                .expect("trigger");
+        }
+        let response = run(&store, "curl example.com", "s1");
+        assert_denied(&response);
+        assert!(reason(&response).contains("incident record:"));
+        assert!(reason(&response).contains("store is read-only"));
+    }
+
+    #[test]
+    fn a_confirmation_store_that_cannot_be_read_denies_naming_it() {
+        struct BrokenStore(TempStore);
+        impl CmdStore for BrokenStore {
+            fn open(&self) -> error::Result<Database> {
+                Err(error::LegionError::Search("db locked".to_string()))
+            }
+            fn log(&self) -> IncidentLog {
+                self.0.log()
+            }
+            fn agent_for(&self, repo: &str) -> String {
+                repo.to_string()
+            }
+            fn notify(&self, _record: &CmdIncidentRecord) -> error::Result<()> {
+                Ok(())
+            }
+        }
+        let response = respond_with(
+            &session_payload("curl example.com", "s1"),
+            Ok(confirm_policy()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            Arc::new(BrokenStore(TempStore {
+                dir: tempfile::tempdir().expect("tempdir"),
+                notices: Mutex::new(Vec::new()),
+                notice_failure: None,
+            })),
+            None,
+        )
+        .response;
+        assert_denied(&response);
+        assert!(reason(&response).contains("confirmations: "));
+        assert!(reason(&response).contains("db locked"));
+    }
+
+    #[test]
+    fn the_adapter_writes_pending_drops_before_its_own_work() {
+        let store = temp_store();
+        let origin = Origin {
+            command: "curl example.com".to_string(),
+            agent: "a".to_string(),
+            repo: "legion".to_string(),
+            session_id: "s1".to_string(),
+            cwd: REPO_CWD.to_string(),
+        };
+        store
+            .log()
+            .record_ask(
+                &origin,
+                Some("curl-ask"),
+                None,
+                None,
+                Utc::now() - chrono::Duration::minutes(15),
+            )
+            .expect("record");
+        run(&store, "echo hi", "s1");
+        let drops = records(&store)
+            .into_iter()
+            .filter(|r| r.kind == crate::telemetry::CmdIncidentKind::Drop)
+            .count();
+        assert_eq!(drops, 1);
     }
 
     // -- lookups (FR-CMD-016) --------------------------------------------------
@@ -1517,6 +2173,7 @@ mod tests {
             &payload("git push origin main"),
             Ok(POLICY.to_string()),
             Arc::new(FailingLookups),
+            temp_store(),
             None,
         )
         .response;
@@ -1553,6 +2210,7 @@ mod tests {
             &payload("git push origin main"),
             Ok(POLICY.to_string()),
             lookups.clone(),
+            temp_store(),
             None,
         )
         .response;
@@ -1576,6 +2234,7 @@ mod tests {
             &payload("git push"),
             Ok(POLICY.to_string()),
             lookups.clone(),
+            temp_store(),
             Some("other-repo".to_string()),
         )
         .response;
@@ -1604,7 +2263,8 @@ mod tests {
     fn a_slow_lookup_overruns_the_configured_deadline_end_to_end() {
         let slow = RecordingLookups::new(Duration::from_millis(400));
         let policy = POLICY.replacen("\"deadline_ms\": 2000", "\"deadline_ms\": 20", 1);
-        let response = respond_with(&payload("git push"), Ok(policy), slow, None).response;
+        let response =
+            respond_with(&payload("git push"), Ok(policy), slow, temp_store(), None).response;
         assert_denied(&response);
         assert!(reason(&response).contains("no decision within 20 ms"));
     }
@@ -1672,7 +2332,14 @@ mod tests {
             "cwd": "/tmp/legion; touch pwned"
         })
         .to_string();
-        let response = respond_with(&input, Ok(POLICY.to_string()), lookups.clone(), None).response;
+        let response = respond_with(
+            &input,
+            Ok(POLICY.to_string()),
+            lookups.clone(),
+            temp_store(),
+            None,
+        )
+        .response;
         assert_denied(&response);
         assert!(lookups.calls().is_empty());
     }
@@ -1818,6 +2485,7 @@ mod tests {
                 id: "gh-issue-list".to_string(),
                 needs_operator: false,
             },
+            confirmed: false,
         };
         let applied = apply(&routed, &parsed_payload("gh issue list src/"), &policy());
         assert_denied(&applied.response);
@@ -1862,12 +2530,17 @@ mod tests {
             "the test policy must carry the short deadline"
         );
         let transcript: PathBuf = fifo.clone();
+        // The decision opens the confirmation store (#1237); migrate it before
+        // the clock starts so the timing measures the decision, not setup.
+        let store = temp_store();
+        drop(store.open().expect("migrates the store"));
         let started = Instant::now();
         let (applied, pending) = respond_beside_witness(
             &payload("gh issue list"),
             deadline,
             Ok(policy),
             Arc::new(StubLookups(Lookup::Empty)),
+            store,
             None,
             move || {
                 prediction::witness_pending(&db, "s1", &transcript)?;

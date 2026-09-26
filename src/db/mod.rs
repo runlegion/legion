@@ -10,6 +10,7 @@ mod audit;
 mod autonomy;
 mod board;
 pub(crate) mod card_criteria;
+pub(crate) mod cmd_confirmations;
 pub mod css_symbols;
 mod defer;
 mod documents;
@@ -34,6 +35,7 @@ mod wake;
 
 pub use audit::AuditInput;
 pub use board::{INBOX_CURSOR_SUFFIX, RedeliveryOutcome};
+pub use cmd_confirmations::CmdConfirmation;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::validate_hhmm;
 
@@ -78,7 +80,7 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// is below this value, so a new step without a bump never reaches it.
 /// `schema_fingerprint_is_pinned_to_schema_version` fails on a schema
 /// change until this is bumped and the fingerprint re-pinned.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
@@ -202,6 +204,7 @@ impl Database {
         inventory::create_tables(&tx)?;
         module_edges::create_tables(&tx)?;
         css_symbols::create_tables(&tx)?;
+        cmd_confirmations::create_tables(&tx)?;
 
         reflections::migrate(&tx)?;
         board::migrate(&tx)?;
@@ -642,8 +645,8 @@ mod tests {
 
     /// SHA-256 of a fresh store's [`schema_snapshot`] at [`SCHEMA_VERSION`].
     const PINNED_SCHEMA_FINGERPRINT: (i32, &str) = (
-        1,
-        "8acd6b6d4eb1cdb89f70157436f5e2b63e4ad48091edcdd3a51888f2df5895bd",
+        2,
+        "ce6d1b974b3f04e8d1f262d4adc335a5cbe9c198c728a29a1f27cb2efe56f869",
     );
 
     #[test]
@@ -682,6 +685,39 @@ mod tests {
             "a current store's open waited on the write lock"
         );
         holder.execute_batch("COMMIT;").unwrap();
+    }
+
+    #[test]
+    fn a_store_stamped_before_cmd_confirmations_gains_the_table_on_open() {
+        // #1237 over #1289: a store stamped at version 1 predates the
+        // cmd_confirmations table, so its next open must re-run the chain
+        // and create it; a fresh store gets it on first open.
+        let has_table = |conn: &Connection| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cmd_confirmations'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+                == 1
+        };
+        let reference = reference_schema();
+        let dir = tempfile::tempdir().unwrap();
+
+        let fresh = dir.path().join("fresh.db");
+        assert!(has_table(&Database::open(&fresh).unwrap().conn));
+        assert_full_schema(&fresh, &reference);
+
+        let stamped = dir.path().join("stamped-v1.db");
+        {
+            let db = Database::open(&stamped).unwrap();
+            db.conn
+                .execute_batch("DROP TABLE cmd_confirmations; PRAGMA user_version = 1;")
+                .unwrap();
+            assert!(!has_table(&db.conn));
+        }
+        assert!(has_table(&Database::open(&stamped).unwrap().conn));
+        assert_full_schema(&stamped, &reference);
     }
 
     const CONCURRENT_OPENERS: usize = 8;
