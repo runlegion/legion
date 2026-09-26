@@ -50,8 +50,9 @@ agent. `--issue` is how legion-verify finds the prediction to witness -- an exac
 the issue reference, never a search of prediction text -- so pass it on every emit for the
 filed issue. Then emit ONE prediction of your own, under your own name and with the same
 `--issue`: your confidence that the issue's criteria cover the traced requirement's intent
-(or, for untraced defect work, that the stated premise is the real premise). That one is yours to stake -- it is a claim
-about YOUR artifact, and verify will witness it against the intent audit.
+(or, for untraced defect work, that the stated premise is the real premise). That one is
+yours to stake -- it is a claim about YOUR artifact, and verify will witness it against
+the intent audit.
 
 ## When a spec exists: transcribe and narrow. Never re-derive.
 
