@@ -206,14 +206,15 @@ const DISK_DEVICES: [&str; 8] = [
 ];
 
 /// One built-in wrapper declaration: binary, required subcommand, valueless
-/// options, options taking a value, leading operands -- the fields of
-/// [`Wrapper`].
+/// options, options taking a value, leading operands, selectors -- the
+/// fields of [`Wrapper`].
 type WrapperRow = (
     &'static str,
     Option<&'static str>,
     &'static [&'static str],
     &'static [&'static str],
     usize,
+    &'static [&'static str],
 );
 
 /// The wrappers the built-in no-go check resolves on its own (FR-CMD-025):
@@ -239,6 +240,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         ],
         &["-u", "--unset", "-C", "--chdir", "-P"],
         0,
+        &[],
     ),
     (
         "sudo",
@@ -288,6 +290,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
             "--other-user",
         ],
         0,
+        &[],
     ),
     (
         "timeout",
@@ -295,15 +298,17 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["--foreground", "--preserve-status", "-v", "--verbose"],
         &["-k", "--kill-after", "-s", "--signal"],
         1,
+        &[],
     ),
-    ("nice", None, &[], &["-n", "--adjustment"], 0),
-    ("nohup", None, &[], &[], 0),
+    ("nice", None, &[], &["-n", "--adjustment"], 0, &[]),
+    ("nohup", None, &[], &[], 0, &[]),
     (
         "stdbuf",
         None,
         &[],
         &["-i", "--input", "-o", "--output", "-e", "--error"],
         0,
+        &[],
     ),
     (
         "xargs",
@@ -340,15 +345,17 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
             "--process-slot-var",
         ],
         0,
+        &[],
     ),
-    ("command", None, &["-p"], &[], 0),
-    ("exec", None, &["-c", "-l"], &["-a"], 0),
+    ("command", None, &["-p"], &[], 0, &[]),
+    ("exec", None, &["-c", "-l"], &["-a"], 0, &[]),
     (
         "npx",
         None,
         &["-y", "--yes", "--workspaces", "--include-workspace-root"],
         &["-p", "--package", "-w", "--workspace"],
         0,
+        &[],
     ),
     (
         "pnpx",
@@ -356,6 +363,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["-s", "--silent"],
         &["--package", "--allow-build", "--reporter"],
         0,
+        &[],
     ),
     (
         "bunx",
@@ -363,6 +371,15 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["--bun", "--silent", "--verbose", "--no-install"],
         &["-p", "--package"],
         0,
+        &[],
+    ),
+    (
+        "bun",
+        Some("x"),
+        &["--bun", "--silent", "--verbose", "--no-install"],
+        &["-p", "--package"],
+        0,
+        &[],
     ),
     (
         "pnpm",
@@ -377,6 +394,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         ],
         &["--resume-from", "-C", "--dir", "-F", "--filter"],
         0,
+        &[],
     ),
     (
         "pnpm",
@@ -384,6 +402,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["-s", "--silent"],
         &["--package", "--allow-build", "--reporter"],
         0,
+        &[],
     ),
     (
         "npm",
@@ -391,6 +410,15 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["-y", "--yes", "--workspaces", "--include-workspace-root"],
         &["-p", "--package", "-w", "--workspace", "--prefix"],
         0,
+        &[],
+    ),
+    (
+        "npm",
+        Some("x"),
+        &["-y", "--yes", "--workspaces", "--include-workspace-root"],
+        &["-p", "--package", "-w", "--workspace", "--prefix"],
+        0,
+        &[],
     ),
     (
         "yarn",
@@ -398,6 +426,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["--silent", "--verbose"],
         &["--cwd"],
         0,
+        &["workspace", "workspaces"],
     ),
     (
         "yarn",
@@ -405,6 +434,7 @@ const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
         &["-q", "--quiet"],
         &["-p", "--package"],
         0,
+        &["workspace", "workspaces"],
     ),
 ];
 
@@ -426,12 +456,13 @@ static BUILTIN_WRAPPERS: LazyLock<Vec<Wrapper>> = LazyLock::new(|| {
     BUILTIN_WRAPPER_ROWS
         .iter()
         .map(
-            |&(binary, required_subcommand, flags, value_options, operands)| Wrapper {
+            |&(binary, required_subcommand, flags, value_options, operands, selectors)| Wrapper {
                 binary: binary.to_string(),
                 required_subcommand: required_subcommand.map(str::to_string),
                 flags: strings(flags),
                 value_options: strings(value_options),
                 operands,
+                selectors: strings(selectors),
             },
         )
         .collect()

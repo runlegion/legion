@@ -1386,6 +1386,13 @@ mod tests {
             words.extend(std::iter::repeat_n("5".to_string(), wrapper.operands));
             forms.push(format!("{} rm -rf /", words.join(" ")));
             forms.push(format!("{} mkfs.ext4 /dev/sda1", words.join(" ")));
+            // A workspace selector pair before the subcommand (#1293).
+            for selector in &wrapper.selectors {
+                let mut selected: Vec<String> =
+                    vec![wrapper.binary.clone(), selector.clone(), "web".to_string()];
+                selected.extend(words.iter().skip(1).cloned());
+                forms.push(format!("{} rm -rf /", selected.join(" ")));
+            }
         }
         for interpreter in &shipped.interpreters {
             if interpreter.body == BodyLanguage::Shell {
