@@ -821,10 +821,10 @@ const RECORDED_NOTE: &str = "This attempt was recorded.";
 
 /// Writes the incident record route's outcome calls for (FR-CMD-027) and uses
 /// up the confirmation route reports it used (FR-CMD-026). A no-go hit and an
-/// ask to the agent are recorded; the operator prompt is the second stage of
-/// an ask the agent already confirmed, and its confirmation was recorded by
-/// `legion cmd confirm`. Any failure refuses the command, even a confirmed
-/// one.
+/// ask are recorded, the ask at both stages: put to the agent, and at the
+/// operator prompt, the second stage of an ask the agent already confirmed,
+/// which carries the agent's reason. Any failure refuses the command, even a
+/// confirmed one.
 fn record_outcome(
     routed: &Routed,
     origin: &Origin,
@@ -840,19 +840,30 @@ fn record_outcome(
             log.record_no_go(origin, id, key.map(CommandKey::as_str), now, notify)
                 .map_err(failed)?;
         }
+        // The operator prompt: the second stage of an ask the agent already
+        // confirmed, recorded with the agent's reason it carries.
         (
-            Decision::Ask(_),
+            Decision::Ask(details),
             Deciding::Rule {
+                id,
                 needs_operator: true,
-                ..
             },
-        ) => {}
+        ) => {
+            log.record_ask(
+                origin,
+                Some(id.as_str()),
+                key.map(CommandKey::as_str),
+                Some(details.reason()),
+                now,
+            )
+            .map_err(failed)?;
+        }
         (Decision::Ask(_), deciding) => {
             let entry: Option<&str> = match deciding {
                 Deciding::Rule { id, .. } | Deciding::NoGo { id } => Some(id.as_str()),
                 Deciding::ParseError | Deciding::Default => None,
             };
-            log.record_ask(origin, entry, key.map(CommandKey::as_str), now)
+            log.record_ask(origin, entry, key.map(CommandKey::as_str), None, now)
                 .map_err(failed)?;
         }
         _ => {}
@@ -1749,7 +1760,8 @@ mod tests {
             reason: Some("the agent's reason".to_string()),
         };
         let policy = parse_policy(&confirm_policy()).expect("policy");
-        crate::cmd::confirm::confirm(&request, &policy, &db, &store.log(), at).expect("confirmed");
+        crate::cmd::confirm::confirm(&request, &policy, &db, &store.log(), at, &|_| Ok(()))
+            .expect("confirmed");
     }
 
     #[test]
@@ -1950,6 +1962,36 @@ mod tests {
     }
 
     #[test]
+    fn the_operator_prompt_stage_of_a_confirmed_ask_writes_an_ask_record() {
+        // FR-CMD-027: an ask is recorded at both stages. The operator stage
+        // carries the agent's reason, which is what tells it from the first
+        // ask, and it is never later read as a drop: its confirmation came
+        // before it.
+        let store = temp_store();
+        let now = Utc::now();
+        agent_confirms(&store, "gh pr merge 7", "s1", now);
+        let response = run(&store, "gh pr merge 7", "s1");
+        assert_eq!(output(&response)["permissionDecision"], "ask");
+        let asks: Vec<crate::telemetry::CmdIncidentRecord> = records(&store)
+            .into_iter()
+            .filter(|r| r.kind == crate::telemetry::CmdIncidentKind::Ask)
+            .collect();
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert_eq!(asks[0].entry.as_deref(), Some("gh-pr"));
+        assert_eq!(asks[0].command, "gh pr merge 7");
+        assert_eq!(asks[0].reason.as_deref(), Some("the agent's reason"));
+        let db = store.open().expect("db");
+        let drops = store
+            .log()
+            .record_pending_drops(
+                &|id: &str| was_used(&db, id),
+                now + chrono::Duration::minutes(11),
+            )
+            .expect("drops");
+        assert_eq!(drops, 0, "the operator-stage ask is not a drop");
+    }
+
+    #[test]
     fn an_ask_whose_record_cannot_be_written_is_refused_naming_the_failure() {
         let store = temp_store();
         std::fs::write(store.log_path(), "").expect("create log");
@@ -2035,6 +2077,7 @@ mod tests {
             .record_ask(
                 &origin,
                 Some("curl-ask"),
+                None,
                 None,
                 Utc::now() - chrono::Duration::minutes(15),
             )

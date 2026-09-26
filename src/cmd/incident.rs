@@ -184,21 +184,21 @@ impl IncidentLog {
         self.append(record)
     }
 
-    /// Records an ask put to the agent.
+    /// Records an ask. `reason` is `None` for the ask put to the agent, and
+    /// the agent's confirmed reason when the ask reaches the operator prompt
+    /// (FR-CMD-006): the reason is what tells the two stages apart, and an
+    /// operator-stage ask is never a drop, since its confirmation came first.
     pub(crate) fn record_ask(
         &self,
         origin: &Origin,
         entry: Option<&str>,
         command_key: Option<&str>,
+        reason: Option<&str>,
         now: DateTime<Utc>,
     ) -> error::Result<CmdIncidentRecord> {
-        self.append(new_record(
-            CmdIncidentKind::Ask,
-            origin,
-            entry,
-            command_key,
-            now,
-        ))
+        let mut record = new_record(CmdIncidentKind::Ask, origin, entry, command_key, now);
+        record.reason = reason.map(str::to_string);
+        self.append(record)
     }
 
     /// Records a confirmation under the confirmation-store row's own `id`, so
@@ -246,7 +246,11 @@ impl IncidentLog {
                 continue;
             }
             let is_drop = match record.kind {
-                CmdIncidentKind::Ask => !records.iter().any(|c| answers(c, record)),
+                // An operator-stage ask (one carrying the agent's reason) was
+                // answered by the confirmation that led to it.
+                CmdIncidentKind::Ask => {
+                    record.reason.is_none() && !records.iter().any(|c| answers(c, record))
+                }
                 CmdIncidentKind::Confirmation => !was_used(&record.id)?,
                 CmdIncidentKind::NoGo | CmdIncidentKind::Drop => false,
             };
@@ -466,7 +470,7 @@ mod tests {
         let (log, _dir) = log();
         let now = Utc::now();
         let ask = log
-            .record_ask(&origin("s1"), Some("curl-ask"), Some("k"), now)
+            .record_ask(&origin("s1"), Some("curl-ask"), Some("k"), None, now)
             .expect("record");
         assert_eq!(ask.kind, CmdIncidentKind::Ask);
         assert_eq!(ask.entry.as_deref(), Some("curl-ask"));
@@ -482,7 +486,7 @@ mod tests {
         let (log, _dir) = log();
         let asked = Utc::now() - Duration::minutes(11);
         let ask = log
-            .record_ask(&origin("s1"), Some("curl-ask"), Some("k"), asked)
+            .record_ask(&origin("s1"), Some("curl-ask"), Some("k"), None, asked)
             .expect("record");
         let now = Utc::now();
         assert_eq!(
@@ -509,10 +513,16 @@ mod tests {
     fn an_ask_is_not_a_drop_before_ten_minutes_or_when_answered_in_time() {
         let (log, _dir) = log();
         let now = Utc::now();
-        log.record_ask(&origin("s1"), None, Some("k"), now - Duration::minutes(5))
-            .expect("record");
+        log.record_ask(
+            &origin("s1"),
+            None,
+            Some("k"),
+            None,
+            now - Duration::minutes(5),
+        )
+        .expect("record");
         let asked = now - Duration::minutes(20);
-        log.record_ask(&origin("s2"), None, Some("k"), asked)
+        log.record_ask(&origin("s2"), None, Some("k"), None, asked)
             .expect("record");
         log.record_confirmation(
             "c1",
@@ -553,7 +563,7 @@ mod tests {
         // The log path is a directory, so the append cannot open it.
         let log = IncidentLog::at(dir.path().to_path_buf());
         assert!(
-            log.record_ask(&origin("s1"), None, None, Utc::now())
+            log.record_ask(&origin("s1"), None, None, None, Utc::now())
                 .is_err()
         );
     }

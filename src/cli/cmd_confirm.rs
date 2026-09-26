@@ -21,7 +21,7 @@ use legion_cmd::{Policy, parse_policy};
 use crate::cli::util::open_db;
 use crate::cmd::confirm::{ConfirmError, ConfirmRequest, confirm};
 use crate::cmd::hook::{LEGION_REPO_ENV, configured_policy_path, repo_for};
-use crate::cmd::incident::{CONFIRMATION_TTL, IncidentLog, Origin, agent_for};
+use crate::cmd::incident::{CONFIRMATION_TTL, IncidentLog, Origin, agent_for, send_notice};
 use crate::error;
 
 /// The environment variable Claude Code sets in every Bash tool subprocess to
@@ -95,7 +95,14 @@ fn run_confirm(reason: Option<String>, command: &str) -> Result<(), ConfirmError
     };
     let db = open_db().map_err(|e| ConfirmError::Store(e.to_string()))?;
     let now = Utc::now();
-    let stored = confirm(&request, &policy, &db, &IncidentLog::production(), now)?;
+    let stored = confirm(
+        &request,
+        &policy,
+        &db,
+        &IncidentLog::production(),
+        now,
+        &send_notice,
+    )?;
     println!(
         "confirmed for this session until {}: {}",
         (stored.recorded_at + CONFIRMATION_TTL).to_rfc3339(),
@@ -139,6 +146,7 @@ mod tests {
     use super::*;
     use crate::cmd::confirm::live_confirmations;
     use crate::db::testutil::test_db;
+    use crate::telemetry::CmdIncidentKind;
     use legion_cmd::{CommandKey, Context, ToolCall, route};
 
     fn words(items: &[&str]) -> Vec<String> {
@@ -224,15 +232,28 @@ mod tests {
             // One quoted argument: routed as typed, refused as a no-go.
             let argv: Vec<String> = words(&[typed]);
             let command: &str = command_arg(&argv).expect("one argument");
-            let err = confirm(&request(command), &Policy::default(), &db, &log, now)
-                .expect_err("a no-go command is never confirmed");
+            let err = confirm(
+                &request(command),
+                &Policy::default(),
+                &db,
+                &log,
+                now,
+                &|_| Ok(()),
+            )
+            .expect_err("a no-go command is never confirmed");
             match err {
                 ConfirmError::NoGo { entry } => assert_eq!(entry, "git-force-push-main", "{typed}"),
                 other => panic!("`{typed}` expected NoGo, got {other:?}"),
             }
         }
         assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
-        assert!(log.records().expect("read").is_empty());
+        // Each refusal is a no-go hit on record, never a confirmation.
+        assert!(
+            log.records()
+                .expect("read")
+                .iter()
+                .all(|r| r.kind == CmdIncidentKind::NoGo)
+        );
     }
 
     #[test]
@@ -254,7 +275,7 @@ mod tests {
         ] {
             let argv: Vec<String> = words(&[typed]);
             let command: &str = command_arg(&argv).expect("one argument");
-            let err = confirm(&request(command), &policy, &db, &log, now)
+            let err = confirm(&request(command), &policy, &db, &log, now, &|_| Ok(()))
                 .expect_err("a no-go command is never confirmed");
             match err {
                 ConfirmError::NoGo { entry } => assert_eq!(entry, want, "{typed}"),
@@ -262,7 +283,13 @@ mod tests {
             }
         }
         assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
-        assert!(log.records().expect("read").is_empty());
+        // Each refusal is a no-go hit on record, never a confirmation.
+        assert!(
+            log.records()
+                .expect("read")
+                .iter()
+                .all(|r| r.kind == CmdIncidentKind::NoGo)
+        );
     }
 
     #[test]
@@ -298,7 +325,8 @@ mod tests {
             // One quoted argument: the stored key is the hook's key.
             let argv: Vec<String> = words(&[typed]);
             let command: &str = command_arg(&argv).expect("one argument");
-            let stored = confirm(&request(command), &policy, &db, &log, now).expect("confirmed");
+            let stored = confirm(&request(command), &policy, &db, &log, now, &|_| Ok(()))
+                .expect("confirmed");
 
             // The key route computes for the same command in the hook.
             let unconfirmed = route(&policy, &bash(typed), &Context::default());

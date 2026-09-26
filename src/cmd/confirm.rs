@@ -19,6 +19,7 @@ use legion_cmd::{CommandKey, Context, Deciding, Policy, ScanError, ToolCall, com
 
 use crate::cmd::incident::{CONFIRMATION_TTL, IncidentLog, Origin};
 use crate::db::{CmdConfirmation, Database};
+use crate::telemetry::CmdIncidentRecord;
 
 /// Every way `legion cmd confirm` refuses. None records a confirmation.
 #[derive(Debug, thiserror::Error)]
@@ -51,12 +52,18 @@ pub(crate) struct ConfirmRequest {
 /// incident record (FR-CMD-027). Writes pending drop rows first, before its
 /// own work. `policy` supplies any policy-file no-go entries; the built-in
 /// ones hold without it.
+///
+/// A no-go command is refused and recorded as a no-go hit on the hook's own
+/// path ([`IncidentLog::record_no_go`]), with `notify` sending the first
+/// hit's operator notice for the session and entry. A hit that cannot be
+/// recorded is reported on stderr; the confirmation is refused either way.
 pub(crate) fn confirm(
     request: &ConfirmRequest,
     policy: &Policy,
     db: &Database,
     log: &IncidentLog,
     now: DateTime<Utc>,
+    notify: &dyn Fn(&CmdIncidentRecord) -> crate::error::Result<()>,
 ) -> Result<CmdConfirmation, ConfirmError> {
     log.record_pending_drops(&|id: &str| was_used(db, id), now)
         .map_err(|e| ConfirmError::Store(e.to_string()))?;
@@ -79,7 +86,13 @@ pub(crate) fn confirm(
         input: serde_json::json!({ "command": command }),
     };
     let entry: Option<String> = match route(policy, &call, &Context::default()).deciding {
-        Deciding::NoGo { id } => return Err(ConfirmError::NoGo { entry: id }),
+        Deciding::NoGo { id } => {
+            if let Err(e) = log.record_no_go(&request.origin, &id, Some(key.as_str()), now, notify)
+            {
+                eprintln!("[legion] could not record the no-go hit for entry `{id}`: {e}");
+            }
+            return Err(ConfirmError::NoGo { entry: id });
+        }
         Deciding::Rule { id, .. } => Some(id),
         Deciding::ParseError | Deciding::Default => None,
     };
@@ -184,6 +197,10 @@ mod tests {
         .expect("policy")
     }
 
+    fn no_notice(_: &CmdIncidentRecord) -> crate::error::Result<()> {
+        Ok(())
+    }
+
     fn log() -> (IncidentLog, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         (IncidentLog::at(dir.path().join("cmd-incidents.jsonl")), dir)
@@ -201,6 +218,7 @@ mod tests {
                 &db,
                 &log,
                 now,
+                &no_notice,
             )
             .expect_err("refused");
             assert!(matches!(err, ConfirmError::MissingReason));
@@ -220,6 +238,7 @@ mod tests {
             &db,
             &log,
             now,
+            &no_notice,
         )
         .expect("confirmed");
         let live = live_confirmations(&db, "s1", now).expect("read");
@@ -236,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn confirming_a_no_go_command_fails_and_records_nothing() {
+    fn confirming_a_no_go_command_fails_and_records_no_confirmation() {
         let db = test_db();
         let (log, _dir) = log();
         let now = Utc::now();
@@ -251,6 +270,7 @@ mod tests {
                 &db,
                 &log,
                 now,
+                &no_notice,
             )
             .expect_err("refused");
             match err {
@@ -259,7 +279,59 @@ mod tests {
             }
         }
         assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
-        assert!(log.records().expect("read").is_empty());
+        let kinds: Vec<CmdIncidentKind> = log
+            .records()
+            .expect("read")
+            .iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds, vec![CmdIncidentKind::NoGo; 3]);
+    }
+
+    #[test]
+    fn a_refused_no_go_confirmation_is_recorded_like_the_hooks_no_go_hit() {
+        // FR-CMD-027: the attempt is a no-go hit, recorded on the hook's own
+        // path into the same log -- one row per attempt, counted per session
+        // and entry -- and never a confirmation.
+        let db = test_db();
+        let (log, _dir) = log();
+        let now = Utc::now();
+        let notices: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let notify = |record: &CmdIncidentRecord| -> crate::error::Result<()> {
+            notices
+                .borrow_mut()
+                .push(record.entry.clone().unwrap_or_default());
+            Ok(())
+        };
+        for _ in 0..2 {
+            let err = confirm(
+                &request("rm -rf /", Some("please"), "s1"),
+                &policy(),
+                &db,
+                &log,
+                now,
+                &notify,
+            )
+            .expect_err("refused");
+            assert!(matches!(err, ConfirmError::NoGo { .. }), "{err:?}");
+        }
+        // The first hit in the session notifies; the repeat does not.
+        assert_eq!(
+            notices.borrow().clone(),
+            vec!["rm-recursive-force-root".to_string()]
+        );
+        let rows = log.records().expect("read");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|r| r.kind == CmdIncidentKind::NoGo));
+        assert!(
+            rows.iter()
+                .all(|r| r.entry.as_deref() == Some("rm-recursive-force-root"))
+        );
+        assert_eq!(rows[0].command, "rm -rf /");
+        assert_eq!(rows[0].session_id, "s1");
+        let counts: Vec<Option<u64>> = rows.iter().map(|r| r.hit_count).collect();
+        assert_eq!(counts, vec![Some(1), Some(2)]);
+        assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
     }
 
     #[test]
@@ -272,6 +344,7 @@ mod tests {
             &db,
             &log,
             Utc::now(),
+            &no_notice,
         )
         .expect_err("refused");
         assert!(matches!(err, ConfirmError::Parse(_)));
@@ -288,6 +361,7 @@ mod tests {
             &db,
             &log,
             now,
+            &no_notice,
         )
         .expect("confirmed");
         let key = command_key("curl example.com").expect("key");
@@ -322,9 +396,34 @@ mod tests {
             &db,
             &log,
             now,
+            &no_notice,
         )
         .expect_err("refused");
         assert!(matches!(err, ConfirmError::Store(_)));
+        assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
+    }
+
+    #[test]
+    fn a_no_go_hit_that_cannot_be_recorded_is_still_refused() {
+        let db = test_db();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cmd-incidents.jsonl");
+        std::fs::write(&path, "").expect("write");
+        let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        let log = IncidentLog::at(path);
+        let now = Utc::now();
+        let err = confirm(
+            &request("rm -rf /", Some("please"), "s1"),
+            &policy(),
+            &db,
+            &log,
+            now,
+            &no_notice,
+        )
+        .expect_err("refused");
+        assert!(matches!(err, ConfirmError::NoGo { .. }), "{err:?}");
         assert!(live_confirmations(&db, "s1", now).expect("read").is_empty());
     }
 
@@ -345,6 +444,7 @@ mod tests {
             &db,
             &log,
             now,
+            &no_notice,
         )
         .expect_err("refused");
         match err {
@@ -372,6 +472,7 @@ mod tests {
             &stale,
             Some("curl-ask"),
             Some("k"),
+            None,
             now - Duration::minutes(12),
         )
         .expect("record");
@@ -382,6 +483,7 @@ mod tests {
             &db,
             &log,
             now,
+            &no_notice,
         );
         let drops = log
             .records()

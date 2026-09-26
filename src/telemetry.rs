@@ -255,7 +255,9 @@ pub struct CmdIncidentRecord {
     /// The command's parsed key (`legion_cmd::CommandKey`), the join between
     /// an ask and the confirmation that answers it.
     pub command_key: Option<String>,
-    /// A confirmation's reason.
+    /// A confirmation's reason; on an ask, the agent's confirmed reason when
+    /// the ask reached the operator prompt (`None` on the ask put to the
+    /// agent).
     #[serde(default)]
     pub reason: Option<String>,
     /// A no-go hit's count within its session and entry: 1 on the first hit,
