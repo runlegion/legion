@@ -15,6 +15,7 @@
 mod decision;
 mod evaluate;
 mod lookups;
+mod nogo;
 mod policy;
 mod route;
 mod splitter;
@@ -24,6 +25,9 @@ pub use decision::{
     ManagedTarget, NO_GO_INSTEAD, ProxyReason, Routed, ToolCall,
 };
 pub use lookups::{RequiredLookups, required_lookups};
+pub use nogo::{
+    BUILTIN_DENY_PATTERNS, CommandKey, NoGoEntry, NoGoPredicate, builtin_no_go, command_key,
+};
 pub use policy::{
     ArgSpec, BodyLanguage, FallbackDecision, Family, GlobalOptions, Interpreter, OperandShape,
     Policy, PolicyError, Predicate, RewriteSpec, Rule, RuleOutcome, ScriptCarrier, SymJob,

@@ -112,6 +112,17 @@ fn shipped_policy_parses_is_non_empty_and_declares_its_names() {
     assert!(policy.matching_interpreter("python3").is_some());
     assert!(policy.matching_script_carrier("bash").is_some());
     assert!(policy.sym_job("find-content").is_some());
+    // The shipped file declares sudo as a wrapper for every routing
+    // decision; the no-go check also resolves every wrapper and interpreter
+    // declared here from this file embedded in the binary, so wrapper
+    // variants of a no-go entry hold without the file (FR-CMD-025).
+    assert!(policy.matching_wrapper("sudo", &[]).is_some());
+    // The shipped file adds no no-go entries; the built-ins apply on top.
+    assert!(policy.no_go.is_empty());
+    assert_eq!(
+        policy.no_go_entries().len(),
+        legion_cmd::builtin_no_go().len()
+    );
 }
 
 /// The shipped wrapper declarations consume each wrapper's own words up to

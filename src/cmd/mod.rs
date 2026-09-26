@@ -7,6 +7,8 @@
 //! module branches on a binary name or a verb.
 
 pub(crate) mod config;
+pub(crate) mod confirm;
 pub(crate) mod hook;
+pub(crate) mod incident;
 pub(crate) mod prediction;
 pub(crate) mod replacement;

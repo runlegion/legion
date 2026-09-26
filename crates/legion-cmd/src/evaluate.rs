@@ -33,6 +33,10 @@ pub struct PartOutcome {
     /// key's subcommand words, or the binary when the family has none. Used to
     /// populate [`crate::Facts::verb`] (FR-CMD-003).
     pub verb: Option<String>,
+    /// The matched rule's own operator mark when this part is an ask
+    /// (FR-CMD-006). It is not copied into `deciding`: route acts on it only
+    /// once a confirmation in `Context` answers the ask (FR-CMD-026).
+    pub operator_mark: bool,
 }
 
 /// Decides one Bash invocation against the policy (FR-CMD-011, FR-CMD-016).
@@ -83,6 +87,7 @@ pub fn decide_bash_invocation(
             deciding: Deciding::Default,
             is_sym: false,
             verb: Some(selection.verb),
+            operator_mark: false,
         },
     }
 }
@@ -222,8 +227,8 @@ pub fn decide_region(policy: &Policy, region: &Unreduced) -> PartOutcome {
 /// evaluation order (route evaluates all invocations, then all unreduced
 /// regions -- not strict command order), which fixes the Decision payload and
 /// the `deciding`/`verb` attribution. Nothing here depends on which same-rank
-/// part wins, so this is not made command-faithful; #1237 must not assume it is
-/// when it keys confirmations off `deciding.id`. An empty part list is the
+/// part wins, so this is not made command-faithful; confirmations key on the
+/// whole command's `CommandKey`, never on `deciding.id` (#1237). An empty part list is the
 /// allow default (nothing to route).
 pub fn combine(parts: Vec<PartOutcome>) -> PartOutcome {
     if let Some(sym) = parts.iter().find(|p| p.is_sym) {
@@ -323,8 +328,8 @@ fn resolve_rule(
         }
         RuleOutcome::Proxy { reason } => (Decision::Proxy { reason: *reason }, false),
         RuleOutcome::Deny { reason, instead } => (deny(reason, instead), false),
-        // The operator mark is never copied from the rule into route's output
-        // (FR-CMD-006): every ask this issue produces carries it unset.
+        // The operator mark stays unset here (FR-CMD-006); route sets it only
+        // when a confirmation answers the ask (FR-CMD-026).
         RuleOutcome::Ask {
             question, reason, ..
         } => (ask(question, reason), false),
@@ -343,7 +348,44 @@ fn resolve_rule(
         }
     };
 
-    rule_outcome(rule, decision, is_sym, verb)
+    // The rule's own operator mark, kept on the part for route's
+    // confirmation step and never copied into `deciding` here.
+    let operator_mark = matches!(decision, Decision::Ask(_))
+        && match &rule.outcome {
+            RuleOutcome::Ask { needs_operator, .. } => *needs_operator,
+            RuleOutcome::Rewrite { spec, .. } => matches!(
+                spec.otherwise,
+                FallbackDecision::Ask {
+                    needs_operator: true,
+                    ..
+                }
+            ),
+            _ => false,
+        };
+    PartOutcome {
+        operator_mark,
+        ..rule_outcome(rule, decision, is_sym, verb)
+    }
+}
+
+/// The no-go pre-check (FR-CMD-025), run before any other policy entry: the
+/// first no-go entry -- built-in, then policy-added -- matching any resolved
+/// invocation, as a deny carrying the fixed no-go instead. Only resolved
+/// invocations are checked; a command inside an opaque region stays opaque
+/// (FR-CMD-007), since route does not guess at what it cannot see.
+pub fn decide_no_go(policy: &Policy, invocations: &[Invocation]) -> Option<PartOutcome> {
+    let entries = policy.no_go_entries();
+    let entry = crate::nogo::first_match(&entries, invocations)?;
+    Some(PartOutcome {
+        // Infallible: a no-go match is always a deny, never a fallback arm.
+        decision: Decision::no_go_entry(&entry.id),
+        deciding: Deciding::NoGo {
+            id: entry.id.clone(),
+        },
+        is_sym: false,
+        verb: None,
+        operator_mark: false,
+    })
 }
 
 /// The first argument `spec` does not cover, as typed, or `None` when every
@@ -492,6 +534,7 @@ fn rule_outcome(
         },
         is_sym,
         verb,
+        operator_mark: false,
     }
 }
 
@@ -527,6 +570,7 @@ fn sym_outcome_with_verb(job_id: &str, sym_command: &str, verb: Option<String>) 
         },
         is_sym: true,
         verb,
+        operator_mark: false,
     }
 }
 
@@ -536,6 +580,7 @@ fn allow_default() -> PartOutcome {
         deciding: Deciding::Default,
         is_sym: false,
         verb: None,
+        operator_mark: false,
     }
 }
 
@@ -549,6 +594,7 @@ fn opaque_default() -> PartOutcome {
         deciding: Deciding::Default,
         is_sym: false,
         verb: None,
+        operator_mark: false,
     }
 }
 
@@ -1091,6 +1137,7 @@ mod tests {
             deciding: Deciding::Default,
             is_sym: false,
             verb: None,
+            operator_mark: false,
         };
         let ask = PartOutcome {
             decision: ask("q", "r"),
@@ -1100,6 +1147,7 @@ mod tests {
             },
             is_sym: false,
             verb: None,
+            operator_mark: false,
         };
         let folded = combine(vec![proxy, ask]);
         assert!(matches!(folded.decision, Decision::Ask(_)));
@@ -1114,6 +1162,7 @@ mod tests {
             deciding: Deciding::Default,
             is_sym: false,
             verb: None,
+            operator_mark: false,
         };
         let sym = sym_outcome("find", "legion sym find-content");
         let folded = combine(vec![proxy, sym]);

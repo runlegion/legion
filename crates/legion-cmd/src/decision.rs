@@ -6,7 +6,11 @@
 //! [`Routed`]. The input side -- [`ToolCall`] and [`Context`] -- is fixed here
 //! too. `route` (in `crate::route`) consumes exactly this signature.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::nogo::CommandKey;
 
 /// The exact `instead` text a no-go deny carries (FR-CMD-005): no command
 /// replaces a no-go command, so every no-go deny names the same fixed text
@@ -97,9 +101,21 @@ impl Decision {
 
     /// Builds a [`Decision::Deny`] for a no-go match (FR-CMD-005): `instead`
     /// is always [`NO_GO_INSTEAD`], because no command replaces a no-go
-    /// command. Building the no-go list itself is out of scope here.
+    /// command. The no-go list itself lives in [`crate::nogo`].
     pub fn no_go(reason: impl Into<String>) -> Result<Decision, ContractError> {
         Ok(Decision::Deny(DenyDetails::no_go(reason)?))
+    }
+
+    /// The deny for a match on the no-go entry `entry` (FR-CMD-025).
+    /// Infallible by construction: the reason always carries fixed non-empty
+    /// text and `instead` is [`NO_GO_INSTEAD`], so the invariant
+    /// [`DenyDetails::new`] checks holds without a fallible path -- a no-go
+    /// match can never degrade into any other arm.
+    pub(crate) fn no_go_entry(entry: &str) -> Decision {
+        Decision::Deny(DenyDetails {
+            reason: format!("this command matches the no-go entry `{entry}`"),
+            instead: NO_GO_INSTEAD.to_string(),
+        })
     }
 
     /// Builds a [`Decision::Ask`], rejecting an empty question or an empty
@@ -320,6 +336,11 @@ pub struct Context {
     pub allow_list: Vec<String>,
     pub recall: Lookup,
     pub consult: Lookup,
+    /// This session's unexpired, unused confirmations (FR-CMD-026), keyed by
+    /// the confirmed command's [`CommandKey`], each with the reason the agent
+    /// gave. The adapter reads them from the confirmation store; route decides
+    /// what one does (FR-CMD-011).
+    pub confirmations: HashMap<CommandKey, String>,
 }
 
 /// The complete command: the tool name and its inputs. A Bash call carries
@@ -338,18 +359,24 @@ pub struct Facts {
     pub verb: Option<String>,
     pub issue_numbers: Vec<u64>,
     pub keywords: Vec<String>,
+    /// The canonical parsed form of a Bash command (FR-CMD-026), when it
+    /// parsed: the key a confirmation for it is stored and matched under.
+    pub command_key: Option<CommandKey>,
 }
 
 /// What decided a command: the policy entry `route` matched, an unparsable
-/// command, or an FR-CMD-016 default. The adapter (#1229) reads the operator
-/// mark; the ledger (#1231, #1237) records the entry.
+/// command, a no-go entry, or an FR-CMD-016 default. The adapter (#1229) reads
+/// the operator mark; the incident records (#1237) name the entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deciding {
     /// A policy rule (or sym job) matched and produced the decision. `id` is
-    /// its policy-unique id. `needs_operator` is the matched rule's operator
-    /// mark (FR-CMD-006); route never copies it into an ask's own behavior in
-    /// this issue -- #1237 adds the path that acts on it.
+    /// its policy-unique id. `needs_operator` is set only when a confirmation in
+    /// `Context` answered an ask whose rule marks the command as needing the
+    /// operator (FR-CMD-006, FR-CMD-026); an unconfirmed ask never sets it.
     Rule { id: String, needs_operator: bool },
+    /// A no-go entry matched (FR-CMD-025). `id` is the entry's stable id,
+    /// the incident record's matched entry and its repeat key (FR-CMD-027).
+    NoGo { id: String },
     /// The command did not parse, so `route` returned ask (FR-CMD-006).
     ParseError,
     /// No rule matched, so an FR-CMD-016 default (allow, deny, or the
@@ -364,6 +391,11 @@ pub struct Routed {
     pub decision: Decision,
     pub facts: Facts,
     pub deciding: Deciding,
+    /// True when route treated an ask as answered by a confirmation in
+    /// `Context` and the command now runs, or goes to the operator prompt
+    /// (FR-CMD-026). The adapter consumes that confirmation; it holds no
+    /// routing branch of its own.
+    pub confirmed: bool,
 }
 
 #[cfg(test)]
@@ -629,6 +661,7 @@ mod tests {
                 ..Facts::default()
             },
             deciding: Deciding::Default,
+            confirmed: false,
         };
         assert_eq!(routed.decision, Decision::Allow { note: None });
         assert_eq!(routed.facts.verb.as_deref(), Some("view"));
@@ -680,16 +713,18 @@ mod tests {
 
     #[test]
     fn facts_serialize_field_by_field() {
+        let key = crate::nogo::command_key("gh issue list src/").expect("key");
         let facts = Facts {
             paths: vec!["src/".to_string()],
             verb: Some("issue".to_string()),
             issue_numbers: vec![7],
             keywords: vec!["list".to_string()],
+            command_key: Some(key.clone()),
         };
         assert_eq!(
             serde_json::to_value(&facts).expect("serializes"),
             serde_json::json!({"paths": ["src/"], "verb": "issue", "issue_numbers": [7],
-                               "keywords": ["list"]})
+                               "keywords": ["list"], "command_key": key.as_str()})
         );
     }
 }

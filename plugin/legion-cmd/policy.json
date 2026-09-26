@@ -1,5 +1,6 @@
 {
   "route": { "deadline_ms": 7000 },
+  "no_go": [],
   "sym_jobs": [
     {
       "id": "find-content",
