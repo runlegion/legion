@@ -447,7 +447,41 @@ pub struct GlobalOptions {
     /// Global options that take a value, as the next word (`-C /tmp`) or
     /// attached (`--git-dir=.git`).
     pub value_options: Vec<String>,
+    /// How an alias is defined on the command line itself (#1298), e.g. git's
+    /// `-c alias.p=push`. `None` means the binary has no inline alias.
+    pub inline_alias: Option<InlineAlias>,
 }
+
+/// The value options whose value can define an alias, and the key prefix that
+/// marks one (#1298): `-c alias.p=push` defines `p` as `push`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InlineAlias {
+    pub options: Vec<String>,
+    pub prefix: String,
+}
+
+/// How route reads the subcommand word of an invocation whose binary declares
+/// an inline alias (#1298).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasReading {
+    /// The word names no alias defined on the command line.
+    NotAlias,
+    /// The word names an alias route cannot read: a shell alias (`!`), an
+    /// empty value, a value the shell or git would still transform, a value
+    /// set through an option route cannot see (`--config-env`), or an alias
+    /// whose value names another inline alias.
+    Opaque,
+    /// The alias value's words in place of the subcommand word, then the
+    /// command's remaining words, with the index where the subcommand begins
+    /// among them.
+    Expanded { args: Vec<String>, start: usize },
+}
+
+/// Characters that make an alias value unreadable as plain words: the shell
+/// has not expanded them yet (`$`, backtick) or git splits the value by its
+/// own quoting rules (quotes, backslash), so whitespace splitting would read
+/// a different command than the one that runs.
+const ALIAS_UNREADABLE: [char; 5] = ['\'', '"', '\\', '$', '`'];
 
 impl GlobalOptions {
     /// The index in `args` of the first word that is not one of the declared
@@ -456,6 +490,112 @@ impl GlobalOptions {
     pub fn subcommand_start(&self, args: &[String]) -> Option<usize> {
         declared_options_end(&self.flags, &self.value_options, args, 0)
     }
+
+    /// How route reads the subcommand word at `start` (#1298). The word names
+    /// an alias when a global option before it defines one: a value beginning
+    /// with the declared prefix, compared without regard to ASCII case as git
+    /// compares config keys. The last definition of a name wins, across every
+    /// option. Only a declared inline-alias option carries a value route can
+    /// read; a definition through any other option is opaque.
+    ///
+    /// The expansion's global options are read again by the declaration, so
+    /// an option the alias brings in that the declaration does not name is
+    /// opaque, and an expanded subcommand word that is itself an inline alias
+    /// is opaque rather than expanded a second time.
+    pub fn inline_alias_reading(&self, args: &[String], start: usize) -> AliasReading {
+        let Some(alias) = &self.inline_alias else {
+            return AliasReading::NotAlias;
+        };
+        let Some(word) = word_at(args, start) else {
+            return AliasReading::NotAlias;
+        };
+        let Some(value) = self.alias_definition(alias, args, start, word) else {
+            return AliasReading::NotAlias;
+        };
+        let Some(words) = value.and_then(alias_words) else {
+            return AliasReading::Opaque;
+        };
+        let mut expanded: Vec<String> = args[..start].to_vec();
+        expanded.extend(words);
+        expanded.extend(args[start + 1..].iter().cloned());
+        let Some(expanded_start) = self.subcommand_start(&expanded) else {
+            return AliasReading::Opaque;
+        };
+        let names_alias = word_at(&expanded, expanded_start).is_some_and(|next| {
+            self.alias_definition(alias, &expanded, expanded_start, next)
+                .is_some()
+        });
+        if names_alias {
+            return AliasReading::Opaque;
+        }
+        AliasReading::Expanded {
+            args: expanded,
+            start: expanded_start,
+        }
+    }
+
+    /// The last definition of alias `name` among the global options before
+    /// `end`: `None` when no option defines it, `Some(None)` when the last
+    /// definition carries a value route cannot see, `Some(Some(value))`
+    /// otherwise.
+    fn alias_definition<'a>(
+        &self,
+        alias: &InlineAlias,
+        args: &'a [String],
+        end: usize,
+        name: &str,
+    ) -> Option<Option<&'a str>> {
+        let mut found: Option<Option<&'a str>> = None;
+        let mut index = 0;
+        while index < end {
+            let Some(word) = word_at(args, index) else {
+                break;
+            };
+            let consumed = option_words(&self.flags, &self.value_options, word).unwrap_or(1);
+            let (option, value) = if consumed == 2 {
+                (word, word_at(args, index + 1))
+            } else {
+                match word
+                    .strip_prefix("--")
+                    .and_then(|long| long.split_once('='))
+                {
+                    Some((long, value)) => (&word[..long.len() + 2], Some(value)),
+                    None => (word, None),
+                }
+            };
+            index += consumed;
+            let Some(key) = value.and_then(|v| strip_prefix_ignore_case(v, &alias.prefix)) else {
+                continue;
+            };
+            let (defined, alias_value) = match key.split_once('=') {
+                Some((defined, alias_value)) => (defined, Some(alias_value)),
+                None => (key, None),
+            };
+            if defined.eq_ignore_ascii_case(name) {
+                let readable = declares(&alias.options, option);
+                found = Some(alias_value.filter(|_| readable));
+            }
+        }
+        found
+    }
+}
+
+/// `text` without `prefix`, compared without regard to ASCII case.
+fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
+
+/// An alias value's words, or `None` when route cannot read them: an empty
+/// value, a shell alias (`!`), or a value carrying a character in
+/// [`ALIAS_UNREADABLE`].
+fn alias_words(value: &str) -> Option<Vec<String>> {
+    if value.trim_start().starts_with('!') || value.contains(ALIAS_UNREADABLE) {
+        return None;
+    }
+    let words: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+    (!words.is_empty()).then_some(words)
 }
 
 /// The index of the first word from `index` on that is not one of the
@@ -609,6 +749,21 @@ impl Policy {
         match self.global_options.iter().find(|g| g.binary == binary) {
             Some(declared) => declared.subcommand_start(args),
             None => Some(0),
+        }
+    }
+
+    /// How route reads `binary`'s subcommand word at `start` (#1298): see
+    /// [`GlobalOptions::inline_alias_reading`]. A binary with no global-option
+    /// declaration has no inline alias.
+    pub fn inline_alias_reading(
+        &self,
+        binary: &str,
+        args: &[String],
+        start: usize,
+    ) -> AliasReading {
+        match self.global_options.iter().find(|g| g.binary == binary) {
+            Some(declared) => declared.inline_alias_reading(args, start),
+            None => AliasReading::NotAlias,
         }
     }
 
@@ -1703,20 +1858,40 @@ fn parse_global_options(value: &Value, pointer: &str) -> Result<Vec<GlobalOption
         check_known_keys(
             map,
             &declaration_pointer,
-            &["binary", "flags", "value_options"],
+            &["binary", "flags", "value_options", "inline_alias"],
         )?;
         let binary = require_string(map, "binary", &declaration_pointer)?;
         let optional_strings = |key: &str| match map.get(key) {
             Some(value) => parse_string_array(value, &child_pointer(&declaration_pointer, key)),
             None => Ok(Vec::new()),
         };
+        let inline_alias = match map.get("inline_alias") {
+            Some(value) => Some(parse_inline_alias(
+                value,
+                &child_pointer(&declaration_pointer, "inline_alias"),
+            )?),
+            None => None,
+        };
         declarations.push(GlobalOptions {
             binary,
             flags: optional_strings("flags")?,
             value_options: optional_strings("value_options")?,
+            inline_alias,
         });
     }
     Ok(declarations)
+}
+
+fn parse_inline_alias(value: &Value, pointer: &str) -> Result<InlineAlias, PolicyError> {
+    let map = as_object(value, pointer)?;
+    check_known_keys(map, pointer, &["options", "prefix"])?;
+    Ok(InlineAlias {
+        options: parse_string_array(
+            require(map, "options", pointer)?,
+            &child_pointer(pointer, "options"),
+        )?,
+        prefix: require_string(map, "prefix", pointer)?,
+    })
 }
 
 fn parse_interpreters(value: &Value, pointer: &str) -> Result<Vec<Interpreter>, PolicyError> {
@@ -2663,10 +2838,147 @@ mod tests {
                 binary: "git".to_string(),
                 flags: vec!["--no-pager".to_string()],
                 value_options: vec!["-C".to_string()],
+                inline_alias: None,
             }]
         );
         // Declarations alone route nothing, like wrappers.
         assert!(policy.is_empty());
+    }
+
+    #[test]
+    fn an_inline_alias_parses_from_its_global_options_declaration() {
+        let text = r#"{"global_options": [{"binary": "git", "value_options": ["-c"],
+            "inline_alias": {"options": ["-c"], "prefix": "alias."}}]}"#;
+        let policy = parse_policy(text).expect("valid");
+        assert_eq!(
+            policy.global_options[0].inline_alias,
+            Some(InlineAlias {
+                options: vec!["-c".to_string()],
+                prefix: "alias.".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_inline_alias_of_the_wrong_shape_is_rejected_with_its_pointer() {
+        let declaration = |inline_alias: &str| {
+            format!(
+                r#"{{"global_options": [{{"binary": "git", "inline_alias": {inline_alias}}}]}}"#
+            )
+        };
+        assert_eq!(
+            parse_policy(&declaration(
+                r#"{"options": ["-c"], "prefix": "alias.", "prefixes": []}"#
+            ))
+            .expect_err("unknown field"),
+            PolicyError::UnknownField {
+                pointer: "/global_options/0/inline_alias/prefixes".to_string(),
+                field: "prefixes".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_policy(&declaration(r#"{"options": ["-c"]}"#)).expect_err("missing prefix"),
+            PolicyError::MissingField {
+                pointer: "/global_options/0/inline_alias".to_string(),
+                field: "prefix".to_string(),
+            }
+        );
+        for (inline_alias, pointer, expected) in [
+            (r#"[]"#, "/global_options/0/inline_alias", "an object"),
+            (
+                r#"{"options": "-c", "prefix": "alias."}"#,
+                "/global_options/0/inline_alias/options",
+                "an array",
+            ),
+            (
+                r#"{"options": ["-c"], "prefix": 1}"#,
+                "/global_options/0/inline_alias/prefix",
+                "a string",
+            ),
+        ] {
+            assert_eq!(
+                parse_policy(&declaration(inline_alias)).expect_err("wrong type"),
+                PolicyError::WrongType {
+                    pointer: pointer.to_string(),
+                    expected: expected.to_string(),
+                },
+                "{inline_alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_alias_reading_follows_git_definition_rules() {
+        let git = GlobalOptions {
+            binary: "git".to_string(),
+            flags: vec!["-p".to_string()],
+            value_options: vec!["-c".to_string(), "--config-env".to_string()],
+            inline_alias: Some(InlineAlias {
+                options: vec!["-c".to_string()],
+                prefix: "alias.".to_string(),
+            }),
+        };
+        let read_args = |args: &[String]| {
+            let start = git.subcommand_start(args).expect("declared options");
+            git.inline_alias_reading(args, start)
+        };
+        let read = |args: &str| read_args(&words(args));
+        assert_eq!(
+            read("-c alias.p=push p origin"),
+            AliasReading::Expanded {
+                args: words("-c alias.p=push push origin"),
+                start: 2
+            }
+        );
+        // Several words; the alias's own option is read before its subcommand.
+        let several: Vec<String> = vec!["-c".into(), "alias.p=-p push  -u".into(), "p".into()];
+        let mut expanded: Vec<String> = several[..2].to_vec();
+        expanded.extend(words("-p push -u"));
+        assert_eq!(
+            read_args(&several),
+            AliasReading::Expanded {
+                args: expanded,
+                start: 3
+            }
+        );
+        // A shell alias, even after leading whitespace, and a blank value.
+        for value in ["alias.p= !sh", "alias.p=  "] {
+            let args: Vec<String> = vec!["-c".into(), value.into(), "p".into()];
+            assert_eq!(read_args(&args), AliasReading::Opaque, "{value}");
+        }
+        // The last definition wins across every option, readable or not.
+        assert_eq!(
+            read("--config-env=alias.p=X -c alias.p=push p"),
+            AliasReading::Expanded {
+                args: words("--config-env=alias.p=X -c alias.p=push push"),
+                start: 3
+            }
+        );
+        for args in [
+            "-c alias.p=push --config-env=alias.p=X p",
+            "--config-env alias.p=X p",
+            "-c alias.p=!sh p",
+            "-c alias.p= p",
+            "-c alias.p p",
+            "-c alias.p=q -c alias.q=push p",
+            "-c alias.p=Q -c ALIAS.q=push p",
+            "-c alias.p=pu\\sh p",
+            "-c alias.p=`x` p",
+        ] {
+            assert_eq!(read(args), AliasReading::Opaque, "{args}");
+        }
+        for args in ["-c alias.p=push status", "p", "", "-c alias.p=push"] {
+            assert_eq!(read(args), AliasReading::NotAlias, "{args}");
+        }
+        // Without an inline-alias declaration, nothing is an alias.
+        let plain = GlobalOptions {
+            inline_alias: None,
+            ..git.clone()
+        };
+        assert_eq!(
+            plain.inline_alias_reading(&words("-c alias.p=push p"), 2),
+            AliasReading::NotAlias
+        );
     }
 
     #[test]
@@ -2717,6 +3029,7 @@ mod tests {
                 binary: "git".to_string(),
                 flags: vec!["--no-pager".to_string(), "-p".to_string()],
                 value_options: vec!["-C".to_string(), "-c".to_string(), "--git-dir".to_string()],
+                inline_alias: None,
             }],
             ..Policy::default()
         };

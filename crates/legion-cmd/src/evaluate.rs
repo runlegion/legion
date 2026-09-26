@@ -11,12 +11,14 @@
 //! sends it to sym ... never allowed or proxied"), and only when no part is a
 //! sym job do the remaining parts fold by the strictest-Decision order.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 
 use crate::decision::{Deciding, Decision, ManagedTarget, ProxyReason};
 use crate::policy::{
-    ArgSpec, FallbackDecision, Family, OperandShape, Policy, Predicate, Rule, RuleOutcome,
-    ToolKind, ToolRules,
+    AliasReading, ArgSpec, FallbackDecision, Family, OperandShape, Policy, Predicate, Rule,
+    RuleOutcome, ToolKind, ToolRules,
 };
 use crate::splitter::{Invocation, Unreduced, UnreducedReason};
 use crate::{Context, Lookup};
@@ -44,24 +46,95 @@ pub struct PartOutcome {
 /// An option before the subcommand that the binary's declared global options
 /// do not name -> proxy opaque (#1294): route cannot say which word is the
 /// subcommand, so it neither matches a family nor falls to the allow default.
-/// No family matches the binary and its leading operands -> allow (the command
-/// carries no managed binary). A family matches but no rule in it resolves the
-/// arguments -> deny (a managed rule that cannot resolve). A rule matches but
-/// its required recall or consult result is [`Lookup::NotFetched`] -> deny. A
-/// rule matches and its lookups are satisfied -> the rule's outcome. A
-/// rewrite rule's outcome is judged from the arguments beyond the family's
-/// subcommand words (FR-CMD-008): the rewrite when all of them translate,
-/// the rule's fallback otherwise.
+/// A subcommand word naming an inline alias is decided under two readings,
+/// folded by [`combine`] (#1298): the alias's words in its place -- or proxy
+/// opaque when route cannot read the alias -- first, then the word as typed.
+/// Git never runs an alias that shares a builtin's name, and route cannot
+/// tell which names are builtins, so the stricter reading holds.
+///
+/// For each reading of words: no family matches the binary and its leading
+/// operands -> allow (the command carries no managed binary). A family
+/// matches but no rule in it resolves the arguments -> deny (a managed rule
+/// that cannot resolve). A rule matches but its required recall or consult
+/// result is [`Lookup::NotFetched`] -> deny. A rule matches and its lookups
+/// are satisfied -> the rule's outcome. A rewrite rule's outcome is judged
+/// from the arguments beyond the family's subcommand words (FR-CMD-008): the
+/// rewrite when all of them translate, the rule's fallback otherwise.
 pub fn decide_bash_invocation(
     policy: &Policy,
     binary: &str,
     args: &[String],
     ctx: &Context,
 ) -> PartOutcome {
-    if policy.subcommand_start(binary, args).is_none() {
-        return opaque_default();
+    combine(
+        bash_readings(policy, binary, args)
+            .iter()
+            .map(|reading| match reading {
+                BashReading::Words { args, start } => {
+                    decide_bash_reading(policy, binary, args, *start, ctx)
+                }
+                BashReading::Opaque => opaque_default(),
+            })
+            .collect(),
+    )
+}
+
+/// One reading of a Bash invocation (#1298).
+pub(crate) enum BashReading<'a> {
+    /// The words route matches families on, with the index where their
+    /// subcommand begins.
+    Words {
+        args: Cow<'a, [String]>,
+        start: usize,
+    },
+    /// Words route cannot read, proxied opaque.
+    Opaque,
+}
+
+/// Every reading route decides a Bash invocation under. An undeclared global
+/// option (#1294) leaves only [`BashReading::Opaque`]. A subcommand word
+/// naming an inline alias (#1298) is read first as the alias's expansion, or
+/// as opaque when route cannot read the alias, then as typed. Shared by
+/// [`decide_bash_invocation`] and the lookup pre-pass ([`crate::lookups`]) so
+/// the two read the same commands.
+pub(crate) fn bash_readings<'a>(
+    policy: &Policy,
+    binary: &str,
+    args: &'a [String],
+) -> Vec<BashReading<'a>> {
+    let Some(start) = policy.subcommand_start(binary, args) else {
+        return vec![BashReading::Opaque];
+    };
+    let typed = BashReading::Words {
+        args: Cow::Borrowed(args),
+        start,
+    };
+    match policy.inline_alias_reading(binary, args, start) {
+        AliasReading::NotAlias => vec![typed],
+        AliasReading::Opaque => vec![BashReading::Opaque, typed],
+        AliasReading::Expanded {
+            args: expanded,
+            start: expanded_start,
+        } => vec![
+            BashReading::Words {
+                args: Cow::Owned(expanded),
+                start: expanded_start,
+            },
+            typed,
+        ],
     }
-    let Some(selection) = select_bash_rule(policy, binary, args) else {
+}
+
+/// Decides one reading of a Bash invocation: `args` with its subcommand
+/// beginning at `start`.
+fn decide_bash_reading(
+    policy: &Policy,
+    binary: &str,
+    args: &[String],
+    start: usize,
+    ctx: &Context,
+) -> PartOutcome {
+    let Some(selection) = select_bash_rule(policy, binary, args, start) else {
         return allow_default();
     };
 
@@ -105,23 +178,23 @@ pub(crate) struct BashSelection<'a> {
     pub(crate) governed: Vec<usize>,
 }
 
-/// The rule that governs one Bash invocation, with the verb its family names.
-/// `None` when no family matches the binary (an unmanaged command), or when
-/// its global options cannot be read (#1294), which
-/// [`decide_bash_invocation`] proxies opaque before selecting; a selection
-/// whose `rule` is `None` when a family matches but no rule in it resolves
-/// the arguments. The one rule-selection step for Bash, shared by
-/// [`decide_bash_invocation`] and the lookup pre-pass ([`crate::lookups`]) so
-/// the two cannot disagree about which rule applies.
+/// The rule that governs one reading of a Bash invocation (see
+/// [`bash_readings`]), with the verb its family names; `start` is where the
+/// reading's subcommand begins. `None` when no family matches the binary (an
+/// unmanaged command); a selection whose `rule` is `None` when a family
+/// matches but no rule in it resolves the arguments. The one rule-selection
+/// step for Bash, shared by [`decide_bash_invocation`] and the lookup
+/// pre-pass ([`crate::lookups`]) so the two cannot disagree about which rule
+/// applies.
 pub(crate) fn select_bash_rule<'a>(
     policy: &'a Policy,
     binary: &str,
     args: &[String],
+    start: usize,
 ) -> Option<BashSelection<'a>> {
     let ToolRules::Bash { families } = policy.tools.get(&ToolKind::Bash)? else {
         return None;
     };
-    let start = policy.subcommand_start(binary, args)?;
     let (verb, family, governed) = most_specific_family(families, binary, args, start)?;
     let rule = family
         .rules
@@ -1069,6 +1142,62 @@ mod tests {
         let outcome = decide(&p, "git", &["-C", "/tmp", "push"]);
         assert!(deny_reason(&outcome).contains("`-C`"));
         assert_eq!(outcome.verb.as_deref(), Some("push"));
+    }
+
+    /// A `git push` deny family and a `git status` allow family, with git's
+    /// inline alias declared (#1298).
+    const INLINE_ALIAS: &str = r#"{
+        "global_options": [{"binary": "git", "value_options": ["-c", "--config-env"],
+            "inline_alias": {"options": ["-c"], "prefix": "alias."}}],
+        "tools": {"Bash": {"families": {
+            "git push": {"rules": [
+                {"id": "push", "outcome": {"kind": "deny", "reason": "no push", "instead": "x"}}]},
+            "git status": {"rules": [
+                {"id": "status", "outcome": {"kind": "allow", "note": "status"}}]}
+        }}}
+    }"#;
+
+    #[test]
+    fn an_inline_alias_is_decided_by_the_stricter_of_its_two_readings() {
+        let p = policy(INLINE_ALIAS);
+        // The alias's reading decides and names its verb.
+        let aliased = decide(&p, "git", &["-c", "alias.p=push", "p", "origin"]);
+        assert!(matches!(aliased.decision, Decision::Deny(_)));
+        assert_eq!(aliased.verb.as_deref(), Some("push"));
+        // A builtin name keeps its own reading: git never runs an alias that
+        // shares a builtin's name.
+        let builtin = decide(&p, "git", &["-c", "alias.push=status", "push"]);
+        assert!(matches!(builtin.decision, Decision::Deny(_)));
+        assert_eq!(builtin.verb.as_deref(), Some("push"));
+        // A tie goes to the alias's reading.
+        let status = decide(&p, "git", &["-c", "alias.s=status", "s"]);
+        assert_eq!(
+            status.decision,
+            Decision::Allow {
+                note: Some("status".to_string())
+            }
+        );
+        assert_eq!(status.verb.as_deref(), Some("status"));
+        // An alias route cannot read is proxied opaque, never allowed.
+        for words in [
+            vec!["-c", "alias.p=!git push", "p"],
+            vec!["--config-env=alias.p=X", "p"],
+        ] {
+            let outcome = decide(&p, "git", &words);
+            assert_eq!(
+                outcome.decision,
+                Decision::Proxy {
+                    reason: ProxyReason::Opaque
+                },
+                "{words:?}"
+            );
+            assert_eq!(outcome.deciding, Deciding::Default, "{words:?}");
+        }
+        // An unreadable alias on a builtin name keeps the builtin's reading.
+        assert!(matches!(
+            decide(&p, "git", &["-c", "alias.push=!x", "push"]).decision,
+            Decision::Deny(_)
+        ));
     }
 
     #[test]
