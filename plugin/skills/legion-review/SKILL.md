@@ -36,9 +36,10 @@ without guessing.
    check the available-agents list if the namespaced form does not resolve), one per
    dimension, each given the PR number, branch, issue criteria, and its single focus:
    - `spec`: acceptance-criteria-vs-diff, scope creep, claims the diff does not implement
-   - `correctness`: error handling, silent failures, edge cases, concurrency
+   - `correctness`: error handling, silent failures, and edge cases the issue names or the
+     change introduces
    - `quality`: repo CLAUDE.md invariants, idioms, test coverage and quality
-   - `security`: injection, unchecked input, secrets, shell quoting
+   - `security`: injection, unchecked input, secrets, shell quoting -- in code the diff adds
 
    For a small PR (docs-only, or under ~100 changed lines), one combined agent covering all
    dimensions is acceptable -- say so in the report.
@@ -116,11 +117,12 @@ without guessing.
 ## Findings discipline
 
 Inherited from the legion-review agent definition and non-negotiable: every finding cites
-file:line; claims the diff does not implement are HIGH; report every finding you have,
-including the low-severity and the uncertain ones, with a severity and a confidence
-attached, because filtering is verify's stage and it cannot weigh what you dropped; no
-style arguments beyond the repo's own CLAUDE.md and lint gates; no code is written or
-fixed by this skill -- the fix loop belongs to the implementer.
+file:line; claims the diff does not implement are HIGH; a finding is only what the agent
+definition lists -- the issue unmet, a false PR claim, broken existing behavior, a hard-rule
+violation, or a demonstrated defect in a case the issue covers or the change introduces;
+a constructed case outside the issue is a one-line note, never a finding, never a HIGH, and
+never a new issue; no style arguments beyond the repo's own CLAUDE.md and lint gates; no
+code is written or fixed by this skill -- the fix loop belongs to the implementer.
 
 ## You review conformance, not design
 
@@ -142,9 +144,9 @@ face: it ships requirements nobody specified, which is the failure this pipeline
 stop.
 
 If you believe the authority itself is genuinely wrong -- the spec or the issue, not to your
-taste but wrong -- that is the rare case, call it 1%. Halt and escalate to the operator. A
-spec problem goes back through the design process; an issue problem goes back to the operator.
-Neither goes into this diff.
+taste but wrong -- that is the rare case, call it 1%. Say so in one line under Notes and keep
+reviewing against the authority as written. It does not block the PR and it does not go into
+this diff. A choice already recorded with a reason is not a request for a ruling.
 
 ## Relationship to the other gates
 
