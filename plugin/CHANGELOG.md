@@ -1,5 +1,259 @@
 # Legion Changelog
 
+## 0.42.0
+
+The one-router release. The twelve PreToolUse command hooks are gone. One hook,
+`plugin/hooks/legion-cmd.sh` (`legion cmd-check --hook`), is now registered for every tool
+kind the shipped policy governs. Every Bash, search, read, write, edit, agent-spawn and web
+call receives its Decision from the legion-cmd router reading `plugin/legion-cmd/policy.json`.
+The pieces the cutover needs land in this release as well. A seven-entry built-in no-go
+list is refused before any policy entry. `legion cmd confirm` answers an ask. Incidents are
+recorded in `cmd-incidents.jsonl`. Applied rewrites become predictions, witnessed from the
+session transcript. The shipped policy accounts for the seven Bash hooks, and
+`legion cmd-check` gains an operator mode that shows what route decides for a command
+without running it. A run of routing fixes closes paths where a real command fell through
+to the allow default (wrapper arguments, runner options and selectors, git global options,
+inline git aliases) or where a rewrite would have dropped part of what was typed. Outside
+legion-cmd, recall treats query text as text, concurrent opens of a fresh store no longer
+race the migration chain, and prediction emitters tag their issue. One guard is not in this
+release: the retired `no-direct-db.sh` denied `sqlite3` and `cp` against the legion store by
+any path. The policy's argument predicates compare whole arguments, so a bare `legion.db`
+argument to `sqlite3` is denied, but `sqlite3` or `cp` against a path ending in the store
+file reaches allow. That guard is #1311.
+
+Minor release: an architectural shift in how legion's Claude-layer enforcement runs (twelve
+shell hooks replaced by one router), new command surface (`legion cmd confirm`, the
+`legion cmd-check` operator mode, `legion cmd-check --deny-patterns`), and a schema
+migration. The migration adds the node-local `cmd_confirmations` table (not on the sync
+wire) with the partial index `idx_cmd_confirmations_session`. It also begins stamping
+`PRAGMA user_version` (`SCHEMA_VERSION = 2`): a store stamped at the current version skips
+the create-and-migrate chain on open, and an older or unstamped store runs it once under a
+write lock. No existing table or column changes. Plugin setup now also merges deny
+patterns into the user's `~/.claude/settings.json` (see the no-go bullet).
+
+### New
+
+- **The legion-cmd cutover: one PreToolUse hook replaces twelve** (PR #1312, #1236).
+  `plugin/hooks/hooks.json` registers `bash ${CLAUDE_PLUGIN_ROOT}/hooks/legion-cmd.sh` once,
+  on the matcher `Bash|Grep|Glob|Read|Write|Edit|MultiEdit|Agent|Task|WebFetch|WebSearch`,
+  with a 12 s timeout. That is strictly above the 7000 ms `route.deadline_ms` and the
+  script's own 9 s kill, so the adapter's deadline deny fires before the harness can time
+  the hook out. No PostToolUse entry is registered; rewrite predictions are witnessed inside
+  the PreToolUse adapter (PR #1284 below). The twelve command hooks and their test suites are
+  deleted (listed under Removed). The per-guard audit table in `plugin/hooks/README.md` keeps
+  each retired hook's row and names the policy rules that now decide that class of command.
+  Where route and a retired hook disagree, the case is a row in
+  `crates/legion-cmd/tests/fixtures/hook_cases.json` and route's Decision stands; the
+  fixture stands at 231 rows and 96 disagreements. Because route parses with brush-parser,
+  a `|`, `&&` or `$(...)` inside a quoted argument is part of that argument, so
+  `legion push --help | head -20` and a `legion recall --context "... git push ..."` are no
+  longer refused as compound commands that mention push. Three consequences of the cutover
+  are visible to an agent. First, the shipped policy builds no Bash rewrite today: every
+  Bash rewrite rule declares translatable arguments, and the adapter refuses those (PR
+  #1274 below). So `git push`, `git commit`, `gh pr view` and the other managed gh verbs are
+  denied with the legion command to run instead, where the old hooks rewrote them. The
+  only rewrite built is the Explore `subagent_type` patch on Agent and Task. Second, a
+  `grep` of a harness tool-results file, which `pre-bash-grep.sh` let through after PR #1273
+  (#1264), is denied by route and pointed at `legion sym etc find-content`. Third, the
+  store-by-path guard from `no-direct-db.sh` is not carried over; it is #1311. New tests
+  assert that the `hooks.json` matcher set equals the policy's tool kinds, that the timeout
+  exceeds `route.deadline_ms`, and that the retired scripts are gone. A regression test
+  covers a confirmed ask beside a rewrite in one compound command: it gets the compound
+  deny and the confirmation stays unused. `test-legion-cmd.sh` runs the registered command
+  line for every tool kind with the binary present and absent.
+
+- **The no-go list, `legion cmd confirm`, and incident records** (PR #1283, #1237). The
+  no-go list (`crates/legion-cmd/src/nogo.rs`) holds seven built-in entries: `rm -rf` of `/`
+  or home, `mkfs` on a device, `dd` onto a disk device, the fork bomb, recursive
+  `chmod`/`chown` of `/`, a forced `git push` to main or master, and a `+` refspec whose
+  destination is main or master (`+feature:main` matches, `+main:backup` does not). Entries
+  match parsed invocations, never command text. Flag-order variants and every wrapper and
+  interpreter the shipped policy declares (sudo, env, timeout, xargs, `sh -c` and the rest)
+  therefore hit the same entry. Route checks the list before any policy entry and before the
+  empty-policy deny. A match is a fixed deny that ignores confirmations and every other
+  entry. The wrapper resolution comes from the shipped policy embedded in the binary, so the
+  list holds when no policy file is configured or the configured one cannot be read. A
+  policy's `no_go` array adds entries and cannot remove or weaken a built-in.
+  `legion cmd confirm --reason <why> -- '<command>'` stores a one-time confirmation bound to
+  the session. It is live for 10 minutes and keyed by the command's parsed form, so
+  whitespace and quoting do not change the key. The adapter reads the session's live
+  confirmations, route answers the matching ask, and the adapter uses the confirmation up.
+  The command is one quoted argument taken verbatim; more than one word exits 2 and writes
+  nothing. Confirming a no-go command exits 1 and records the attempt as a no-go hit. No-go
+  hits, asks, confirmations and dropped asks are appended to `cmd-incidents.jsonl` beside
+  `bypass.jsonl`, and a record that cannot be written refuses the command. The first no-go
+  hit per session and entry posts an informational signal from `legion-cmd` to `legion`.
+  `legion cmd-check --deny-patterns` prints the built-in entries' `permissions.deny`
+  patterns as a JSON array. Plugin setup (`setup-binary.sh` through
+  `hooks/lib/deny-mirror.sh`) merges them into `~/.claude/settings.json`. The merge only
+  adds missing patterns and keeps every other key and the operator's order. It writes
+  atomically, through a symlinked file to its target, skips the write when nothing is
+  missing, and leaves a file that is not valid JSON untouched. The `rm -rf /*` form has no
+  pattern because the harness reads `*` as a wildcard.
+
+- **`legion cmd-check` operator mode: route's decision for any command, without running
+  it** (PR #1280, #1230). `legion cmd-check [--tool T] -- '<command>'`, or
+  `--tool T --input <JSON>` for a non-Bash tool, prints the Decision arm and its reason,
+  the proxy reason or the deny's command to run instead, the extracted facts, the built
+  replacement for a rewrite, and the elapsed time. `--json` prints the same report, and
+  `--policy <path>` tests a policy edit before it ships. It runs the hook mode's own core
+  (policy load, lookup pre-pass, route under the deadline, replacement build). An overrun,
+  unreadable policy, failed lookup or panic is therefore reported as the deny the hook
+  would send, with exit 0. The command is exactly one quoted argument used as typed; more
+  than one word after `--` exits 2, because argv rebuilt into shell text cannot reliably
+  reproduce what was typed. Hook output is unchanged.
+
+- **Rewrites are predictions, witnessed from the session transcript** (PR #1284, #1272).
+  When the adapter applies a rewrite it emits one `legion.cmd` prediction fingerprinted by
+  the call's `tool_use_id`, carrying the command as issued and the command constructed. Each
+  adapter run witnesses this session's emitted `legion.cmd` predictions whose `tool_result`
+  now appears in the transcript named by the payload's `transcript_path`. `is_error` true
+  is failed, a result without an error is worked, and no result yet stays emitted. A
+  backgrounded call is emitted but never witnessed. The witness pass runs on a worker thread
+  beside the decision within the one route deadline and never changes the response; a pass
+  still running when the deadline expires is abandoned and its unreached predictions stay
+  emitted. `usage.rs` gains `tool_result_outcomes` and uncertainty storage gains
+  `emitted_for_session`. There is no new table.
+
+- **The shipped policy accounts for the seven Bash hooks** (PR #1275, #1232). `policy.json`
+  gains Bash families for gh, git, `sqlite3`, `ls` and the searches. For gh, `pr view`,
+  `pr checks` and `issue view` are rewrite rules with declared translatable arguments.
+  `pr list` and `issue list` are denies naming `legion pr list --repo <repo>` and
+  `legion issue list --repo <repo>`, since those targets need `--repo`, and the rest are
+  denied. `git push` and `git commit` are rewrite rules to `legion push` and
+  `legion commit`. `sqlite3` over `legion.db` is denied, and `ls` is allowed with a sym
+  note. The content and filename searches are covered: egrep, fgrep, ag, ack, `git grep`,
+  the zgrep family, find, fd and `git ls-files`. Interpreter one-liners that walk, glob or
+  shell out to grep route to sym through new sym jobs. `hook_cases.json` gains a row per
+  command class of each Bash hook, and `hook_parity.rs` a floor test per hook.
+
+- **Prediction emitters pass the issue reference** (PR #1306, #1279). The TaskCreate hook
+  (`uncertainty-emit-on-task.sh`) tags its prediction with `--issue` when the task names
+  exactly one issue: an explicit `owner/repo#N`, or a bare `#N` resolved against the cwd's
+  GitHub origin. Ambiguous or near-miss references emit untagged, as before. The
+  `legion pr` write-check gate passes its issue through `parse_issue_ref`; a malformed
+  work-source value emits untagged with a warning. The quality gates know only a branch
+  and pass none. `issue-writer` and `sd-write-spec` pass `--issue` instead of naming the
+  issue in prediction text.
+
+- **`legion-build-to-spec` skill** (PR #1305, #1304). An orchestrator gate applied before a
+  brief, an issue create or edit, a finding disposition, or a statement of what the spec
+  requires. Every behavior claim quotes the spec text it comes from. No mechanism the spec
+  does not name goes into a brief or issue. Acceptance text is frozen once a build starts,
+  and new facts go in an issue comment. A refusing gate is reported, not worked around.
+  When reality and the spec disagree in one of the three cases the issue names, the
+  orchestrator files a spec-delta issue for the operator and builds as written or parks.
+
+### Fixed
+
+- **A wrapper's own arguments no longer hide the wrapped command** (PR #1287, #1286).
+  `timeout 5 git push`, `sudo -u x ...`, `stdbuf -oL ...` and `xargs -I{} ...` re-entered the
+  wrapper's own options and operands as the command and fell to the allow default. Each
+  wrapper now declares its valueless options, value-taking options and operand count as
+  policy data, and route consumes them getopt-style before re-entering the rest. Runners
+  such as pnpm are read with options before the subcommand (`pnpm -r exec grep`), and an
+  unexpected subcommand shape (`pnpm -- exec grep`) is claimed and proxied opaque. Words a
+  declaration cannot consume proxy opaque, never allow.
+
+- **Runner aliases and workspace selectors route like their declared form** (PR #1295,
+  #1293). A wrapper entry takes an optional `selectors` list: words that take one following
+  word and belong to the runner. `yarn exec` and `yarn dlx` declare them
+  (`yarn workspace <name> exec`), and `npm x` and `bun x` are wrapper entries carrying the
+  `npm exec` and `bunx` declarations. A selector with no word, or an undeclared option after
+  it, proxies opaque.
+
+- **Git global options are consumed before the subcommand** (PR #1296, #1294).
+  `git -C /tmp push` and `git -c user.name=x commit -m y` left the option's value where the
+  family match expected the subcommand, so they missed `git push` and `git commit` and were
+  allowed. `global_options` in the policy declares a binary's flags and value options, and
+  route consumes them first. An undeclared option before the subcommand proxies opaque.
+  Both examples now reach their rewrite rule, which denies naming `-C` because
+  `legion push` and `legion commit` cannot carry it.
+
+- **An inline git alias routes by what it runs** (PR #1313, #1298). `git -c alias.p=push p`
+  was read as the unmanaged word `p` and allowed. A `global_options` entry declares
+  `inline_alias`; git's is `-c` with the prefix `alias.`. Route reads such a word two ways,
+  as the alias value's words and as the word typed, and takes the stricter Decision. Git
+  never runs an alias that shadows a builtin, and route cannot tell which names are
+  builtins. An alias route cannot read proxies opaque: a shell alias, an empty value, one
+  set through `--config-env`, one git or the shell would still transform, or one naming
+  another inline alias. The lookup pre-pass reads the same two ways.
+
+- **A rewrite that would drop part of the command is refused** (PR #1277, #1276; PR #1282,
+  #1281). A rewrite replaces the whole command with its target. It is kept only when the
+  parse is exactly one simple command whose words are all plain: literal text, quoting,
+  escapes, a tilde or a bare parameter reference. Lists, pipelines, subshells, groups, any
+  substitution, arithmetic, indirect `${!x}` and here-documents get a deny naming the rule
+  and saying the rest would have been dropped. The same refusal applies to an invocation
+  carrying its own redirect or an assignment prefix, and to one inside a redirected
+  subshell, group, function body, wrapper or `sh -c` body. `gh pr list > out.txt` and
+  `GIT_TRACE=1 gh pr list` therefore no longer lose the redirect or the variable.
+  `env gh pr list` and `sh -c 'gh pr list'` still count as one command.
+
+- **A Bash rewrite whose rule declares translatable arguments is refused** (PR #1274,
+  #1267). Route returns Rewrite once every argument is covered by the rule's
+  `translatable`, but `build_replacement` patches in the target's bare text and carries no
+  argument forward. The adapter therefore refuses the replacement, with a deny naming the
+  rule, whenever that rule declares any flag, valued flag or operand. It also refuses a
+  rewrite whose deciding entry names no rewrite rule in the policy.
+
+- **The hook response no longer waits on the store** (PR #1297, #1288). A rewrite's
+  prediction was emitted before the response was written, so a held store write lock
+  could delay the response by up to the 2 s busy timeout. `run_hook` now writes and
+  flushes the response first, then emits and gives the witness pass the rest of its budget.
+  The hook call opens the store once, on a worker bounded by the route deadline, and shares
+  that one handle with the decision's confirmations and incident records and with the
+  prediction. When the store cannot be opened, or not within the deadline, the decision is
+  an immediate deny naming the cause. The witness budget uses `checked_add`, so an
+  out-of-range deadline skips the pass instead of panicking into a deny.
+
+- **Concurrent opens of a fresh store no longer race the migration chain** (PR #1290,
+  #1289). `Database::open` ran every `has_column`-guarded `ALTER` outside any lock, so two
+  opens of a fresh store could fail with "duplicate column name". `init_schema` now runs
+  table creation and every migrate step inside one `BEGIN IMMEDIATE` transaction. It
+  re-reads `PRAGMA user_version` under the lock and stamps it in the same commit. The WAL
+  switch, for which SQLite does not run the busy handler, is retried within the busy
+  timeout. A pinned schema fingerprint test fails on any schema change until
+  `SCHEMA_VERSION` is bumped.
+
+- **Recall treats query text as text** (PR #1310, #1309). Recall context went to
+  Tantivy's QueryParser, which read `word:` as a field and quotes and parentheses as
+  syntax. A URL, a ref like `HEAD:main`, or an unclosed quote or paren failed the whole
+  recall. The query is now built from the text field's own analyzer: a term for a
+  one-token word, a phrase for a multi-token word such as `legion-cmd` or `src/search.rs`,
+  and OR across words. This matches the parser's ranking for plain words, and a test
+  compares ids and scores. Text with no word returns no results. The same build serves
+  recall (BM25 and hybrid), consult and document search.
+
+- **Discovery grounds how a committed direction is built, not whether** (PR #1255, #1254).
+  `sd-intent-review` derives claims to test only from what the intent leaves open:
+  `needs_pressure_test` proposals, unresolved open questions, `cut_or_broken` whys no
+  settled proposal already fixes, and `claims[]` test cards. It never derives them from a
+  settled proposal, a boundary or `what_it_is`. A proposed proposal with no flag is
+  escalated to the operator with a recommended answer, and the step parks for it.
+  `sd-discover` scores only the open claims. It routes an emergent challenge to a committed
+  item as a note to the operator and lands the Discovery at `review`.
+  `sd-service-design` separates the committed direction from the open hypotheses. The
+  three skills move to 0.3.0, 0.2.0 and 0.2.0.
+
+### Changed
+
+- **legion-review reviews the issue, nothing more** (PR #1316, #1315). A finding is now only
+  an unmet acceptance criterion, a false PR claim, broken existing behavior, a CLAUDE.md
+  hard-rule violation, or a defect shown with an input the issue covers or the change
+  introduces. A constructed case outside the issue goes on one unscored Notes line, never
+  into `findings[]` or a new issue. Reflections are context, not requirements. A recorded
+  choice, or a point that needs the operator, is not a finding.
+
+### Removed
+
+- **The twelve command hook scripts and their test suites** (PR #1312, #1236).
+  `no-gh.sh`, `no-direct-db.sh`, `pre-bash-grep.sh`, `no-git-push.sh`, `no-git-commit.sh`,
+  `pre-script-search.sh`, `pre-bash-ls.sh`, `pre-grep.sh`, `pre-read-sym.sh`,
+  `no-local-memory.sh`, `no-harness-explore.sh` and `recall-first.sh`, with their
+  `test-*.sh` suites, are deleted from `plugin/hooks/`. Their `hooks.json` entries are
+  replaced by the single `legion-cmd.sh` registration.
+
 ## 0.41.0
 
 The router-and-witness release. Two lines of work land together. The first rebuilds
