@@ -499,7 +499,8 @@ fn concurrent_hook_processes_on_a_fresh_store_each_record_their_prediction() {
 // -- the response is never held by the store (#1288) --------------------------
 
 /// A rewrite payload: the shipped policy rewrites an Explore spawn, which
-/// needs no lookup, so the store is touched only by the prediction.
+/// needs no lookup, so the only write it makes to the store is the
+/// prediction; the decision only reads the session's confirmations (#1237).
 fn explore_rewrite_payload(tool_use_id: &str) -> Vec<u8> {
     serde_json::json!({
         "tool_name": "Agent",
