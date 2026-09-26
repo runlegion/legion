@@ -132,8 +132,12 @@ fn confidence_for(result: GateResult) -> f64 {
 /// Mapping: surface=legion.gate, feature_key=gate.<skill>, model=agent model,
 /// model_version=legion's own version (so a release that changes rubber-stamp
 /// behavior shows up as a new cohort), fingerprint=skill:commit, confidence by
-/// verdict, payload carrying the gate context.
-fn prediction_input(row: &QualityGateRow) -> UncertaintyResult<PredictionInput> {
+/// verdict, payload carrying the gate context, and `issue_ref` (#1279) when
+/// the recorder knows which issue the gated branch is for.
+fn prediction_input(
+    row: &QualityGateRow,
+    issue_ref: Option<&str>,
+) -> UncertaintyResult<PredictionInput> {
     let payload = serde_json::json!({
         "skill": row.skill,
         "branch": row.branch,
@@ -150,16 +154,21 @@ fn prediction_input(row: &QualityGateRow) -> UncertaintyResult<PredictionInput> 
         claimed_confidence: Confidence::from_f64(confidence_for(row.result))?,
         prediction_payload: payload,
         orphan_after: orphan_after_from_ttl(GATE_ORPHAN_TTL_DAYS),
-        // A gate verdict is keyed on (skill, commit), not an issue.
-        issue_ref: None,
+        // Keyed on (skill, commit) either way; the issue rides along only
+        // when the recorder knows it, so verify can find the verdict (#1279).
+        issue_ref: issue_ref.map(str::to_owned),
     })
 }
 
 /// Emit a gate verdict as an uncertainty prediction. Returns the prediction id
 /// on success. The non-blocking wrapper `emit_gate_trust` is what call sites
 /// use; this inner function returns the Result for tests.
-pub fn emit_gate_prediction(db: &Database, row: &QualityGateRow) -> UncertaintyResult<String> {
-    let prediction = Prediction::new(prediction_input(row)?);
+pub fn emit_gate_prediction(
+    db: &Database,
+    row: &QualityGateRow,
+    issue_ref: Option<&str>,
+) -> UncertaintyResult<String> {
+    let prediction = Prediction::new(prediction_input(row, issue_ref)?);
     db.insert_prediction(&prediction)?;
     Ok(prediction.id)
 }
@@ -192,7 +201,12 @@ fn is_ungrounded_assertion(row: &QualityGateRow) -> bool {
 /// assertion (#780, see `is_ungrounded_assertion`) -- this is the boundary
 /// acceptance criterion #3 names: gate-trust must not consume an
 /// asserted-clean row for a check-gated skill as positive ground truth.
-pub fn emit_gate_trust(db: &Database, row: &QualityGateRow) {
+///
+/// `issue_ref` (`<owner>/<repo>#<n>`, #1279) is the issue the gate was
+/// recorded for, when the recorder knows it; `None` emits as before. A gate
+/// row itself names only a branch, and branch names are not a mapping to
+/// issues, so only a recorder that was handed the issue passes one.
+pub fn emit_gate_trust(db: &Database, row: &QualityGateRow, issue_ref: Option<&str>) {
     if is_ungrounded_assertion(row) {
         eprintln!(
             "[legion] gate-trust: skipping ingestion of an ASSERTED clean verdict for \
@@ -202,7 +216,7 @@ pub fn emit_gate_trust(db: &Database, row: &QualityGateRow) {
         );
         return;
     }
-    if let Err(e) = emit_gate_prediction(db, row) {
+    if let Err(e) = emit_gate_prediction(db, row, issue_ref) {
         eprintln!("[legion] gate-trust emit failed (non-fatal): {e}");
     }
 }
@@ -470,7 +484,8 @@ mod tests {
 
     #[test]
     fn input_maps_the_gate_fields() {
-        let input = prediction_input(&gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+        let input =
+            prediction_input(&gate_row("legion-simplify", GateResult::Clean, 0), None).unwrap();
         assert_eq!(input.surface, "legion.gate");
         assert_eq!(input.feature_key, "gate.legion-simplify");
         assert_eq!(input.input_fingerprint, "legion-simplify:deadbeefcafe");
@@ -485,7 +500,7 @@ mod tests {
     fn emit_inserts_a_retrievable_emitted_prediction() {
         let db = test_db();
         let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let id = emit_gate_prediction(&db, &row).unwrap();
+        let id = emit_gate_prediction(&db, &row, None).unwrap();
         let fetched = db.get_prediction(&id).unwrap().unwrap();
         assert_eq!(fetched.surface, "legion.gate");
         assert_eq!(fetched.state, PredictionState::Emitted);
@@ -503,11 +518,37 @@ mod tests {
         // the branch cannot propagate by construction.
         use crate::uncertainty::types::PredictionState;
         let db = test_db();
-        emit_gate_trust(&db, &gate_row("legion-simplify", GateResult::Clean, 0));
+        emit_gate_trust(
+            &db,
+            &gate_row("legion-simplify", GateResult::Clean, 0),
+            None,
+        );
         let emitted = db
             .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
             .unwrap();
         assert_eq!(emitted, 1, "the wrapper must emit exactly one Emitted row");
+    }
+
+    #[test]
+    fn emit_gate_trust_carries_a_known_issue_and_omits_an_unknown_one() {
+        // #1279: a gate recorded for a known issue is findable by that issue
+        // (verify's lookup); one recorded with no issue carries none.
+        let db = test_db();
+        let row = gate_row("legion-pr-write", GateResult::Clean, 0);
+        emit_gate_trust(&db, &row, Some("runlegion/legion#1279"));
+        emit_gate_trust(&db, &row, None);
+
+        let tagged = db.predictions_for_issue("runlegion/legion#1279").unwrap();
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(
+            tagged[0].issue_ref.as_deref(),
+            Some("runlegion/legion#1279")
+        );
+        assert_eq!(tagged[0].surface, GATE_SURFACE);
+
+        let all = db.list_predictions(Some(GATE_SURFACE), None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.iter().filter(|p| p.issue_ref.is_none()).count(), 1);
     }
 
     // -- #780: gate-trust must not ingest asserted-clean for a check-gated
@@ -589,7 +630,7 @@ mod tests {
             0,
             GateProvenance::Asserted,
         );
-        emit_gate_trust(&db, &row);
+        emit_gate_trust(&db, &row, None);
         let emitted = db
             .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
             .unwrap();
@@ -603,7 +644,11 @@ mod tests {
     fn emit_gate_trust_still_ingests_a_validated_clean_row() {
         use crate::uncertainty::types::PredictionState;
         let db = test_db();
-        emit_gate_trust(&db, &gate_row("legion-simplify", GateResult::Clean, 0));
+        emit_gate_trust(
+            &db,
+            &gate_row("legion-simplify", GateResult::Clean, 0),
+            None,
+        );
         let emitted = db
             .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
             .unwrap();
@@ -614,7 +659,7 @@ mod tests {
     fn witness_issues_marks_simplify_prediction_wrong() {
         let db = test_db();
         let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let id = emit_gate_prediction(&db, &row).unwrap();
+        let id = emit_gate_prediction(&db, &row, None).unwrap();
         // Review caught issues -> the clean verdict was wrong.
         let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
         assert!(
@@ -632,7 +677,7 @@ mod tests {
     fn witness_clean_corroborates_simplify_prediction() {
         let db = test_db();
         let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let id = emit_gate_prediction(&db, &row).unwrap();
+        let id = emit_gate_prediction(&db, &row, None).unwrap();
         // Review clean -> corroborates (weak positive).
         assert!(witness_simplify_from_review(&db, "deadbeefcafe", false).unwrap());
         let fetched = db.get_prediction(&id).unwrap().unwrap();
@@ -646,8 +691,12 @@ mod tests {
         let db = test_db();
         // Simplify recorded ISSUES -> it flagged something, not a rubber-stamp
         // candidate. The witness must skip it even when review finds issues.
-        let id =
-            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Issues, 1)).unwrap();
+        let id = emit_gate_prediction(
+            &db,
+            &gate_row("legion-simplify", GateResult::Issues, 1),
+            None,
+        )
+        .unwrap();
         let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
         assert!(
             !witnessed,
@@ -677,8 +726,8 @@ mod tests {
         // Two runs of the same gate on the same commit -> two Emitted rows,
         // same fingerprint. The witness resolves the latest and leaves the loop
         // closeable; the second witness is a no-op (only one Emitted remains).
-        let _id1 = emit_gate_prediction(&db, &row).unwrap();
-        let _id2 = emit_gate_prediction(&db, &row).unwrap();
+        let _id1 = emit_gate_prediction(&db, &row, None).unwrap();
+        let _id2 = emit_gate_prediction(&db, &row, None).unwrap();
         assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
         // One Emitted row remains; a second witness still finds it.
         assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
@@ -690,8 +739,12 @@ mod tests {
     fn maybe_witness_fires_only_for_review_gate_and_maps_the_verdict() {
         use crate::uncertainty::types::PredictionState;
         let db = test_db();
-        let id =
-            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+        let id = emit_gate_prediction(
+            &db,
+            &gate_row("legion-simplify", GateResult::Clean, 0),
+            None,
+        )
+        .unwrap();
 
         // A non-review gate (pr-write) must NOT witness the simplify prediction.
         // gate_row's commit ("deadbeefcafe") matches the emitted prediction above.
@@ -714,7 +767,7 @@ mod tests {
     fn issues_verdict_emits_low_confidence() {
         let db = test_db();
         let row = gate_row("legion-review", GateResult::Issues, 3);
-        let id = emit_gate_prediction(&db, &row).unwrap();
+        let id = emit_gate_prediction(&db, &row, None).unwrap();
         let fetched = db.get_prediction(&id).unwrap().unwrap();
         assert_eq!(fetched.claimed_confidence.value(), ISSUES_CONFIDENCE);
         assert_eq!(fetched.feature_key, "gate.legion-review");
@@ -725,8 +778,12 @@ mod tests {
     #[test]
     fn external_witness_corroborates_a_clean_verdict() {
         let db = test_db();
-        let id =
-            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+        let id = emit_gate_prediction(
+            &db,
+            &gate_row("legion-simplify", GateResult::Clean, 0),
+            None,
+        )
+        .unwrap();
         let witnessed =
             witness_gate_external(&db, "legion-simplify", "deadbeefcafe", true).unwrap();
         assert_eq!(witnessed, Some(id.clone()));
@@ -740,8 +797,12 @@ mod tests {
     #[test]
     fn external_witness_marks_a_clean_verdict_wrong() {
         let db = test_db();
-        let id =
-            emit_gate_prediction(&db, &gate_row("legion-simplify", GateResult::Clean, 0)).unwrap();
+        let id = emit_gate_prediction(
+            &db,
+            &gate_row("legion-simplify", GateResult::Clean, 0),
+            None,
+        )
+        .unwrap();
         let witnessed =
             witness_gate_external(&db, "legion-simplify", "deadbeefcafe", false).unwrap();
         assert_eq!(witnessed, Some(id.clone()));
@@ -762,8 +823,8 @@ mod tests {
         // verdict means the catch was right -- the diff was NOT actually
         // clean -- which must record as Escalated/0.0, not Shipped/1.0.
         let db = test_db();
-        let id =
-            emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2)).unwrap();
+        let id = emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2), None)
+            .unwrap();
         let witnessed = witness_gate_external(&db, "legion-review", "deadbeefcafe", true).unwrap();
         assert_eq!(
             witnessed,
@@ -782,8 +843,8 @@ mod tests {
         // actually_clean = !correct = true, so this must record as
         // Shipped/1.0, not Escalated/0.0.
         let db = test_db();
-        let id =
-            emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2)).unwrap();
+        let id = emit_gate_prediction(&db, &gate_row("legion-review", GateResult::Issues, 2), None)
+            .unwrap();
         let witnessed = witness_gate_external(&db, "legion-review", "deadbeefcafe", false).unwrap();
         assert_eq!(
             witnessed,
@@ -810,8 +871,8 @@ mod tests {
     fn external_witness_takes_the_latest_emitted_on_rerun() {
         let db = test_db();
         let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let _id1 = emit_gate_prediction(&db, &row).unwrap();
-        let _id2 = emit_gate_prediction(&db, &row).unwrap();
+        let _id1 = emit_gate_prediction(&db, &row, None).unwrap();
+        let _id2 = emit_gate_prediction(&db, &row, None).unwrap();
         assert!(
             witness_gate_external(&db, "legion-simplify", "deadbeefcafe", true)
                 .unwrap()
@@ -841,7 +902,7 @@ mod tests {
         // specifically, so the undercount is measurable rather than asserted.
         let db = test_db();
         let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let id = emit_gate_prediction(&db, &row).unwrap();
+        let id = emit_gate_prediction(&db, &row, None).unwrap();
         let mut prediction = db.get_prediction(&id).unwrap().unwrap();
         let prev_state = prediction.state;
         prediction.orphan("2026-07-08T00:00:00+00:00").unwrap();

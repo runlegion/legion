@@ -420,7 +420,10 @@ fn validate_and_record_pr_write_gate(
         provenance: GateProvenance::Validated,
         base: None,
     })?;
-    crate::gate_trust::emit_gate_trust(database, &row);
+    // This gate was checked against `issue`, so its prediction carries it and
+    // verify finds it by that issue (#1279).
+    let issue_ref: String = format!("{source_repo}#{issue}");
+    crate::gate_trust::emit_gate_trust(database, &row, Some(&issue_ref));
 
     Ok(report)
 }

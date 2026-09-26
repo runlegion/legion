@@ -12,6 +12,9 @@
 # learn a per-(surface, model) reliability curve from these rows even
 # without the richer feature_key dimension.
 #
+# When the task names exactly one issue, the row carries it as issue_ref
+# (--issue, #1279) so legion-verify can find it; otherwise it emits without.
+#
 # Maps task_id -> prediction_id in a per-session JSONL so the witness
 # hook (uncertainty-witness-on-completion.sh) can find the row to update
 # when the task completes.
@@ -98,12 +101,43 @@ fi
 PAYLOAD=$(jq -c -n --arg task_id "$TASK_ID" --arg subject "$SUBJECT" \
   '{task_id: $task_id, subject: $subject}')
 
+# The issue this task is for (#1279), so legion-verify's `predictions
+# --issue` lookup finds the row. A task names an issue as owner/repo#N, or
+# as a bare #N that means the repo it runs in -- resolved against the
+# cwd's GitHub origin. Exactly one distinct issue across subject and
+# description tags the row; none, two, or a bare #N with no GitHub origin
+# leaves the issue unknown and the row emits without --issue, as before.
+#
+# The patterns are deliberately STRICTER than emit's parse_issue_ref: a
+# malformed --issue is a usage error (non-zero, empty stdout), which this
+# hook would read as a failed emit and drop the prediction entirely. A
+# near-miss (legion#12, a/b#12a, a/b/c#3) must fall through to "unknown".
+ORIGIN_REPO=""
+if [ -n "$CWD" ]; then
+  ORIGIN_REPO=$(git -C "$CWD" remote get-url origin 2>/dev/null \
+    | sed -nE 's#^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$#\2#p' \
+    | sed -E 's#\.git$##')
+fi
+ISSUE_REF=$(printf '%s' "$INPUT" | jq -r --arg origin "$ORIGIN_REPO" '
+  ([.tool_input.subject, .tool_input.description] | map(strings) | join("\n")) as $t
+  | [$t | scan("(?<![A-Za-z0-9_./#-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+)(?![A-Za-z0-9_#/])")[0]]
+    + [$t | scan("(?<![A-Za-z0-9_./#-])#([0-9]+)(?![A-Za-z0-9_#/])")[0]
+       | if $origin != "" then "\($origin)#\(.)" else "?#\(.)" end]
+  | unique
+  | if length == 1 and (.[0] | startswith("?") | not) then .[0] else empty end
+' 2>/dev/null)
+ISSUE_ARGS=()
+if [ -n "$ISSUE_REF" ]; then
+  ISSUE_ARGS+=(--issue "$ISSUE_REF")
+fi
+
 EMIT_OUT=$("$LEGION" uncertainty emit \
   --surface "$SURFACE" \
   --feature-key "$FEATURE_KEY" \
   --input-fingerprint "$FINGERPRINT" \
   --session-id "$SESSION_ID" \
   ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
+  ${ISSUE_ARGS[@]+"${ISSUE_ARGS[@]}"} \
   --claimed-confidence "$CLAIMED_CONFIDENCE" \
   --payload "$PAYLOAD" \
   --orphan-ttl-days "$ORPHAN_TTL_DAYS" 2>/dev/null)
