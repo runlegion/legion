@@ -549,22 +549,38 @@ impl Policy {
     }
 
     /// The resolver the no-go check expands a command with (FR-CMD-025): the
-    /// built-in wrappers and shell interpreters first, then this policy's own,
-    /// so a wrapped no-go command is resolved whether or not the policy file
+    /// built-in wrappers and interpreters first, then this policy's own, so a
+    /// wrapped no-go command is resolved whether or not the policy file
     /// declares its wrapper, and a policy declaration of the same binary can
     /// never narrow the built-in one. It carries no rules: only the no-go
     /// check expands with it.
-    pub(crate) fn no_go_resolver(&self) -> Policy {
-        let mut wrappers = nogo::builtin_no_go_wrappers();
-        wrappers.extend(self.wrappers.iter().cloned());
-        let mut interpreters = nogo::builtin_no_go_interpreters();
-        interpreters.extend(self.interpreters.iter().cloned());
-        Policy {
-            wrappers,
-            interpreters,
+    ///
+    /// `None` when this policy's own declarations already begin with every
+    /// built-in one, as the shipped file's do: the resolver would then pick
+    /// the same declaration for every name, so its expansion is the policy's
+    /// own and a second scan would find nothing new.
+    pub(crate) fn no_go_resolver(&self) -> Option<Policy> {
+        let builtin_wrappers = nogo::builtin_no_go_wrappers();
+        let builtin_interpreters = nogo::builtin_no_go_interpreters();
+        if self.wrappers.starts_with(builtin_wrappers)
+            && self.interpreters.starts_with(builtin_interpreters)
+        {
+            return None;
+        }
+        Some(Policy {
+            wrappers: builtin_wrappers
+                .iter()
+                .chain(&self.wrappers)
+                .cloned()
+                .collect(),
+            interpreters: builtin_interpreters
+                .iter()
+                .chain(&self.interpreters)
+                .cloned()
+                .collect(),
             script_carriers: self.script_carriers.clone(),
             ..Policy::default()
-        }
+        })
     }
 
     /// Every no-go entry route checks (FR-CMD-025): the built-in entries

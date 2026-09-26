@@ -134,8 +134,10 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 /// expansion by [`Policy::no_go_resolver`], which resolves the built-in
 /// wrappers and shell interpreters whether or not the policy file declares
 /// them (FR-CMD-025). Either hit refuses, so a policy file can add wrapper
-/// resolution but never take the built-in resolution away. Pure: two scans
-/// of the same string, no I/O (NFR-CMD-001).
+/// resolution but never take the built-in resolution away. The second scan
+/// is skipped when the policy already declares every built-in resolver
+/// first, as the shipped file does. Pure: at most two scans of the same
+/// string, no I/O (NFR-CMD-001).
 fn no_go_hit(
     policy: &Policy,
     command: &str,
@@ -146,7 +148,8 @@ fn no_go_hit(
             .map(|hit| (hit, extract_facts(&expanded.invocations, None)))
     };
     expanded.and_then(hit_in).or_else(|| {
-        let resolved: Expanded = expand_command(&policy.no_go_resolver(), command).ok()?;
+        let resolver: Policy = policy.no_go_resolver()?;
+        let resolved: Expanded = expand_command(&resolver, command).ok()?;
         hit_in(&resolved)
     })
 }
@@ -1366,6 +1369,65 @@ mod tests {
             }
         }
         assert!(missed.is_empty(), "not refused as no-go: {missed:#?}");
+    }
+
+    #[test]
+    fn every_shipped_wrapper_and_shell_interpreter_form_is_refused_with_no_policy() {
+        // FR-CMD-025's wrapper variants are the positions FR-CMD-007
+        // resolves: every wrapper and shell interpreter the shipped policy
+        // declares. Each one, around a built-in no-go, is refused under an
+        // empty policy, where no file declares the wrapper.
+        let shipped: Policy = parse_policy(include_str!("../../../plugin/legion-cmd/policy.json"))
+            .expect("the shipped policy parses");
+        let mut forms: Vec<String> = Vec::new();
+        for wrapper in &shipped.wrappers {
+            let mut words: Vec<String> = vec![wrapper.binary.clone()];
+            words.extend(wrapper.required_subcommand.clone());
+            words.extend(std::iter::repeat_n("5".to_string(), wrapper.operands));
+            forms.push(format!("{} rm -rf /", words.join(" ")));
+            forms.push(format!("{} mkfs.ext4 /dev/sda1", words.join(" ")));
+        }
+        for interpreter in &shipped.interpreters {
+            if interpreter.body == BodyLanguage::Shell {
+                forms.push(format!(
+                    "{} {} 'rm -rf /'",
+                    interpreter.binary, interpreter.flag
+                ));
+            }
+        }
+        // Review reproductions. The device must be an argument route can
+        // see: `echo /dev/sda1 | xargs -I{} mkfs.ext4 {}` hands it over
+        // stdin, and the shipped policy does not refuse that form either.
+        forms.push("timeout 5 mkfs.ext4 /dev/sda1".to_string());
+        forms.push("nohup rm -rf /".to_string());
+        forms.push("echo go | xargs -I{} mkfs.ext4 /dev/sda1".to_string());
+
+        let missed: Vec<&String> = forms
+            .iter()
+            .filter(|command| {
+                !matches!(
+                    route(&Policy::default(), &bash(command), &Context::default()).deciding,
+                    Deciding::NoGo { .. }
+                )
+            })
+            .collect();
+        assert!(missed.is_empty(), "not refused as no-go: {missed:#?}");
+    }
+
+    #[test]
+    fn the_second_no_go_scan_is_skipped_only_when_the_policy_already_resolves_every_builtin() {
+        let shipped: Policy = parse_policy(include_str!("../../../plugin/legion-cmd/policy.json"))
+            .expect("the shipped policy parses");
+        assert!(shipped.no_go_resolver().is_none());
+        assert!(Policy::default().no_go_resolver().is_some());
+        // A narrower sudo declared first would shadow the built-in one, so
+        // the resolver still runs and the wrapped form is still refused.
+        let narrow = policy(r#"{"wrappers": [{"binary": "sudo"}]}"#);
+        assert!(narrow.no_go_resolver().is_some());
+        assert_no_go(
+            &route(&narrow, &bash("sudo -u root rm -rf /"), &Context::default()),
+            "sudo -u root rm -rf /",
+        );
     }
 
     #[test]

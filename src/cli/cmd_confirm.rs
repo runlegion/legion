@@ -245,16 +245,19 @@ mod tests {
         let now = Utc::now();
         // `configured_policy_path()` is None exactly when both are unset.
         let policy: Policy = read_policy(None).expect("no policy configured is not an error");
-        for typed in [
-            "env FOO=bar mkfs.ext4 /dev/sda1",
-            "sudo mkfs.ext4 /dev/sda1",
+        for (typed, want) in [
+            ("env FOO=bar mkfs.ext4 /dev/sda1", "mkfs-device"),
+            ("sudo mkfs.ext4 /dev/sda1", "mkfs-device"),
+            ("timeout 5 mkfs.ext4 /dev/sda1", "mkfs-device"),
+            ("nohup rm -rf /", "rm-recursive-force-root"),
+            ("echo go | xargs -I{} mkfs.ext4 /dev/sda1", "mkfs-device"),
         ] {
             let argv: Vec<String> = words(&[typed]);
             let command: &str = command_arg(&argv).expect("one argument");
             let err = confirm(&request(command), &policy, &db, &log, now)
                 .expect_err("a no-go command is never confirmed");
             match err {
-                ConfirmError::NoGo { entry } => assert_eq!(entry, "mkfs-device", "{typed}"),
+                ConfirmError::NoGo { entry } => assert_eq!(entry, want, "{typed}"),
                 other => panic!("`{typed}` expected NoGo, got {other:?}"),
             }
         }

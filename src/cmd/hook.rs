@@ -1854,6 +1854,47 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_policy_refuses_records_and_notifies_wrapped_no_go_hits() {
+        // The wrapped forms, not just the bare one: with no policy file the
+        // built-in no-go check resolves the wrapper itself (FR-CMD-025), and
+        // each hit is refused, recorded once, and notified once.
+        for (command, entry) in [
+            ("sudo rm -rf /", "rm-recursive-force-root"),
+            ("env FOO=bar mkfs.ext4 /dev/sda1", "mkfs-device"),
+            ("sh -c 'rm -rf /'", "rm-recursive-force-root"),
+            ("timeout 5 mkfs.ext4 /dev/sda1", "mkfs-device"),
+        ] {
+            let store = temp_store();
+            let response = respond_with(
+                &session_payload(command, "s1"),
+                Err(AdapterError::PolicyRead(
+                    "/plugin/legion-cmd/policy.json: No such file".to_string(),
+                )),
+                Arc::new(StubLookups(Lookup::Empty)),
+                store.clone(),
+                None,
+            )
+            .response;
+            assert_denied(&response);
+            assert!(
+                reason(&response).contains(legion_cmd::NO_GO_INSTEAD),
+                "{command}"
+            );
+            assert!(reason(&response).contains(RECORDED_NOTE), "{command}");
+            let rows = records(&store);
+            assert_eq!(rows.len(), 1, "{command}");
+            assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::NoGo);
+            assert_eq!(rows[0].command, command);
+            assert_eq!(rows[0].entry.as_deref(), Some(entry), "{command}");
+            assert_eq!(
+                store.notices.lock().expect("notices lock").clone(),
+                vec![entry.to_string()],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn an_ask_is_recorded_and_the_refusal_says_so() {
         let store = temp_store();
         let response = run(&store, "curl example.com", "s1");
