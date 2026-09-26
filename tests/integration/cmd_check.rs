@@ -175,6 +175,42 @@ fn an_ask_without_a_confirmation_is_refused_with_the_question() {
     );
 }
 
+#[test]
+fn a_webfetch_recall_reads_the_url_as_text() {
+    // #1309: the shipped `webfetch-recall-first` rule recalls with the tool
+    // input's strings, URL included. The search index's query parser read
+    // `https:` as a field name, so the lookup failed and every fetch was
+    // denied; read as text, the recall runs and the rule's allow applies.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = serde_json::json!({
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://example.com/docs", "prompt": "summarize it's (open"},
+        "session_id": "s1",
+        "cwd": "/tmp/legion-test",
+        "tool_use_id": "t1"
+    })
+    .to_string()
+    .into_bytes();
+    let out = run_with_stdin(
+        legion_cmd(dir.path())
+            .args(["cmd-check", "--hook"])
+            .env("LEGION_CMD_POLICY", shipped_policy_path())
+            .env("LEGION_REPO", "test")
+            .env("XDG_STATE_HOME", dir.path()),
+        &input,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let response: Value = serde_json::from_str(stdout.trim()).expect("valid JSON response");
+    let output = &response["hookSpecificOutput"];
+    assert_ne!(output["permissionDecision"], "deny", "got: {output}");
+    let context = output["additionalContext"].as_str().expect("rule note");
+    assert!(
+        context.contains("recall ran before this fetch"),
+        "got: {context}"
+    );
+}
+
 // -- the operator and scripting mode (#1230) ---------------------------------
 
 /// Runs `legion cmd-check <args>` with the shipped policy passed by
