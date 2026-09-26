@@ -152,7 +152,7 @@ pub(crate) enum UncertaintyAction {
         #[arg(long, default_value_t = 30)]
         orphan_ttl_days: u32,
         /// The issue this prediction is about, as owner/repo#N. Optional: a prediction
-        /// with no issue (a gate, an sd insight) stays valid.
+        /// with no issue (a task naming none, an sd insight) stays valid.
         #[arg(long, value_parser = parse_issue_ref)]
         issue: Option<String>,
     },
@@ -387,7 +387,9 @@ fn fmt_i64(v: Option<i64>) -> String {
 /// exit) before `run_uncertainty` is reached, deliberately NOT emit's
 /// non-blocking exit-0 path: a prediction stored under a key verify can never
 /// look up is the orphan this flag exists to end, so it must fail loudly.
-fn parse_issue_ref(raw: &str) -> Result<String, String> {
+/// Shared with `cli::pr`, whose gate-trust emit builds an issue ref in-process
+/// and must hold it to the same form (#1279).
+pub(crate) fn parse_issue_ref(raw: &str) -> Result<String, String> {
     let expected =
         || format!("expected <owner>/<repo>#<number> (e.g. runlegion/legion#1229), got '{raw}'");
     let (path, number) = raw.split_once('#').ok_or_else(expected)?;

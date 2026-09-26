@@ -563,6 +563,181 @@ fn uncertainty_emit_witness_end_to_end_via_hook_against_real_binary() {
     ]));
 }
 
+/// Run the TaskCreate emit hook against the real binary with `payload` on
+/// stdin. The hook always exits 0, so success alone proves nothing; callers
+/// assert on the stored rows.
+#[cfg(unix)]
+fn emit_via_task_hook(data_dir: &std::path::Path, payload: &str) {
+    use std::process::Command;
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let state_dir = data_dir.join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let out = run_with_stdin(
+        Command::new("bash")
+            .arg(manifest.join("plugin/hooks/uncertainty-emit-on-task.sh"))
+            .env("LEGION_DATA_DIR", data_dir)
+            .env("LEGION_BIN", env!("CARGO_BIN_EXE_legion"))
+            .env("CLAUDE_PLUGIN_ROOT", manifest.join("plugin"))
+            .env("XDG_STATE_HOME", &state_dir),
+        payload.as_bytes(),
+    );
+    assert!(
+        out.status.success(),
+        "emit hook should always exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Count stored predictions, all of them or only those carrying `issue`.
+/// `--issue` is the exact-match lookup legion-verify uses, so it is the
+/// observable that matters: `predictions --json` rows do not expose issue_ref.
+#[cfg(unix)]
+fn prediction_count(data_dir: &std::path::Path, issue: Option<&str>) -> usize {
+    let mut cmd = legion_cmd(data_dir);
+    cmd.args(["uncertainty", "predictions", "--json"]);
+    if let Some(issue) = issue {
+        cmd.args(["--issue", issue]);
+    }
+    let stdout = run_ok(&mut cmd);
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+/// Build a TaskCreate PostToolUse payload with the given subject, task id
+/// and cwd.
+#[cfg(unix)]
+fn task_create_payload(subject: &str, task_id: &str, cwd: &std::path::Path) -> String {
+    serde_json::json!({
+        "session_id": "issue-ref",
+        "cwd": cwd,
+        "tool_name": "TaskCreate",
+        "tool_input": {"subject": subject},
+        "tool_response": {"id": task_id},
+    })
+    .to_string()
+}
+
+/// `git init` `dir`, with `origin` set when given, so bare-#N resolution
+/// sees a known remote (or deliberately none) regardless of what encloses
+/// the tempdir.
+#[cfg(unix)]
+fn git_repo(dir: &std::path::Path, origin: Option<&str>) {
+    use std::process::Command;
+
+    std::fs::create_dir_all(dir).unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    if let Some(url) = origin {
+        git(&["remote", "add", "origin", url]);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn task_hook_passes_issue_ref_when_task_names_an_issue() {
+    // #1279: a task naming owner/repo#N emits a prediction carrying that
+    // issue_ref, so `predictions --issue` (legion-verify's lookup) finds it.
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("work");
+    git_repo(&cwd, None);
+    emit_via_task_hook(
+        dir.path(),
+        &task_create_payload("Implement (runlegion/legion#1279).", "task-issue-1", &cwd),
+    );
+    assert_eq!(prediction_count(dir.path(), None), 1);
+    assert_eq!(
+        prediction_count(dir.path(), Some("runlegion/legion#1279")),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn task_hook_emits_without_issue_ref_when_task_names_none() {
+    // #1279: a task naming no issue still emits, without an issue_ref --
+    // including near-misses that are not a well-formed owner/repo#N, which
+    // must never turn into a malformed --issue that drops the prediction,
+    // nor into a truncated ref that tags the row with the wrong issue.
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("work");
+    git_repo(&cwd, Some("git@github.com:runlegion/legion.git"));
+    for (n, subject) in [
+        "Tidy the recall ranking",
+        "Port legion#12 behaviour",
+        "Check a/b#12a and a/b/c#3",
+    ]
+    .iter()
+    .enumerate()
+    {
+        emit_via_task_hook(
+            dir.path(),
+            &task_create_payload(subject, &format!("task-none-{n}"), &cwd),
+        );
+        assert_eq!(prediction_count(dir.path(), None), n + 1, "{subject} emits");
+    }
+    for mis_key in [
+        "runlegion/legion#12",
+        "a/b#12",
+        "b/c#3",
+        "runlegion/legion#3",
+    ] {
+        assert_eq!(prediction_count(dir.path(), Some(mis_key)), 0, "{mis_key}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn task_hook_resolves_bare_issue_number_against_github_origin() {
+    // #1279: a bare #N names an issue in the repo the task runs in, so it
+    // resolves against the cwd's GitHub origin. Two distinct issues, or a
+    // bare #N with no GitHub origin, leave the issue unknown.
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    git_repo(&repo, Some("https://github.com/runlegion/legion.git"));
+    let no_origin = dir.path().join("plain");
+    git_repo(&no_origin, None);
+
+    emit_via_task_hook(
+        dir.path(),
+        &task_create_payload("Implement #1279 emitters", "task-bare-1", &repo),
+    );
+    assert_eq!(
+        prediction_count(dir.path(), Some("runlegion/legion#1279")),
+        1
+    );
+
+    emit_via_task_hook(
+        dir.path(),
+        &task_create_payload("Follow #1279 after #1258", "task-bare-2", &repo),
+    );
+    emit_via_task_hook(
+        dir.path(),
+        &task_create_payload("Implement #1279", "task-bare-3", &no_origin),
+    );
+    assert_eq!(prediction_count(dir.path(), None), 3, "every task emits");
+    assert_eq!(
+        prediction_count(dir.path(), Some("runlegion/legion#1279")),
+        1,
+        "only the single-issue task under a GitHub origin is tagged"
+    );
+    assert_eq!(
+        prediction_count(dir.path(), Some("runlegion/legion#1258")),
+        0
+    );
+}
+
 #[test]
 fn uncertainty_predictions_lists_emitted_rows() {
     // #902: the raw-state read. Empty DB says "no predictions exist";

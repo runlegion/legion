@@ -361,6 +361,12 @@ skill (Instrumentation, "Emit mechanics") and bind here. What is this writer's a
 prediction id with the surface string, since the crit rebuilds the set fingerprint from
 intent id and surface.
 
+**The issue, when there is one.** When this run writes the spec for a known issue -- your
+caller's brief names it as `<owner>/<repo>#<n>` -- add `--issue <owner>/<repo>#<n>` to both
+emits above, so legion-verify finds them by that issue (an exact match on the reference,
+never a search of payload text). A spec written from an intent with no issue behind it
+emits exactly as shown, without `--issue`; never invent an issue to fill the flag.
+
 **Who witnesses, and when.** A prediction nobody witnesses is an orphan and is excluded from
 calibration, so the witness event is named here, not left to be discovered:
 

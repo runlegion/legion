@@ -420,7 +420,20 @@ fn validate_and_record_pr_write_gate(
         provenance: GateProvenance::Validated,
         base: None,
     })?;
-    crate::gate_trust::emit_gate_trust(database, &row);
+    // This gate was checked against `issue`, so its prediction carries it and
+    // verify finds it by that issue (#1279). The ref goes through the same
+    // validator the CLI `--issue` flag does: a malformed watch.toml `github`
+    // value would otherwise store a key verify can never match. Gate trust
+    // is non-blocking, so a bad ref emits untagged with a warning.
+    let issue_ref: Option<String> =
+        match crate::cli::ops::parse_issue_ref(&format!("{source_repo}#{issue}")) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("[legion] gate-trust: emitting the pr-write prediction untagged: {e}");
+                None
+            }
+        };
+    crate::gate_trust::emit_gate_trust(database, &row, issue_ref.as_deref());
 
     Ok(report)
 }

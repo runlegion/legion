@@ -1360,6 +1360,88 @@ fn pr_write_check_passes_substantive_body_and_reports_clean() {
     );
 }
 
+/// Count `legion.gate` predictions, all of them or only those `--issue`
+/// finds -- the exact-match lookup legion-verify uses.
+#[cfg(unix)]
+fn gate_prediction_count(data_dir: &std::path::Path, issue: Option<&str>) -> usize {
+    let mut cmd = legion_cmd(data_dir);
+    cmd.args([
+        "uncertainty",
+        "predictions",
+        "--surface",
+        "legion.gate",
+        "--json",
+    ]);
+    if let Some(issue) = issue {
+        cmd.args(["--issue", issue]);
+    }
+    let stdout = run_ok(&mut cmd);
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+/// #1279: the pr-write gate is checked against a known issue, so its
+/// gate-trust prediction carries `<github>#<issue>` and verify's
+/// `predictions --issue` lookup finds it.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_gate_prediction_carries_the_issue_ref() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+    run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)));
+
+    assert_eq!(gate_prediction_count(data_dir.path(), None), 1);
+    assert_eq!(
+        gate_prediction_count(data_dir.path(), Some("owner/stub#7")),
+        1
+    );
+}
+
+/// #1279: a work-source `github` value that is not `owner/repo` cannot form
+/// a ref verify could look up, so the gate prediction is still emitted but
+/// untagged, with a warning naming why -- never stored under a bad key.
+#[cfg(unix)]
+#[test]
+fn pr_write_check_gate_prediction_is_untagged_when_the_repo_is_malformed() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+    let watch_path = data_dir.path().join("watch.toml");
+    let watch = std::fs::read_to_string(&watch_path)
+        .unwrap()
+        .replace(r#"github = "owner/stub""#, r#"github = "stub-no-owner""#);
+    std::fs::write(&watch_path, watch).unwrap();
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+    let out = run_ok_output(
+        pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("emitting the pr-write prediction untagged"),
+        "{stderr}"
+    );
+    // Still emitted; `stub-no-owner#7` is itself refused by `--issue`, so
+    // the warning above is what shows the row went untagged.
+    assert_eq!(gate_prediction_count(data_dir.path(), None), 1);
+}
+
 /// `legion pr write-check` with a boilerplate body (no mapping section, no
 /// not-done section): exits non-zero and lists the structural gaps.
 #[cfg(unix)]

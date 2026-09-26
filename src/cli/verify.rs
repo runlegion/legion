@@ -362,7 +362,9 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 provenance: GateProvenance::Asserted,
                 base: None,
             })?;
-            emit_gate_trust(&database, &row);
+            // No issue: a quality-gate row names only its branch, and a
+            // branch name is not a mapping to an issue (#1279).
+            emit_gate_trust(&database, &row, None);
             // Phase 2b: a downstream legion-review verdict witnesses the
             // upstream legion-simplify gate prediction for this commit -- review
             // catching issues means simplify's clean verdict was wrong.
@@ -547,7 +549,8 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 provenance: GateProvenance::Validated,
                 base: changed.base.as_deref(),
             })?;
-            emit_gate_trust(&database, &row);
+            // No issue, as in the Record arm: the branch is all this knows.
+            emit_gate_trust(&database, &row, None);
             persist_raw_findings(&database, &row, &raw_findings);
 
             println!(

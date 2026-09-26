@@ -45,12 +45,14 @@ not invent one`. Never fill it in yourself: a prediction is the caller staking t
 calibration, and a scribe-authored prediction deposits fake signal that is worse than none.
 
 On filing, attach the caller's prediction to the created issue via
-`legion uncertainty emit`, naming the issue and the caller as the predicting agent
-(first-class issue tagging lands with #902; until then name the issue in the prediction
-text). Then emit ONE prediction of your own, under your own name: your confidence that
-the issue's criteria cover the traced requirement's intent (or, for untraced defect work,
-that the stated premise is the real premise). That one is yours to stake -- it is a claim
-about YOUR artifact, and verify will witness it against the intent audit.
+`legion uncertainty emit --issue <owner>/<repo>#<n>`, naming the caller as the predicting
+agent. `--issue` is how legion-verify finds the prediction to witness -- an exact match on
+the issue reference, never a search of prediction text -- so pass it on every emit for the
+filed issue. Then emit ONE prediction of your own, under your own name and with the same
+`--issue`: your confidence that the issue's criteria cover the traced requirement's intent
+(or, for untraced defect work, that the stated premise is the real premise). That one is
+yours to stake -- it is a claim about YOUR artifact, and verify will witness it against
+the intent audit.
 
 ## When a spec exists: transcribe and narrow. Never re-derive.
 
