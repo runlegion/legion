@@ -7,7 +7,7 @@ description: |
   one schema-valid Discovery document. Never cuts a claim: a contradicted or unevidenced
   claim is a finding the operator rules on. Parks on a missing corpus or an open question
   rather than guessing. Invoke after sd-intent-review.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -19,6 +19,20 @@ a claim the intent asserted gets CONTRADICTED here when the discourse does not s
 stays contradicted downstream. Losing a claim is not cutting it: this step reports what the
 world says, and the operator decides what the product does about it. It is also the step
 most likely to park, because corpora take hours to build and people take days to answer.
+
+**What this step may and may not decide.** It scores exactly the agenda sd-intent-review
+handed it -- the intent's genuinely-open claims -- and nothing else. It does NOT relitigate
+the operator's committed direction: a `settled` proposal, a `boundary`, and the `what_it_is`
+framing are givens, and Discovery grounds HOW they are designed, never returns a verdict on
+WHETHER they are needed. So an agenda with no need-claims (a fully-committed intent) yields a
+Discovery that grounds design and contradicts nothing -- correct, not empty work. Emergent
+insights still surface (discourse the intent never claimed), and they inform how; but an
+emergent that challenges a committed item (a settled proposal, a boundary, or the
+`what_it_is` framing) is surfaced to the operator as a note, never scored as a contradiction
+of need. Contradiction is reserved for the open claims the agenda names. Before scoring,
+read the intent (`legion document view <intent-id> --json`) for its `settled` proposals,
+`boundaries`, and `what_it_is`, so an emergent that challenges one is recognised and
+routed as a note.
 
 ## Probe the corpus first
 
@@ -111,7 +125,15 @@ For each claim with evidence available:
   `{source, url, score, text}` rows with the speakers' own words in `text`.
 - **Emergent insights:** discourse that keeps returning to something the intent never
   claimed is a finding, not noise. Add it as an insight, `emergent: true`, held to the
-  same evidence rules, with any verdict it earns.
+  same evidence rules, with any verdict it earns. One exception: an emergent that instead
+  CHALLENGES a committed item (a `settled` proposal, a `boundary`, or the `what_it_is`
+  framing) is not added as a scored insight -- the schema has no verdict for "the operator's
+  bet may be wrong," and scoring it `contradicted` would relitigate the committed direction.
+  It goes to the operator as a named note in the discover report, with a recommended ruling
+  and its reasoning (the same "operator gets a recommendation, not a bare question" rule the
+  rest of the pipeline follows), and the Discovery lands at `review` for the ruling even when
+  no scored insight is contradicted. The operator, not this step, decides whether a committed
+  bet moves.
 
 ## The inverse pass (required)
 
@@ -158,15 +180,21 @@ legion document create --doc-type discovery --owner <agent> --surface <surface> 
 product name, not a git repo). The store refuses a schema violation on every path, so a
 refusal here means the payload is wrong, not that the gate is optional. Contradicted claims
 appear in the document as contradicted insights with the rows that argue against them --
-deleting them would erase the finding. A Discovery that carries any contradicted or
-saturated-unevidenced insight lands at `review` and parks for the operator's rulings
-(above); only a Discovery with none of those, past its authoritative pass, lands at `done`.
+deleting them would erase the finding. A Discovery lands at `review` and parks for the
+operator's rulings when it carries any contradicted or saturated-unevidenced insight, OR
+when its report carries a committed-item/boundary challenge note (the emergent exception
+above) -- a note-only Discovery with zero contradicted or saturated-unevidenced insights
+still lands at `review` and parks, exactly like the contradicted case, because the operator
+still owes a ruling. Only a Discovery with none of those, and no challenge note, past its
+authoritative pass, lands at `done`.
 
 **Then emit and witness** (Instrumentation below), once the create returns an id: one
 prediction per insight that carries a verdict, at the authoritative pass only, and a
 witness on each intent-review claim prediction this pass scored. Report the Discovery
-id, every prediction id beside its insight with the claimed confidence, and each claim
-prediction witnessed or left unwitnessed, with why.
+id, every prediction id beside its insight with the claimed confidence, each claim
+prediction witnessed or left unwitnessed, with why, and any committed-item/boundary
+challenge note for the operator (these carry no prediction -- they are decisions the
+operator owes, not verdicts this step stakes).
 
 ## Instrumentation
 
@@ -243,6 +271,10 @@ for no stated reason has skipped a step; say so in the report.
 ## Refuses
 
 - Treating an empty query result as disconfirmation.
+- Returning a verdict on a committed item -- a `settled` proposal, a `boundary`, or the
+  `what_it_is` framing. Discovery grounds how a committed direction is designed; it never
+  decides whether it is needed, and an emergent challenge to a committed item goes to the
+  operator as a report note, never a scored insight.
 - Landing a FINAL Discovery whose supported insights never faced a counter-probe -- the inverse
   pass is a step, not a suggestion. (An orientation draft parks without it; its supported
   insights are provisional.)

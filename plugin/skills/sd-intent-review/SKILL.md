@@ -5,7 +5,7 @@ description: |
   agenda -- candidate services to test and claims to test -- with every item tracing to an
   intent field. Outputs hypotheses to validate against real discourse, never designed
   services. Invoke at the start of a repo's service design, before any artifact exists.
-version: 0.2.0
+version: 0.3.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -17,6 +17,36 @@ the world about -- not services, not artifacts, not statuses. The one failure mo
 matters: over-producing. A reviewed intent that comes back with system responses, real
 versus planned stamps, or merged service definitions has jumped two steps ahead; that is
 service design, and it happens only after the claims are tested.
+
+## What the intent commits, and what it leaves open
+
+Not every statement in an intent is a hypothesis. A `direction.proposals` entry marked
+`settled`, the `what_it_is` framing, and the intent's `boundaries` are the operator's
+committed direction: Discovery informs HOW these are designed, never WHETHER they are
+needed. An intent may say so outright -- one repo's `meta.purpose` reads "every direction
+item is required; Discovery informs how each is designed and does not decide whether it is
+needed." Derive a service or claim to test ONLY from what the intent leaves genuinely open:
+proposals carrying `needs_pressure_test`, the intent's `claims[]` test cards, unresolved
+`open_questions`, and `current_state.cut_or_broken` whys that no settled proposal already
+commits to fixing. A `cut_or_broken` why that is the rationale for a settled proposal is
+committed alongside that proposal -- testing it relitigates the committed fix through
+the `cut_or_broken` door, so it gets no test. Never derive a test from a `boundary`, from
+`what_it_is`, or from a `settled` proposal that carries no `needs_pressure_test` flag.
+
+A proposal has two independent fields (`status: proposed|settled` and a `needs_pressure_test`
+boolean); classify by both, so no combination falls through. `needs_pressure_test: true`
+marks it a hypothesis to test whatever its status -- the operator asked for the test, so this
+wins even on a `settled` proposal. Otherwise a `settled` proposal is committed and gets no
+test, and a `proposed` proposal carrying no flag is UNDECIDED -- neither committed nor a
+stated bet -- so escalate it to the operator as an open direction to resolve (report it under
+`escalations`, step 5), never silently test it or treat it as committed. This first step does
+not read the intent's prose to GUESS a proposal's commitment the way the later `sd-write-spec`
+does; with no discovery evidence in hand yet, it escalates rather than judges -- the two steps
+meet the same schema shape with different licenses by design. An intent whose direction is
+fully committed, with no `claims[]` test cards, yields an
+EMPTY agenda -- that is correct, not a failure, and sd-discover then only grounds how.
+Manufacturing claims against a committed direction is over-producing in its most damaging
+form: it hands the operator's bet to outside discourse to relitigate.
 
 ## Gate: distill the intent first
 
@@ -33,20 +63,28 @@ goes back to its writer, not forward to a review.
 ## Procedure
 
 1. Read the intent in full: `legion document view <intent-id> --json`. The fields that
-   feed the agenda: `what_it_is` (the reason to exist), `direction.becoming` and its
-   proposals, `current_state.cut_or_broken` (each entry's `why` is a claim),
+   feed the agenda: `what_it_is` (the reason to exist -- read for context and the distill
+   gate, never itself an agenda item), `direction.becoming` and its proposals,
+   `current_state.cut_or_broken` (an entry's `why` is a claim only when no settled
+   proposal already commits to fixing it -- see "What the intent commits"),
    `current_state.known_gaps` where present, `open_questions` (unresolved ones ARE agenda
    items), and `evidence` (existing lenses and crawl topics constrain where proof can come
    from).
 
-2. Derive **services_to_test**: for each service the intent implies, one entry
-   `{name, actor, goal, test}` where `test` states what real discourse would confirm the
-   need exists. Lightweight hypotheses only -- no `system_response`, no real/planned
-   status, no merging or splitting of services. If two candidate services blur together,
-   list both; sd-discover's evidence will sort them. A service with two actors names the
-   primary in `actor` and the second inside `goal`.
+2. Derive **services_to_test**: for each genuinely-open service the intent implies (see
+   "What the intent commits" -- a service wholly under settled proposals is committed and
+   gets no test; a service part-committed and part-open gets a test scoped to its open part
+   only), one entry `{name, actor, goal, test}` where `test` states what real discourse
+   would confirm the need exists. Lightweight hypotheses only -- no `system_response`, no
+   real/planned status, no merging or splitting of services. If two candidate services
+   blur together, list both; sd-discover's evidence will sort them. A service with two
+   actors names the primary in `actor` and the second inside `goal`.
 
-3. Derive **claims_to_test**: for each claim the intent asserts or implies (start from its `claims[]` test cards where present), one entry
+3. Derive **claims_to_test**: for each genuinely-open claim (see "What the intent commits";
+   start from `needs_pressure_test` proposals, `current_state.cut_or_broken` whys that no
+   settled proposal already commits to fixing, unresolved `open_questions`, and its
+   `claims[]` test cards where present -- never a settled proposal, a `boundary`, or a
+   `what_it_is` assertion), one entry
    `{claim, who, evidence_target, right_if}` where `evidence_target` names the
    lens (or lens-to-be) and the query that would surface it, and `right_if`
    states what result confirms or kills it, as a comparison sd-discover can run (the
@@ -66,14 +104,18 @@ goes back to its writer, not forward to a review.
    Write each returned prediction id into its entry as `prediction`; the agenda is the
    handoff, and the witness needs the id.
 
-5. Report the agenda to the caller as structured text (services_to_test and
-   claims_to_test, each item with its intent trace, its key, its prediction id, and the
-   claimed confidence). This step writes no legion document;
-   the agenda is working state, and handing it to the next step as a scratch FILE is fine
-   -- a file is not a document, and the prohibition is on store writes, not on writing the
-   agenda down. If the session must stop here, park per the protocol in the
-   sd-service-design skill (Park and resume) with the agenda, prediction ids included, in
-   the anchor text.
+5. Report the agenda to the caller as structured text: **services_to_test** and
+   **claims_to_test** (each item with its intent trace, its key, its prediction id, and the
+   claimed confidence), and **escalations** -- the UNDECIDED proposals (`proposed` and
+   carrying no `needs_pressure_test` flag), each named with the ruling the operator owes and
+   a recommended answer with its reasoning, so the operator can settle it in one line. This
+   step writes no legion document; the agenda is working state, and handing it to the next
+   step as a scratch FILE is fine -- a file is not a document, and the prohibition is on
+   store writes, not on writing the agenda down. When the agenda carries any escalation the
+   direction is not yet fully classified: park per the protocol in the sd-service-design
+   skill (Park and resume) for the operator's rulings before sd-discover runs. If the session
+   must stop here for any reason, park the same way, with the agenda, prediction ids, and
+   escalations included in the anchor text.
 
 ## Instrumentation
 
@@ -127,6 +169,12 @@ exists to prevent. The discover report names each claim left unwitnessed and why
 - Stamping build status: real versus planned is build state and belongs to later steps.
 - Inventing claims the intent neither states nor implies -- an emergent insight is
   sd-discover's to discover from evidence, not this step's to guess.
+- Deriving a service or claim to test from a `boundary`, from `what_it_is`, from a `settled`
+  proposal that carries no `needs_pressure_test` flag, or from a `cut_or_broken` why that a
+  settled proposal already commits to fixing: a committed direction is designed, not
+  relitigated. An all-settled intent with no `claims[]` test cards has an empty agenda.
+- Silently dropping a `proposed` proposal that carries no `needs_pressure_test` flag: it is
+  undecided, so escalate it to the operator, never guess it committed or open.
 - Reviewing an intent that does not exist, does not validate, or does not pass the distill
   gate (above): stop and emit the gaps.
 - Witnessing its own predictions. The review stakes them; sd-discover's verdicts score

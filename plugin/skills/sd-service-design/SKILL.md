@@ -9,7 +9,7 @@ description: |
   reads and writes documents in the legion store by id; a validation gate sits between steps;
   a step that cannot finish parks and resumes instead of guessing. Invoke when a repo starts
   or resumes its service design.
-version: 0.1.0
+version: 0.2.0
 user-invocable: true
 allowed-tools: Bash, Read
 ---
@@ -42,8 +42,16 @@ never hands the gap to the operator.
 
 ## The craft rules
 
-- **Disconfirmable first.** Nothing is asserted that has not been stated as a hypothesis
-  with a disconfirm criterion. The intent review produces claims; sd-discover returns their verdicts; artifacts are drawn only from what survived.
+- **The operator's committed direction is a given; only the open parts are hypotheses.** A
+  `settled` proposal, the `what_it_is` framing, and the intent's `boundaries` are the
+  operator's bet -- Discovery informs HOW they are designed, never WHETHER they are needed
+  (an intent's `meta.purpose` may say so outright). Hypotheses to test come only from the
+  parts the intent leaves open: proposals marked `needs_pressure_test`, the intent's
+  `claims[]` test cards, unresolved `open_questions`, and `cut_or_broken` whys that no
+  settled proposal already commits to fixing. The intent review produces claims from those
+  alone; sd-discover returns their verdicts; and the artifacts are drawn from the committed
+  direction plus whatever survived testing of the open parts. A fully-committed intent is
+  designed straight through, not relitigated.
 - **Evidence lives in the Discovery.** Every statement in a persona, journey, or blueprint
   traces to a Discovery insight or an intent field. No artifact carries evidence of its own.
 - **Emotions are data.** The schemas carry affect as valence numbers (-3 to 3 on journey
@@ -86,8 +94,10 @@ repo's intent document is the root input -- find it with
 stops here: the intent comes first, and writing one is not this pipeline's job).
 
 1. **`sd-intent-review`** -- intent in, research agenda out (services to test, claims to
-   test). No documents written; the agenda is this session's working state and is stored
-   in the park anchor if you stop.
+   test, and any escalations -- UNDECIDED proposals the operator must rule on). No documents
+   written; the agenda is this session's working state and is stored in the park anchor if
+   you stop. When the agenda carries escalations, park for the operator's rulings before
+   sd-discover runs -- the direction is not yet fully classified.
 2. **`sd-discover`** -- agenda in, one schema-valid Discovery document out. This is the
    step that talks to the world (eavesdrop) and the step most likely to park. Expect it to
    take about a day: a fresh corpus supports only an orientation pass, and the
