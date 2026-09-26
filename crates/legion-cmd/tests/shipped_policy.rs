@@ -1,8 +1,8 @@
 //! Three concerns, kept apart so NFR-CMD-001 holds:
 //!
 //! 1. The shipped artifact (`plugin/legion-cmd/policy.json`) parses, is
-//!    non-empty, and declares the names the splitter refuses to hold. This test
-//!    reads the file but never calls `route` -- NFR-CMD-001's "no test of route
+//!    non-empty, and declares the names the splitter refuses to hold. These
+//!    tests read the file at run time but never call `route` -- NFR-CMD-001's "no test of route
 //!    requires a filesystem" is about route, and this validates only the
 //!    artifact.
 //! 2. route reaches every arm over a policy that mirrors the shipped rules,
@@ -10,8 +10,9 @@
 //!    policies from inline JSON strings"), so no test of route touches disk.
 //! 3. The shipped git global-option declaration routes a git command by its
 //!    subcommand's family (#1294). That issue asks for these tests "with the
-//!    shipped policy", so this one section routes over the artifact, as
-//!    `hook_parity.rs` does; route itself still performs no I/O.
+//!    shipped policy", so this one section routes over the artifact, compiled
+//!    in with `include_str!` as `hook_parity.rs` does, so no test of route
+//!    opens a file at run time (NFR-CMD-001).
 
 use std::fs;
 
@@ -19,6 +20,12 @@ use legion_cmd::{
     Context, Deciding, Decision, Policy, ProxyReason, Routed, ToolCall, parse_policy, route,
 };
 
+/// The shipped artifact, embedded at compile time so the route tests over it
+/// need no filesystem (NFR-CMD-001).
+const SHIPPED_POLICY_JSON: &str = include_str!("../../../plugin/legion-cmd/policy.json");
+
+/// Reads the shipped artifact at run time. Only the artifact-validation tests
+/// use it; none of them calls route.
 fn shipped_policy_text() -> String {
     let path = format!(
         "{}/../../plugin/legion-cmd/policy.json",
@@ -297,7 +304,7 @@ fn mirror_policy_routes_a_python_search_one_liner_to_sym() {
     }
 }
 
-// -- git global options over the shipped artifact (#1294) --------------------
+// -- git global options over the compiled-in shipped artifact (#1294) --------
 
 fn shipped_route(policy: &Policy, command: &str) -> Routed {
     route(policy, &bash(command), &Context::default())
@@ -305,7 +312,7 @@ fn shipped_route(policy: &Policy, command: &str) -> Routed {
 
 #[test]
 fn shipped_git_global_options_route_by_the_subcommand_family() {
-    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
     for (command, rule, verb, option) in [
         ("git -C /tmp push", "git-push-to-legion", "push", "-C"),
         (
@@ -348,7 +355,7 @@ fn shipped_git_global_options_route_by_the_subcommand_family() {
 
 #[test]
 fn shipped_git_undeclared_global_option_is_proxied_opaque() {
-    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
     for command in [
         "git --bogus push",
         "git --bogus status",
