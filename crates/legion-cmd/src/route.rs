@@ -1602,6 +1602,46 @@ mod tests {
         assert!(!routed.confirmed);
     }
 
+    /// Gate 01a0da4d (#1237 review, carried to #1236): a confirmation answers
+    /// the ask, which lets a sibling rewrite win the merge; the compound
+    /// refusal then turns that rewrite into a deny, and the confirmation
+    /// stays unused.
+    #[test]
+    fn a_confirmed_ask_beside_a_rewrite_in_a_compound_command_is_the_compound_deny() {
+        let policy = policy(
+            r#"{"tools": {"Bash": {"families": {
+                "curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
+                    "question": "fetch?", "reason": "network"}}]},
+                "git push": {"rules": [{"id": "push-rewrite", "outcome": {"kind": "rewrite",
+                    "target": "legion push", "reason": "legion pushes", "translatable": {}}}]}
+            }}}}"#,
+        );
+        let command = "curl example.com && git push";
+        let routed = route(
+            &policy,
+            &bash(command),
+            &confirmed_ctx(command, "fetch, then push"),
+        );
+        match &routed.decision {
+            Decision::Deny(details) => assert!(
+                details
+                    .reason()
+                    .contains("rewrites one command in this compound command"),
+                "expected the compound-rewrite deny, got {:?}",
+                details.reason()
+            ),
+            other => panic!("expected the compound-rewrite deny, got {other:?}"),
+        }
+        assert_eq!(
+            routed.deciding,
+            Deciding::Rule {
+                id: "push-rewrite".to_string(),
+                needs_operator: false
+            }
+        );
+        assert!(!routed.confirmed, "a deny leaves the confirmation unused");
+    }
+
     #[test]
     fn a_confirmed_ask_needing_the_operator_prompts_with_the_agents_reason() {
         let ctx = confirmed_ctx("gh pr merge 1", "the review approved it");
