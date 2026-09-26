@@ -27,6 +27,33 @@ fn reflect_and_recall_roundtrip() {
     );
 }
 
+/// #1309: recall context is text, not query syntax -- each punctuation
+/// reproduction from the issue returns normally instead of failing in the
+/// search index's query parser.
+#[test]
+fn recall_context_with_punctuation_returns_normally() {
+    let dir = tempfile::tempdir().unwrap();
+
+    run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "test",
+        "--text",
+        "fetch https example com then push HEAD to main",
+    ]));
+
+    for context in ["https://example.com", "HEAD:main", "it's (open", "a \"b"] {
+        run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--context", context]));
+    }
+
+    let stdout =
+        run_ok(legion_cmd(dir.path()).args(["recall", "--repo", "test", "--context", "HEAD:main"]));
+    assert!(
+        stdout.contains("push HEAD to main"),
+        "HEAD:main must match the words head and main, got: {stdout}"
+    );
+}
+
 #[test]
 fn recall_by_domain_filters_correctly() {
     let dir = tempfile::tempdir().unwrap();

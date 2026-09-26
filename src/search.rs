@@ -2,7 +2,7 @@ use std::ops::Bound;
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery};
 use tantivy::schema::{
     DateOptions, DateTimePrecision, Field, IndexRecordOption, STORED, STRING, Schema,
     TextFieldIndexing, TextOptions, Type, Value,
@@ -20,6 +20,12 @@ const WRITER_RETRIES: u32 = 3;
 
 /// Base delay between writer acquisition retries (doubles each attempt).
 const WRITER_RETRY_BASE_MS: u64 = 100;
+
+/// The characters besides whitespace that end a word in Tantivy's query
+/// grammar (tantivy-query-grammar 0.22, `word`). Search text splits into
+/// words at the same places so a word that parsed before #1309 is still one
+/// word -- and a word of several tokens still one phrase.
+const QUERY_WORD_DELIMITERS: &[char] = &[':', '^', '{', '}', '"', '[', ']', '(', ')'];
 
 /// Which store an indexed row came from (#1037). Stamped into the `kind`
 /// field on every write and matched by an exact-term clause on every read
@@ -487,10 +493,9 @@ impl SearchIndex {
 
         let searcher = reader.searcher();
 
-        let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
-        let text_query = query_parser
-            .parse_query(trimmed)
-            .map_err(|e| LegionError::Search(e.to_string()))?;
+        let Some(text_query) = self.text_query(trimmed)? else {
+            return Ok(Vec::new());
+        };
 
         let kind_term = Term::from_field_text(self.kind_field, kind.as_str());
         let kind_query = TermQuery::new(kind_term, IndexRecordOption::Basic);
@@ -535,6 +540,54 @@ impl SearchIndex {
         }
 
         Ok(results)
+    }
+
+    /// Build the BM25 clause for caller text, or `None` when the text holds
+    /// no word.
+    ///
+    /// Recall text is free text (a URL, a ref like `HEAD:main`), never query
+    /// syntax: Tantivy's `QueryParser` reads `word:` as a field name and
+    /// quotes and parentheses as syntax (#1309), and backtracks
+    /// exponentially on unclosed `(` runs. So the parser is not used, but
+    /// its query for plain words is rebuilt to keep their ranking: the text
+    /// splits into words where the parser's grammar splits them
+    /// ([`QUERY_WORD_DELIMITERS`]), each word runs through the `text`
+    /// field's analyzer, a word of one token is a term and a word of
+    /// several (`legion-cmd`, `src/search.rs`) a phrase of them, and the
+    /// words combine as `Should` clauses. What the parser treated as
+    /// operators -- `field:`, quotes, parentheses, a leading `+` or `-`,
+    /// `AND`/`OR`/`NOT` -- is read as text instead. `None` rather than an
+    /// empty clause because the kind and repo filters alone would match
+    /// every row.
+    fn text_query(&self, text: &str) -> Result<Option<Box<dyn Query>>> {
+        let mut analyzer = self
+            .index
+            .tokenizer_for_field(self.text_field)
+            .map_err(|e| LegionError::Search(e.to_string()))?;
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for word in text.split(|c: char| c.is_whitespace() || QUERY_WORD_DELIMITERS.contains(&c)) {
+            let mut terms: Vec<(usize, Term)> = Vec::new();
+            analyzer.token_stream(word).process(&mut |token| {
+                terms.push((
+                    token.position,
+                    Term::from_field_text(self.text_field, &token.text),
+                ));
+            });
+            let clause: Box<dyn Query> = match terms.len() {
+                0 => continue,
+                1 => {
+                    let (_, term) = terms.remove(0);
+                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                }
+                _ => Box::new(PhraseQuery::new_with_offset_and_slop(terms, 0)),
+            };
+            clauses.push((Occur::Should, clause));
+        }
+        // The parser hands back a lone clause bare rather than wrapped.
+        match clauses.len() {
+            0 | 1 => Ok(clauses.pop().map(|(_, clause)| clause)),
+            _ => Ok(Some(Box::new(BooleanQuery::new(clauses)))),
+        }
     }
 
     /// Build a `created_at` range query from `range`, or `None` when `range`
@@ -588,6 +641,7 @@ fn parse_rfc3339_to_tantivy_date(input: &str) -> Result<DateTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tantivy::query::QueryParser;
 
     /// Fixed `created_at` used by tests that do not exercise date
     /// filtering -- any valid RFC3339 timestamp works.
@@ -1291,5 +1345,181 @@ mod tests {
         let results = idx.search_documents("kelex", "mapping rules", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
+    }
+
+    /// Seeds the corpus the #1309 punctuation tests search: one reflection
+    /// whose words each reproduction's text matches once read as text.
+    fn punctuation_index() -> (SearchIndex, tempfile::TempDir) {
+        let (idx, dir) = test_index();
+        idx.add_reflection("refl-url", "legion", "fetch https example com pages", T)
+            .unwrap();
+        idx.add_reflection("refl-head", "legion", "push HEAD to main", T)
+            .unwrap();
+        idx.add_reflection("refl-open", "legion", "the issue is open", T)
+            .unwrap();
+        idx.add_reflection("refl-ab", "legion", "a then b", T)
+            .unwrap();
+        (idx, dir)
+    }
+
+    /// Ids a reflection search in repo `legion` returns for `query`,
+    /// failing the test when the query is refused.
+    fn hit_ids(idx: &SearchIndex, query: &str) -> Vec<String> {
+        let results = idx
+            .search("legion", query, 10, &TimeRange::default())
+            .unwrap_or_else(|e| panic!("query {query:?} must be treated as text: {e}"));
+        results.into_iter().map(|r| r.id).collect()
+    }
+
+    /// #1309: `https:` read as a field name failed with "Field does not
+    /// exist: 'https'".
+    #[test]
+    fn search_treats_url_as_text() {
+        let (idx, _dir) = punctuation_index();
+        let ids = hit_ids(&idx, "https://example.com");
+        assert_eq!(ids.first().map(String::as_str), Some("refl-url"));
+    }
+
+    /// #1309: `HEAD:main` read as a field name failed with "Field does not
+    /// exist: 'HEAD'"; as text it matches the words head and main.
+    #[test]
+    fn search_treats_colon_word_as_text() {
+        let (idx, _dir) = punctuation_index();
+        let ids = hit_ids(&idx, "HEAD:main");
+        assert_eq!(ids.first().map(String::as_str), Some("refl-head"));
+    }
+
+    /// #1309: an apostrophe and an unclosed parenthesis were a syntax error.
+    #[test]
+    fn search_treats_unbalanced_paren_as_text() {
+        let (idx, _dir) = punctuation_index();
+        let ids = hit_ids(&idx, "it's (open");
+        assert_eq!(ids.first().map(String::as_str), Some("refl-open"));
+    }
+
+    /// #1309: an unclosed double quote was a syntax error.
+    #[test]
+    fn search_treats_unclosed_quote_as_text() {
+        let (idx, _dir) = punctuation_index();
+        let ids = hit_ids(&idx, "a \"b");
+        assert_eq!(ids.first().map(String::as_str), Some("refl-ab"));
+    }
+
+    /// Text with no word in it matches nothing, rather than every row the
+    /// repo and kind filters admit.
+    #[test]
+    fn search_punctuation_only_returns_empty() {
+        let (idx, _dir) = punctuation_index();
+        assert!(hit_ids(&idx, "((:\"").is_empty());
+    }
+
+    /// Scores the query parser gave `query` before #1309, under the same
+    /// kind and repo filters `execute_query` applies.
+    fn parser_scores(idx: &SearchIndex, repo: &str, query: &str) -> Vec<(String, f32)> {
+        let reader = idx.index.reader().unwrap();
+        let searcher = reader.searcher();
+        let text_query = QueryParser::for_index(&idx.index, vec![idx.text_field])
+            .parse_query(query)
+            .unwrap();
+        let kind_query = TermQuery::new(
+            Term::from_field_text(idx.kind_field, "reflection"),
+            IndexRecordOption::Basic,
+        );
+        let repo_query = TermQuery::new(
+            Term::from_field_text(idx.repo_field, repo),
+            IndexRecordOption::Basic,
+        );
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (Occur::Must, text_query),
+            (Occur::Must, Box::new(kind_query)),
+            (Occur::Must, Box::new(repo_query)),
+        ];
+        let top = searcher
+            .search(&BooleanQuery::new(clauses), &TopDocs::with_limit(10))
+            .unwrap();
+        top.into_iter()
+            .map(|(score, addr)| {
+                let doc: TantivyDocument = searcher.doc(addr).unwrap();
+                let id = doc.get_first(idx.id_field).unwrap().as_str().unwrap();
+                (id.to_string(), score)
+            })
+            .collect()
+    }
+
+    /// #1309: ranking for plain-word queries is unchanged -- the same ids,
+    /// order, and scores the query parser produced.
+    #[test]
+    fn plain_word_ranking_matches_query_parser() {
+        let (idx, _dir) = test_index();
+        idx.add_reflection("r1", "kelex", "mapping rules are fragile when mapping", T)
+            .unwrap();
+        idx.add_reflection("r2", "kelex", "zod types need mapping rules", T)
+            .unwrap();
+        idx.add_reflection("r3", "kelex", "unions hide complexity in arrays", T)
+            .unwrap();
+        idx.add_reflection("r4", "kelex", "fragile tests break on rules", T)
+            .unwrap();
+        idx.add_reflection("r5", "kelex", "legion cmd routes calls", T)
+            .unwrap();
+        idx.add_reflection("r6", "kelex", "legion binary runs a cmd later unrelated", T)
+            .unwrap();
+        idx.add_reflection("r7", "kelex", "src search rs holds the index", T)
+            .unwrap();
+        idx.add_reflection("r8", "kelex", "search the src tree, then rs files", T)
+            .unwrap();
+
+        for query in [
+            "mapping",
+            "mapping rules",
+            "fragile rules mapping",
+            "rules rules",
+            "legion-cmd",
+            "src/search.rs",
+            "legion-cmd routes",
+            "search.rs rules",
+        ] {
+            let expected = parser_scores(&idx, "kelex", query);
+            let actual: Vec<(String, f32)> = idx
+                .search("kelex", query, 10, &TimeRange::default())
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.id, r.score))
+                .collect();
+            assert!(!expected.is_empty(), "query {query:?} must match something");
+            assert_eq!(actual, expected, "ranking changed for {query:?}");
+        }
+    }
+
+    /// #1309: only query syntax stops failing -- an index that cannot be
+    /// read (its files gone after open) is still an error.
+    #[test]
+    fn search_on_a_missing_index_still_errors() {
+        let (idx, dir) = punctuation_index();
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let err = idx
+            .search("legion", "https://example.com", 10, &TimeRange::default())
+            .err();
+        assert!(
+            matches!(err, Some(LegionError::Search(_))),
+            "a missing index must surface as a search error"
+        );
+    }
+
+    /// A word the analyzer splits into several tokens matches them as a
+    /// phrase, as the query parser did: `legion-cmd` finds "legion cmd",
+    /// not text where the two words appear apart.
+    #[test]
+    fn multi_token_word_matches_as_phrase() {
+        let (idx, _dir) = test_index();
+        idx.add_reflection("adjacent", "legion", "legion cmd routes calls", T)
+            .unwrap();
+        idx.add_reflection(
+            "scattered",
+            "legion",
+            "legion binary runs a cmd later unrelated",
+            T,
+        )
+        .unwrap();
+        assert_eq!(hit_ids(&idx, "legion-cmd"), vec!["adjacent".to_string()]);
     }
 }
