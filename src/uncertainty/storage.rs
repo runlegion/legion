@@ -124,6 +124,22 @@ impl Database {
         }
     }
 
+    /// Every Emitted prediction on `surface` whose payload names `session_id`
+    /// (`prediction_payload.session_id`), oldest first. The legion-cmd
+    /// witness pass (#1272) reads this to find the rewrites its own session
+    /// has not witnessed yet; a surface that does not put `session_id` in its
+    /// payload matches nothing.
+    pub fn emitted_for_session(&self, surface: &str, session_id: &str) -> Result<Vec<Prediction>> {
+        let mut stmt = self.conn.prepare(concat!(
+            select_prediction!(),
+            "WHERE surface = ?1 AND state = 'emitted' AND deleted_at IS NULL \
+                 AND json_extract(prediction_payload, '$.session_id') = ?2 \
+                 ORDER BY created_at ASC, id ASC"
+        ))?;
+        let rows = stmt.query_map(params![surface, session_id], map_prediction_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<Prediction>>>()?)
+    }
+
     /// Persist a prediction whose state has advanced (witness / calibrate /
     /// orphan / retire). UPDATE keyed by id AND a compare-and-swap on
     /// `expected_prev_state`; updated_at is taken from the in-memory row so
