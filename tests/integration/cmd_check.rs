@@ -658,11 +658,13 @@ fn a_held_store_write_lock_never_delays_the_flushed_response() {
 }
 
 #[test]
-fn a_store_open_that_cannot_finish_by_the_deadline_never_holds_the_decision() {
-    // #1288: a fresh, unmigrated store whose write lock another connection
-    // holds; opening it waits on the lock for the store's 2 s busy timeout.
-    // The adapter waits at most the route deadline for the open, then
-    // decides without it: no prediction, no witness pass.
+fn a_store_open_that_cannot_finish_by_the_deadline_denies_naming_it_within_the_deadline() {
+    // #1288, FR-CMD-009: a fresh, unmigrated store whose write lock another
+    // connection holds; opening it waits on the lock for the store's 2 s
+    // busy timeout. The adapter waits at most the route deadline for its one
+    // open, then denies naming it: the decision cannot read confirmations
+    // without the store, and it never waits on the lock a second time. No
+    // prediction, no witness pass.
     let dir = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("state tempdir");
     let policy = shipped_policy_with_deadline(dir.path(), 300);
@@ -677,17 +679,32 @@ fn a_store_open_that_cannot_finish_by_the_deadline_never_holds_the_decision() {
         &policy,
         &explore_rewrite_payload("toolu_unopened"),
     );
-    assert_eq!(
-        run.response["permissionDecision"], "allow",
-        "{}",
-        run.stderr
-    );
-    assert!(run.response.get("updatedInput").is_some());
+    assert_eq!(run.response["permissionDecision"], "deny", "{}", run.stderr);
+    let reason: &str = run.response["permissionDecisionReason"]
+        .as_str()
+        .expect("a deny reason");
     assert!(
-        run.first_line < Duration::from_millis(1500),
+        reason.contains("confirmations: the store could not be opened within 300ms"),
+        "{reason}"
+    );
+    assert!(run.response.get("updatedInput").is_none());
+    // One deadline for the open, then the deny: never the 2 s busy timeout
+    // a second open would wait out, and never a hang.
+    assert!(
+        run.first_line >= Duration::from_millis(300),
+        "the response came after {:?}, before the open's deadline",
+        run.first_line
+    );
+    assert!(
+        run.first_line < Duration::from_millis(1000),
         "the response took {:?}; the store open held the decision past its deadline\nstderr:\n{}",
         run.first_line,
         run.stderr
+    );
+    assert!(
+        run.exited < Duration::from_millis(1500),
+        "the process ran {:?} after a deny",
+        run.exited
     );
 
     lock.execute_batch("ROLLBACK").expect("release the lock");
@@ -722,14 +739,16 @@ fn the_largest_configured_deadline_yields_the_routing_decision() {
 }
 
 #[test]
-fn an_unopenable_store_still_applies_the_decision_and_records_no_prediction() {
-    // #1288: LEGION_DATA_DIR names a regular file, so no store can be opened
-    // under it. The rewrite still applies; the prediction is skipped rather
-    // than attempted.
+fn an_unopenable_store_denies_naming_the_store_error_and_records_no_prediction() {
+    // #1288, FR-CMD-009: LEGION_DATA_DIR names a regular file, so no store
+    // can be opened under it. The decision cannot read confirmations without
+    // the store, so it is a deny naming the store error, returned at once;
+    // the prediction is skipped rather than attempted.
     let dir = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("state tempdir");
     let not_a_dir = dir.path().join("not-a-dir");
     std::fs::write(&not_a_dir, "a file, not a data dir").expect("file written");
+    warm_binary();
 
     let run = timed_hook(
         &not_a_dir,
@@ -737,14 +756,18 @@ fn an_unopenable_store_still_applies_the_decision_and_records_no_prediction() {
         &shipped_policy_path(),
         &explore_rewrite_payload("toolu_unopenable"),
     );
-    assert_eq!(
-        run.response["permissionDecision"], "allow",
-        "{}",
-        run.stderr
-    );
-    assert_eq!(
-        run.response["updatedInput"]["subagent_type"],
-        "legion:legion-explore"
+    assert_eq!(run.response["permissionDecision"], "deny", "{}", run.stderr);
+    let reason: &str = run.response["permissionDecisionReason"]
+        .as_str()
+        .expect("a deny reason");
+    assert!(reason.contains("confirmations: IO error"), "{reason}");
+    assert!(run.response.get("updatedInput").is_none());
+    // The shipped deadline is 7000 ms; a store that fails to open costs
+    // none of it.
+    assert!(
+        run.first_line < Duration::from_millis(1000),
+        "the deny took {:?}",
+        run.first_line
     );
     assert!(
         run.stderr.contains("store open failed"),

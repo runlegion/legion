@@ -69,9 +69,11 @@
 //! only the rest of one `route.deadline_ms`, then is abandoned. Both run
 //! outside the decision, which reads neither: a failure in either is
 //! reported on stderr and never changes the response. The store both use is
-//! opened before the decision, and that open waits at most one
-//! `route.deadline_ms`; an open that has not finished by then skips both
-//! for the call.
+//! opened once, before the decision, and that open waits at most one
+//! `route.deadline_ms`; the decision's confirmation and incident work
+//! (#1237) shares the same handle. An open that fails or has not finished
+//! by then skips both for the call, and the decision, which cannot read
+//! confirmations without the store, is a deny naming why (FR-CMD-009).
 //!
 //! # The repo
 //!
@@ -90,7 +92,7 @@ use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -245,12 +247,19 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The one store connection a hook call opens (#1288): the decision's
+/// confirmation and incident work (#1237) holds it first, then the rewrite
+/// prediction after the response. Only one of them runs at a time, so the
+/// lock is never contended; it exists because the decision runs on its own
+/// worker thread.
+type StoreHandle = Arc<Mutex<Database>>;
+
 /// The work a run leaves for after its response is out: the prediction for
 /// the rewrite it applied, with the store it was opened against, and the
 /// witness pass still running.
 #[derive(Default)]
 struct AfterResponse {
-    prediction: Option<(AppliedRewrite, Database)>,
+    prediction: Option<(AppliedRewrite, StoreHandle)>,
     witness: Option<PendingWitness>,
 }
 
@@ -260,8 +269,11 @@ impl AfterResponse {
     /// takes an unfinished pass along. Neither can change the response,
     /// which is already written.
     fn finish(self) {
-        if let Some((rewrite, db)) = self.prediction {
+        if let Some((rewrite, store)) = self.prediction {
             best_effort("rewrite prediction", || {
+                // A decision that panicked while holding the store denied;
+                // a denied call has no rewrite, so poison is never read here.
+                let db = store.lock().unwrap_or_else(PoisonError::into_inner);
                 prediction::emit_rewrite_prediction(&db, &rewrite)?;
                 Ok(())
             });
@@ -304,22 +316,28 @@ pub(crate) fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 ///
 /// The store is opened once, here, before the pass starts: `Database::open`
 /// runs the migration chain, and two connections migrating a fresh store at
-/// once collide. The emit uses this handle; the pass and the decision's
-/// lookups open their own connections only after it, when migration is done.
-/// The open waits at most one route deadline ([`open_store_within`]); a
-/// store that cannot be opened in that time skips the pass and the emit.
+/// once collide. The decision's confirmation and incident work and the emit
+/// share this one handle; the pass and the decision's lookups open their own
+/// connections only after it, when migration is done. The open waits at
+/// most one route deadline ([`open_store_within`]). A store that cannot be
+/// opened in that time skips the pass and the emit, and the decision, which
+/// needs the store for its confirmations, is a deny naming why
+/// (FR-CMD-009) rather than a second wait on the store.
 fn respond(input: &str, after: &mut AfterResponse) -> Value {
     let policy_text: Result<String, AdapterError> = read_policy_text(None);
     let deadline: Duration = deadline_for(&policy_text);
-    let store: Option<Database> = open_store_within(deadline, crate::cli::util::open_db);
+    let store: Result<StoreHandle, String> =
+        open_store_within(deadline, crate::cli::util::open_db).map(|db| Arc::new(Mutex::new(db)));
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
-    let session_input: Option<String> = store.as_ref().map(|_| input.to_string());
+    let session_input: Option<String> = store.is_ok().then(|| input.to_string());
     let (applied, pending) = respond_beside_witness(
         input,
         deadline,
         policy_text,
         Arc::new(StoreLookups),
-        Arc::new(LocalCmdStore),
+        Arc::new(LocalCmdStore {
+            store: store.clone(),
+        }),
         legion_repo,
         move || match session_input {
             Some(session_input) => witness_session(&session_input),
@@ -327,7 +345,7 @@ fn respond(input: &str, after: &mut AfterResponse) -> Value {
         },
     );
     after.witness = pending;
-    after.prediction = applied.rewrite.zip(store);
+    after.prediction = applied.rewrite.zip(store.ok());
     applied.response
 }
 
@@ -344,40 +362,45 @@ fn deadline_for(policy_text: &Result<String, AdapterError>) -> Duration {
 }
 
 /// Runs `open` on its own worker thread and waits at most `deadline` for the
-/// store (#1288). An open that fails, panics, or has not finished in time is
-/// `None`, reported on stderr, and the decision goes ahead without a store.
-/// An open still running at the deadline is left to finish or not: the
-/// process is one-shot, and it ends the thread.
+/// store (#1288). An open that fails, panics, has not finished in time, or
+/// whose thread ends without a result is an `Err` naming the cause, reported
+/// on stderr here; the caller skips the prediction and the witness pass and
+/// hands the cause to the decision. An open still running at the deadline is
+/// left to finish or not: the process is one-shot, and it ends the thread.
 fn open_store_within(
     deadline: Duration,
     open: impl FnOnce() -> error::Result<Database> + Send + 'static,
-) -> Option<Database> {
-    let (tx, rx) = mpsc::channel::<Option<Database>>();
+) -> Result<Database, String> {
+    let (tx, rx) = mpsc::channel::<Result<Database, String>>();
     let spawned = thread::Builder::new()
         .name("legion-cmd-store-open".to_string())
         .spawn(move || {
-            let mut store: Option<Database> = None;
-            best_effort("store open", || {
-                store = Some(open()?);
-                Ok(())
-            });
-            let _ = tx.send(store);
+            let opened: Result<Database, String> = match panic::catch_unwind(AssertUnwindSafe(open))
+            {
+                Ok(result) => result.map_err(|e| e.to_string()),
+                Err(payload) => Err(format!("panic: {}", panic_message(&payload))),
+            };
+            let _ = tx.send(opened);
         });
-    if let Err(e) = spawned {
-        eprintln!("[legion cmd-check] store open not started: {e}");
-        return None;
+    let opened: Result<Database, String> = match spawned {
+        Err(e) => Err(format!("the store open could not start: {e}")),
+        Ok(_) => match rx.recv_timeout(deadline) {
+            Ok(opened) => opened,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(format!("the store could not be opened within {deadline:?}"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the store open thread ended without a result".to_string())
+            }
+        },
+    };
+    if let Err(cause) = &opened {
+        eprintln!(
+            "[legion cmd-check] store open failed: {cause}; \
+             the prediction and the witness pass are skipped"
+        );
     }
-    match rx.recv_timeout(deadline) {
-        Ok(store) => store,
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            eprintln!(
-                "[legion cmd-check] store open not finished within {deadline:?}; \
-                 the prediction and the witness pass are skipped"
-            );
-            None
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => None,
-    }
+    opened
 }
 
 /// Starts the witness pass on its own worker thread, then runs the decision
@@ -483,8 +506,9 @@ fn best_effort(what: &str, work: impl FnOnce() -> Result<(), Box<dyn std::error:
 /// Where the adapter reads confirmations and writes incident records. A seam
 /// so tests drive the adapter against a temporary store and log.
 trait CmdStore: Send + Sync {
-    /// The local legion store holding the confirmations.
-    fn open(&self) -> error::Result<Database>;
+    /// The local legion store holding the confirmations. An `Err` is the
+    /// deny the decision returns (FR-CMD-009): it names why there is no store.
+    fn open(&self) -> Result<StoreHandle, AdapterError>;
     /// The incident log in legion's local telemetry.
     fn log(&self) -> IncidentLog;
     /// The agent a repo's commands are recorded under.
@@ -493,12 +517,16 @@ trait CmdStore: Send + Sync {
     fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()>;
 }
 
-/// The production store: the node's legion database and telemetry log.
-struct LocalCmdStore;
+/// The production store: the node's legion database, as the hook call's one
+/// open left it (#1288), and its telemetry log. Never opens a second
+/// connection: a failed or timed-out open is already the answer.
+struct LocalCmdStore {
+    store: Result<StoreHandle, String>,
+}
 
 impl CmdStore for LocalCmdStore {
-    fn open(&self) -> error::Result<Database> {
-        crate::cli::util::open_db()
+    fn open(&self) -> Result<StoreHandle, AdapterError> {
+        self.store.clone().map_err(AdapterError::Confirmations)
     }
     fn log(&self) -> IncidentLog {
         IncidentLog::production()
@@ -605,23 +633,23 @@ pub(crate) fn route_call(
         let now: DateTime<Utc> = Utc::now();
         // The hook's confirmation and incident-record work (#1237). Pending
         // drops are written before the adapter's own work (FR-CMD-027).
-        let opened: Option<(SessionWork, Database, IncidentLog)> = match session {
+        let store: Option<(StoreHandle, IncidentLog)> = match &session {
             None => None,
-            Some(work) => {
-                let db: Database = work
-                    .store
-                    .open()
-                    .map_err(|e| AdapterError::Confirmations(e.to_string()))?;
-                let log: IncidentLog = work.store.log();
-                log.record_pending_drops(&|id: &str| was_used(&db, id), now)
-                    .map_err(|e| AdapterError::Record(e.to_string()))?;
-                Some((work, db, log))
-            }
+            Some(work) => Some((work.store.open()?, work.store.log())),
         };
+        // Held for the rest of the decision; released before the rewrite
+        // prediction takes the same handle after the response.
+        let db: Option<MutexGuard<'_, Database>> = store
+            .as_ref()
+            .map(|(handle, _)| handle.lock().unwrap_or_else(PoisonError::into_inner));
+        if let (Some((_, log)), Some(db)) = (&store, &db) {
+            log.record_pending_drops(&|id: &str| was_used(db, id), now)
+                .map_err(|e| AdapterError::Record(e.to_string()))?;
+        }
 
         let mut ctx: Context =
             fetch_context(&worker_policy, &call, repo.clone(), lookups.as_ref())?;
-        if let Some((work, db, _)) = &opened
+        if let (Some(work), Some(db)) = (&session, &db)
             && let Some(session) = &work.session
         {
             ctx.confirmations = live_confirmations(db, session, now)
@@ -629,7 +657,7 @@ pub(crate) fn route_call(
         }
         let routed: Routed = route(&worker_policy, &call, &ctx);
 
-        if let Some((work, db, log)) = opened {
+        if let (Some(work), Some((_, log)), Some(db)) = (session, &store, &db) {
             let repo: String = repo.unwrap_or_default();
             let origin = Origin {
                 command: work.issued,
@@ -638,7 +666,7 @@ pub(crate) fn route_call(
                 session_id: work.session.unwrap_or_default(),
                 cwd: cwd.unwrap_or_default(),
             };
-            record_outcome(&routed, &origin, &db, &log, now, &|record| {
+            record_outcome(&routed, &origin, db, log, now, &|record| {
                 work.store.notify(record)
             })?;
         }
@@ -1234,11 +1262,17 @@ mod tests {
         fn log_path(&self) -> PathBuf {
             self.dir.path().join("cmd-incidents.jsonl")
         }
+        /// A connection of the test's own, to seed or inspect the store.
+        fn db(&self) -> Database {
+            Database::open(&self.db_path()).expect("db")
+        }
     }
 
     impl CmdStore for TempStore {
-        fn open(&self) -> error::Result<Database> {
+        fn open(&self) -> Result<StoreHandle, AdapterError> {
             Database::open(&self.db_path())
+                .map(|db| Arc::new(Mutex::new(db)))
+                .map_err(|e| AdapterError::Confirmations(e.to_string()))
         }
         fn log(&self) -> IncidentLog {
             IncidentLog::at(self.log_path())
@@ -1823,7 +1857,7 @@ mod tests {
     }
 
     fn agent_confirms(store: &TempStore, command: &str, session: &str, at: DateTime<Utc>) {
-        let db = store.open().expect("db");
+        let db = store.db();
         let request = crate::cmd::confirm::ConfirmRequest {
             origin: Origin {
                 command: command.to_string(),
@@ -2055,7 +2089,7 @@ mod tests {
         assert_eq!(asks[0].entry.as_deref(), Some("gh-pr"));
         assert_eq!(asks[0].command, "gh pr merge 7");
         assert_eq!(asks[0].reason.as_deref(), Some("the agent's reason"));
-        let db = store.open().expect("db");
+        let db = store.db();
         let drops = store
             .log()
             .record_pending_drops(
@@ -2089,7 +2123,7 @@ mod tests {
         let store = temp_store();
         agent_confirms(&store, "curl example.com", "s1", Utc::now());
         {
-            let db = store.open().expect("db");
+            let db = store.db();
             db.conn
                 .execute_batch(
                     "CREATE TRIGGER refuse_use BEFORE UPDATE ON cmd_confirmations \
@@ -2107,8 +2141,8 @@ mod tests {
     fn a_confirmation_store_that_cannot_be_read_denies_naming_it() {
         struct BrokenStore(TempStore);
         impl CmdStore for BrokenStore {
-            fn open(&self) -> error::Result<Database> {
-                Err(error::LegionError::Search("db locked".to_string()))
+            fn open(&self) -> Result<StoreHandle, AdapterError> {
+                Err(AdapterError::Confirmations("db locked".to_string()))
             }
             fn log(&self) -> IncidentLog {
                 self.0.log()
@@ -2533,7 +2567,7 @@ mod tests {
         // The decision opens the confirmation store (#1237); migrate it before
         // the clock starts so the timing measures the decision, not setup.
         let store = temp_store();
-        drop(store.open().expect("migrates the store"));
+        drop(store.db());
         let started = Instant::now();
         let (applied, pending) = respond_beside_witness(
             &payload("gh issue list"),
@@ -2623,20 +2657,21 @@ mod tests {
     }
 
     #[test]
-    fn a_store_open_past_the_deadline_is_skipped_at_the_deadline() {
-        // #1288: an open that never finishes costs the decision one
-        // deadline, then the call goes ahead without a store.
+    fn a_store_open_past_the_deadline_gives_up_at_the_deadline_naming_it() {
+        // #1288: an open that never finishes costs the call one deadline,
+        // then the call goes on without a store, knowing why.
         let (_hold, never) = mpsc::channel::<()>();
         let deadline = Duration::from_millis(100);
         let started = Instant::now();
-        let store: Option<Database> = open_store_within(deadline, move || {
+        let store: Result<Database, String> = open_store_within(deadline, move || {
             let _ = never.recv();
             Err(error::LegionError::Search(
                 "released at the test's end".to_string(),
             ))
         });
         let waited: Duration = started.elapsed();
-        assert!(store.is_none(), "an unfinished open yielded a store");
+        let cause: String = store.err().expect("an unfinished open yielded a store");
+        assert!(cause.contains("could not be opened within"), "{cause}");
         assert!(waited >= deadline, "gave up early, after {waited:?}");
         assert!(
             waited < deadline + Duration::from_millis(300),
@@ -2645,13 +2680,18 @@ mod tests {
     }
 
     #[test]
-    fn a_store_open_that_fails_or_panics_is_skipped() {
+    fn a_store_open_that_fails_or_panics_names_the_cause() {
         let failed = open_store_within(Duration::from_secs(5), || {
             Err(error::LegionError::Search("unopenable".to_string()))
         });
-        assert!(failed.is_none());
+        assert!(failed.err().expect("a failed open").contains("unopenable"));
         let panicked = open_store_within(Duration::from_secs(5), || panic!("open panicked"));
-        assert!(panicked.is_none());
+        assert!(
+            panicked
+                .err()
+                .expect("a panicked open")
+                .contains("panic: open panicked")
+        );
     }
 
     #[test]
@@ -2660,7 +2700,7 @@ mod tests {
             Duration::from_secs(5),
             || Ok(crate::db::testutil::test_db()),
         );
-        assert!(store.is_some());
+        assert!(store.is_ok());
     }
 
     #[test]
