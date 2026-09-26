@@ -156,7 +156,8 @@
       "value_options": [
         "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--work-tree", "--namespace",
         "--list-cmds", "--attr-source"
-      ]
+      ],
+      "inline_alias": { "options": ["-c"], "prefix": "alias." }
     }
   ],
   "tools": {

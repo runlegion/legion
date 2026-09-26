@@ -17,7 +17,8 @@
 use std::fs;
 
 use legion_cmd::{
-    Context, Deciding, Decision, Policy, ProxyReason, Routed, ToolCall, parse_policy, route,
+    AliasReading, Context, Deciding, Decision, Policy, ProxyReason, Routed, ToolCall, parse_policy,
+    route, scan,
 };
 
 /// The shipped artifact, embedded at compile time so the route tests over it
@@ -69,7 +70,27 @@ fn mirror_policy() -> Policy {
             {"binary": "python3", "flag": "-c", "body": "foreign"}
         ],
         "script_carriers": [{"binary": "bash"}],
+        "global_options": [
+            {"binary": "git",
+             "flags": ["-p", "--paginate", "-P", "--no-pager", "--bare"],
+             "value_options": ["-C", "-c", "--config-env", "--git-dir", "--work-tree"],
+             "inline_alias": {"options": ["-c"], "prefix": "alias."}}
+        ],
         "tools": {"Bash": {"families": {
+            "git push": {"rules": [
+                {"id": "git-push-to-legion", "outcome": {"kind": "rewrite", "target": "legion push",
+                 "reason": "the audited push path",
+                 "translatable": {"flags": ["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress"]}}}
+            ]},
+            "git commit": {"rules": [
+                {"id": "git-commit-without-message", "predicates": [
+                    {"kind": "arg-absent", "arg": "-m"}, {"kind": "arg-absent", "arg": "--message"},
+                    {"kind": "arg-absent", "arg": "-F"}, {"kind": "arg-absent", "arg": "--file"}],
+                 "outcome": {"kind": "deny", "reason": "opens an editor", "instead": "legion commit"}},
+                {"id": "git-commit-to-legion", "outcome": {"kind": "rewrite", "target": "legion commit",
+                 "reason": "the audited commit path",
+                 "translatable": {"valued_flags": ["-m", "--message", "-F", "--file"]}}}
+            ]},
             "grep": {"rules": [{"id": "grep-to-sym", "outcome": {"kind": "sym", "job": "find-content"}}]},
             "rm": {"rules": [
                 {"id": "rm-recursive-force", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
@@ -396,6 +417,174 @@ fn shipped_git_undeclared_global_option_is_proxied_opaque() {
             Decision::Allow { note: None },
             "`{command}`"
         );
+    }
+}
+
+// -- inline git aliases (#1298) ------------------------------------------------
+
+/// The shipped policy's reading of the subcommand word of the first command
+/// in `command`, parsed by the splitter so quoting is kept as route sees it.
+/// Reads the compiled-in artifact and never calls route (NFR-CMD-001).
+fn shipped_alias_reading(command: &str) -> AliasReading {
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
+    let parsed = scan(command).expect("command parses");
+    let invocation = &parsed.invocations[0];
+    let start = policy
+        .subcommand_start(&invocation.binary, &invocation.args)
+        .unwrap_or_else(|| panic!("`{command}`: the global options are declared"));
+    policy.inline_alias_reading(&invocation.binary, &invocation.args, start)
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_string).collect()
+}
+
+#[test]
+fn shipped_git_inline_alias_reads_the_alias_value_in_place_of_the_subcommand() {
+    for (command, args, start) in [
+        (
+            "git -c alias.p=push p origin main",
+            "-c alias.p=push push origin main",
+            2,
+        ),
+        (
+            "git -c alias.c=commit c -m x",
+            "-c alias.c=commit commit -m x",
+            2,
+        ),
+        ("git -c alias.s=status s", "-c alias.s=status status", 2),
+        // The last definition of a name wins, as in git.
+        (
+            "git -c alias.p=status -c alias.p=push p",
+            "-c alias.p=status -c alias.p=push push",
+            4,
+        ),
+        // Git compares config keys and alias names without regard to case.
+        ("git -c ALIAS.P=push p", "-c ALIAS.P=push push", 2),
+    ] {
+        assert_eq!(
+            shipped_alias_reading(command),
+            AliasReading::Expanded {
+                args: words(args),
+                start
+            },
+            "`{command}`"
+        );
+    }
+    // An alias value of several words, including a global option it brings
+    // in: the subcommand is read after that option.
+    let mut args: Vec<String> = vec!["-c".to_string(), "'alias.p=-p push -u'".to_string()];
+    args.extend(words("-p push -u origin"));
+    assert_eq!(
+        shipped_alias_reading("git -c 'alias.p=-p push -u' p origin"),
+        AliasReading::Expanded { args, start: 3 }
+    );
+}
+
+#[test]
+fn shipped_git_inline_alias_route_cannot_read_is_opaque() {
+    for command in [
+        // A shell alias.
+        "git -c 'alias.p=!git push' p",
+        // A value set from the environment, which route cannot see; last wins.
+        "git --config-env=alias.p=X p",
+        "git -c alias.p=push --config-env=alias.p=X p",
+        // An empty value, or none at all.
+        "git -c alias.p= p",
+        "git -c alias.p p",
+        // An alias naming another inline alias.
+        "git -c alias.p=q -c alias.q=push p",
+        // A value the shell or git would still transform.
+        "git -c alias.p=$X p",
+        "git -c 'alias.p=pu\"sh\"' p",
+        // An option the alias brings in that the declaration does not name.
+        "git -c 'alias.p=--bogus push' p",
+    ] {
+        assert_eq!(
+            shipped_alias_reading(command),
+            AliasReading::Opaque,
+            "`{command}`"
+        );
+    }
+    for command in [
+        "git -c alias.p=push status",
+        "git -c user.name=x p",
+        "git status",
+    ] {
+        assert_eq!(
+            shipped_alias_reading(command),
+            AliasReading::NotAlias,
+            "`{command}`"
+        );
+    }
+}
+
+#[test]
+fn mirror_policy_routes_an_inline_git_alias_by_what_it_runs() {
+    let policy = mirror_policy();
+    for (command, rule, verb) in [
+        (
+            "git -c alias.p=push p origin main",
+            "git-push-to-legion",
+            "push",
+        ),
+        (
+            "git -c alias.c=commit c -m x",
+            "git-commit-to-legion",
+            "commit",
+        ),
+        (
+            "git -c alias.p=status -c alias.p=push p",
+            "git-push-to-legion",
+            "push",
+        ),
+        // Git runs a builtin, never an alias of the same name, and route
+        // cannot tell which names are builtins: the stricter reading holds.
+        (
+            "git -c alias.push=status push",
+            "git-push-to-legion",
+            "push",
+        ),
+    ] {
+        let routed = route(&policy, &bash(command), &Context::default());
+        assert_eq!(
+            routed.deciding,
+            Deciding::Rule {
+                id: rule.to_string(),
+                needs_operator: false
+            },
+            "`{command}`"
+        );
+        assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
+        // The rule rewrites only when every argument translates; `-c` does
+        // not, so it is refused by name (FR-CMD-008).
+        match &routed.decision {
+            Decision::Deny(details) => {
+                assert!(details.reason().contains("`-c`"), "`{command}`")
+            }
+            other => panic!("`{command}` should be denied naming `-c`, got {other:?}"),
+        }
+    }
+    for command in ["git -c alias.s=status s", "git -c alias.p=push status"] {
+        assert_eq!(
+            decide(&policy, command),
+            Decision::Allow { note: None },
+            "`{command}`"
+        );
+    }
+    for command in [
+        "git -c 'alias.p=!git push' p",
+        "git --config-env=alias.p=X p",
+    ] {
+        let routed = route(&policy, &bash(command), &Context::default());
+        assert_eq!(
+            routed.decision,
+            Decision::Proxy {
+                reason: ProxyReason::Opaque
+            },
+            "`{command}`"
+        );
+        assert_eq!(routed.deciding, Deciding::Default, "`{command}`");
     }
 }
 
