@@ -2607,6 +2607,7 @@ mod tests {
                 deadline,
                 policy_text,
                 Arc::new(StubLookups(Lookup::Empty)),
+                temp_store(),
                 None,
                 || Ok(()),
             )
