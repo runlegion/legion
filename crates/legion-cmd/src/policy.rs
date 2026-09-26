@@ -582,22 +582,25 @@ impl Policy {
     /// `None` when this policy's own declarations already begin with every
     /// built-in one, as the shipped file's do: the resolver would then pick
     /// the same declaration for every name, so its expansion is the policy's
-    /// own and a second scan would find nothing new.
+    /// own and a second scan would find nothing new. Also `None` when the
+    /// built-in resolver is unavailable; route refuses every Bash command
+    /// before it gets here in that case.
     pub(crate) fn no_go_resolver(&self) -> Option<Policy> {
-        let builtin_wrappers = nogo::builtin_no_go_wrappers();
-        let builtin_interpreters = nogo::builtin_no_go_interpreters();
-        if self.wrappers.starts_with(builtin_wrappers)
-            && self.interpreters.starts_with(builtin_interpreters)
+        let builtin: &Policy = nogo::builtin_no_go_resolver()?;
+        if self.wrappers.starts_with(&builtin.wrappers)
+            && self.interpreters.starts_with(&builtin.interpreters)
         {
             return None;
         }
         Some(Policy {
-            wrappers: builtin_wrappers
+            wrappers: builtin
+                .wrappers
                 .iter()
                 .chain(&self.wrappers)
                 .cloned()
                 .collect(),
-            interpreters: builtin_interpreters
+            interpreters: builtin
+                .interpreters
                 .iter()
                 .chain(&self.interpreters)
                 .cloned()

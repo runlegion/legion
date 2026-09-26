@@ -19,7 +19,7 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::policy::{BodyLanguage, Interpreter, Wrapper};
+use crate::policy::Policy;
 use crate::splitter::{self, Invocation, Position, ScanError};
 
 /// One no-go entry (FR-CMD-025). It matches on parsed arguments from the
@@ -205,291 +205,34 @@ const DISK_DEVICES: [&str; 8] = [
     "/dev/rdisk",
 ];
 
-/// One built-in wrapper declaration: binary, required subcommand, valueless
-/// options, options taking a value, leading operands, selectors -- the
-/// fields of [`Wrapper`].
-type WrapperRow = (
-    &'static str,
-    Option<&'static str>,
-    &'static [&'static str],
-    &'static [&'static str],
-    usize,
-    &'static [&'static str],
-);
+/// The shipped policy file, embedded at compile time: the one source of the
+/// wrappers and interpreters the built-in no-go check resolves on its own
+/// (FR-CMD-025). The entries hold when the policy file is absent or empty,
+/// and "wrapper variants" are every position FR-CMD-007 resolves, so that
+/// set cannot depend on a file being present at run time.
+const SHIPPED_POLICY: &str = include_str!("../../../plugin/legion-cmd/policy.json");
 
-/// The wrappers the built-in no-go check resolves on its own (FR-CMD-025):
-/// the entries hold when the policy file is absent or empty, and "wrapper
-/// variants" are every position FR-CMD-007 resolves, so the whole set cannot
-/// depend on the file declaring it. One row per wrapper the shipped
-/// `plugin/legion-cmd/policy.json` declares, same declaration, same order;
-/// a test holds the two equal. Only the no-go check uses these; every other
-/// routing decision reads the policy's wrappers alone (FR-CMD-007,
-/// FR-CMD-011).
-const BUILTIN_WRAPPER_ROWS: &[WrapperRow] = &[
-    (
-        "env",
-        None,
-        &[
-            "-",
-            "-i",
-            "--ignore-environment",
-            "-0",
-            "--null",
-            "-v",
-            "--debug",
-        ],
-        &["-u", "--unset", "-C", "--chdir", "-P"],
-        0,
-        &[],
-    ),
-    (
-        "sudo",
-        None,
-        &[
-            "-A",
-            "--askpass",
-            "-b",
-            "--background",
-            "-B",
-            "--bell",
-            "-E",
-            "--preserve-env",
-            "-H",
-            "--set-home",
-            "-k",
-            "--reset-timestamp",
-            "-n",
-            "--non-interactive",
-            "-N",
-            "--no-update",
-            "-P",
-            "--preserve-groups",
-            "-S",
-            "--stdin",
-        ],
-        &[
-            "-u",
-            "--user",
-            "-g",
-            "--group",
-            "-C",
-            "--close-from",
-            "-D",
-            "--chdir",
-            "-p",
-            "--prompt",
-            "-R",
-            "--chroot",
-            "-r",
-            "--role",
-            "-t",
-            "--type",
-            "-T",
-            "--command-timeout",
-            "-U",
-            "--other-user",
-        ],
-        0,
-        &[],
-    ),
-    (
-        "timeout",
-        None,
-        &["--foreground", "--preserve-status", "-v", "--verbose"],
-        &["-k", "--kill-after", "-s", "--signal"],
-        1,
-        &[],
-    ),
-    ("nice", None, &[], &["-n", "--adjustment"], 0, &[]),
-    ("nohup", None, &[], &[], 0, &[]),
-    (
-        "stdbuf",
-        None,
-        &[],
-        &["-i", "--input", "-o", "--output", "-e", "--error"],
-        0,
-        &[],
-    ),
-    (
-        "xargs",
-        None,
-        &[
-            "-0",
-            "--null",
-            "-o",
-            "--open-tty",
-            "-p",
-            "--interactive",
-            "-r",
-            "--no-run-if-empty",
-            "-t",
-            "--verbose",
-            "-x",
-            "--exit",
-            "--show-limits",
-        ],
-        &[
-            "-a",
-            "--arg-file",
-            "-d",
-            "--delimiter",
-            "-E",
-            "-I",
-            "-L",
-            "-n",
-            "--max-args",
-            "-P",
-            "--max-procs",
-            "-s",
-            "--max-chars",
-            "--process-slot-var",
-        ],
-        0,
-        &[],
-    ),
-    ("command", None, &["-p"], &[], 0, &[]),
-    ("exec", None, &["-c", "-l"], &["-a"], 0, &[]),
-    (
-        "npx",
-        None,
-        &["-y", "--yes", "--workspaces", "--include-workspace-root"],
-        &["-p", "--package", "-w", "--workspace"],
-        0,
-        &[],
-    ),
-    (
-        "pnpx",
-        None,
-        &["-s", "--silent"],
-        &["--package", "--allow-build", "--reporter"],
-        0,
-        &[],
-    ),
-    (
-        "bunx",
-        None,
-        &["--bun", "--silent", "--verbose", "--no-install"],
-        &["-p", "--package"],
-        0,
-        &[],
-    ),
-    (
-        "bun",
-        Some("x"),
-        &["--bun", "--silent", "--verbose", "--no-install"],
-        &["-p", "--package"],
-        0,
-        &[],
-    ),
-    (
-        "pnpm",
-        Some("exec"),
-        &[
-            "-r",
-            "--recursive",
-            "--parallel",
-            "--report-summary",
-            "-w",
-            "--workspace-root",
-        ],
-        &["--resume-from", "-C", "--dir", "-F", "--filter"],
-        0,
-        &[],
-    ),
-    (
-        "pnpm",
-        Some("dlx"),
-        &["-s", "--silent"],
-        &["--package", "--allow-build", "--reporter"],
-        0,
-        &[],
-    ),
-    (
-        "npm",
-        Some("exec"),
-        &["-y", "--yes", "--workspaces", "--include-workspace-root"],
-        &["-p", "--package", "-w", "--workspace", "--prefix"],
-        0,
-        &[],
-    ),
-    (
-        "npm",
-        Some("x"),
-        &["-y", "--yes", "--workspaces", "--include-workspace-root"],
-        &["-p", "--package", "-w", "--workspace", "--prefix"],
-        0,
-        &[],
-    ),
-    (
-        "yarn",
-        Some("exec"),
-        &["--silent", "--verbose"],
-        &["--cwd"],
-        0,
-        &["workspace", "workspaces"],
-    ),
-    (
-        "yarn",
-        Some("dlx"),
-        &["-q", "--quiet"],
-        &["-p", "--package"],
-        0,
-        &["workspace", "workspaces"],
-    ),
-];
+/// The embedded policy's wrappers and interpreters, parsed once. Its rules
+/// and no-go entries are dropped: only the no-go check expands with this.
+static BUILTIN_RESOLVER: LazyLock<Option<Policy>> = LazyLock::new(|| resolver_from(SHIPPED_POLICY));
 
-/// The interpreters the built-in no-go check resolves on its own, for the
-/// same reason and under the same test as [`BUILTIN_WRAPPER_ROWS`]: a shell
-/// body is re-entered, a foreign one stays opaque.
-const BUILTIN_INTERPRETER_ROWS: &[(&str, &str, BodyLanguage)] = &[
-    ("sh", "-c", BodyLanguage::Shell),
-    ("bash", "-c", BodyLanguage::Shell),
-    ("python3", "-c", BodyLanguage::Foreign),
-    ("python", "-c", BodyLanguage::Foreign),
-    ("node", "-e", BodyLanguage::Foreign),
-    ("ruby", "-e", BodyLanguage::Foreign),
-    ("perl", "-e", BodyLanguage::Foreign),
-];
-
-/// [`BUILTIN_WRAPPER_ROWS`] as [`Wrapper`] values, built once.
-static BUILTIN_WRAPPERS: LazyLock<Vec<Wrapper>> = LazyLock::new(|| {
-    BUILTIN_WRAPPER_ROWS
-        .iter()
-        .map(
-            |&(binary, required_subcommand, flags, value_options, operands, selectors)| Wrapper {
-                binary: binary.to_string(),
-                required_subcommand: required_subcommand.map(str::to_string),
-                flags: strings(flags),
-                value_options: strings(value_options),
-                operands,
-                selectors: strings(selectors),
-            },
-        )
-        .collect()
-});
-
-/// [`BUILTIN_INTERPRETER_ROWS`] as [`Interpreter`] values, built once.
-static BUILTIN_INTERPRETERS: LazyLock<Vec<Interpreter>> = LazyLock::new(|| {
-    BUILTIN_INTERPRETER_ROWS
-        .iter()
-        .map(|&(binary, flag, body)| Interpreter {
-            binary: binary.to_string(),
-            flag: flag.to_string(),
-            body,
-        })
-        .collect()
-});
-
-/// The wrappers the built-in no-go check resolves (see
-/// [`BUILTIN_WRAPPER_ROWS`]).
-pub(crate) fn builtin_no_go_wrappers() -> &'static [Wrapper] {
-    &BUILTIN_WRAPPERS
+/// The wrappers and interpreters of the policy `text`, or `None` when it
+/// does not parse.
+fn resolver_from(text: &str) -> Option<Policy> {
+    let parsed: Policy = crate::parse_policy(text).ok()?;
+    Some(Policy {
+        wrappers: parsed.wrappers,
+        interpreters: parsed.interpreters,
+        ..Policy::default()
+    })
 }
 
-/// The interpreters the built-in no-go check resolves (see
-/// [`BUILTIN_INTERPRETER_ROWS`]).
-pub(crate) fn builtin_no_go_interpreters() -> &'static [Interpreter] {
-    &BUILTIN_INTERPRETERS
+/// The built-in no-go resolver: the embedded policy's wrappers and
+/// interpreters. `None` only when the embedded file does not parse, which a
+/// test rules out for every build; route then refuses every Bash command
+/// rather than check less (FR-CMD-025).
+pub(crate) fn builtin_no_go_resolver() -> Option<&'static Policy> {
+    BUILTIN_RESOLVER.as_ref()
 }
 
 /// The built-in entries, embedded in the binary (FR-CMD-025). Present when
@@ -799,18 +542,14 @@ mod tests {
     }
 
     #[test]
-    fn the_builtin_no_go_resolvers_match_the_shipped_policy_declarations() {
-        // The built-in declarations are the no-go check's own copy of every
-        // wrapper and interpreter the shipped file declares (FR-CMD-025):
-        // one added to or changed in the file without its built-in fails
-        // here, and so does a built-in the file no longer declares.
-        let shipped = crate::parse_policy(include_str!("../../../plugin/legion-cmd/policy.json"))
-            .expect("the shipped policy parses");
-        assert_eq!(shipped.wrappers.as_slice(), builtin_no_go_wrappers());
-        assert_eq!(
-            shipped.interpreters.as_slice(),
-            builtin_no_go_interpreters()
-        );
+    fn the_embedded_policy_parses_into_a_non_empty_resolver() {
+        let resolver = builtin_no_go_resolver().expect("the embedded policy parses");
+        assert!(!resolver.wrappers.is_empty());
+        assert!(!resolver.interpreters.is_empty());
+        // Only the resolver: no rules and no no-go entries carried over.
+        assert!(resolver.is_empty());
+        assert!(resolver.no_go.is_empty());
+        assert!(resolver_from("{ not json").is_none());
     }
 
     fn matched(command: &str) -> Option<String> {

@@ -44,6 +44,20 @@ pub(crate) fn bash_command(call: &ToolCall) -> &str {
 }
 
 fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
+    // Without the built-in resolver the no-go check could not see through a
+    // wrapper, so every Bash command is refused rather than checked less
+    // (FR-CMD-025). A test rules this out for every build.
+    if nogo::builtin_no_go_resolver().is_none() {
+        return Routed {
+            decision: deny(
+                "the built-in no-go resolver did not load from the embedded policy",
+                "rebuild legion from a tree whose plugin/legion-cmd/policy.json parses",
+            ),
+            facts: Facts::default(),
+            deciding: Deciding::Default,
+            confirmed: false,
+        };
+    }
     let command: &str = bash_command(call);
     let expanded = expand_command(policy, command);
     // The command's key, once: a no-go hit and a confirmation both carry it.
