@@ -623,6 +623,9 @@ fn a_held_store_write_lock_never_delays_the_flushed_response() {
     let lock = rusqlite::Connection::open(store_path(dir.path())).expect("open the store");
     lock.execute_batch("BEGIN IMMEDIATE")
         .expect("take the write lock");
+    // The 1000 ms bound below cannot absorb the platform's first launch of
+    // the binary; warm it here rather than rely on the call above.
+    warm_binary();
 
     let run = timed_hook(
         dir.path(),
