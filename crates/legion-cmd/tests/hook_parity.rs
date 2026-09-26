@@ -427,6 +427,9 @@ fn every_hook_case_matches_routes_actual_decision() {
                 verb: want.verb.clone(),
                 issue_numbers: want.issue_numbers.clone(),
                 keywords: want.keywords.clone(),
+                // The fixtures pin the extracted words, not the key derived from
+                // the whole command (#1237); nogo.rs tests the key.
+                command_key: routed.facts.command_key.clone(),
             };
             if routed.facts != expected {
                 failures.push(format!(

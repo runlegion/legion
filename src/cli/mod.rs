@@ -3,6 +3,7 @@
 
 pub(crate) mod autonomy;
 pub(crate) mod cmd_check;
+pub(crate) mod cmd_confirm;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
@@ -1208,6 +1209,9 @@ pub(crate) enum Commands {
     /// Hook mode (#1229): `--hook` reads one PreToolUse hook payload (JSON)
     /// on stdin and writes one hook response (JSON) on stdout, always
     /// exiting 0. It does not run the command either; the harness does.
+    ///
+    /// `--deny-patterns` (#1237) prints the permissions.deny mirror of the
+    /// built-in no-go entries and takes no other option.
     #[command(override_usage = "legion cmd-check [OPTIONS] [-- <COMMAND>]")]
     CmdCheck {
         /// Hook mode: read one PreToolUse hook payload (JSON) on stdin and
@@ -1215,6 +1219,11 @@ pub(crate) enum Commands {
         /// response.
         #[arg(long, conflicts_with_all = ["repo", "tool", "input", "json", "policy", "command"])]
         hook: bool,
+        /// Print the harness permissions.deny text patterns that mirror the
+        /// built-in no-go entries, as one JSON array (#1237). Plugin setup
+        /// merges them into the user settings. Read-only.
+        #[arg(long, conflicts_with_all = ["hook", "repo", "tool", "input", "json", "policy", "command"])]
+        deny_patterns: bool,
 
         /// The repo a required recall lookup is scoped to (default:
         /// LEGION_REPO, else derived from the current directory).
@@ -1249,6 +1258,13 @@ pub(crate) enum Commands {
         /// about text above describe the single argument instead.
         #[arg(last = true, value_name = "COMMAND", hide = true)]
         command: Vec<String>,
+    },
+
+    /// legion-cmd verbs an agent runs itself (#1237): `legion cmd confirm`
+    /// answers an ask with the reason the command should run.
+    Cmd {
+        #[command(subcommand)]
+        action: self::cmd_confirm::CmdAction,
     },
 }
 
