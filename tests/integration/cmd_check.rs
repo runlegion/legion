@@ -295,6 +295,39 @@ fn cmd_check_refuses_more_than_one_word_after_the_separator() {
 }
 
 #[test]
+fn cmd_confirm_refuses_more_than_one_word_after_the_separator() {
+    // `legion cmd confirm` takes the command the same way (#1237): split
+    // argv is refused rather than rebuilt -- exit 2, the usage message, and
+    // nothing written: no store, no incident log, no confirmation.
+    let data = tempfile::tempdir().expect("tempdir");
+    let state = tempfile::tempdir().expect("tempdir");
+    let out = legion_cmd(data.path())
+        .env("XDG_STATE_HOME", state.path())
+        .env("CLAUDE_CODE_SESSION_ID", "s1")
+        .env_remove("LEGION_CMD_POLICY")
+        .args(["cmd", "confirm", "--reason", "needed"])
+        .args(["--", "arr[i[0]]=x", "rm", "-rf", "build"])
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        "[legion] error: pass the command as one quoted argument: \
+         legion cmd confirm --reason <why> -- '<command>'"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "a refused command printed a confirmation"
+    );
+    let written: Vec<PathBuf> = [data.path(), state.path()]
+        .iter()
+        .flat_map(|dir| std::fs::read_dir(dir).expect("read dir"))
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert!(written.is_empty(), "a refused confirm wrote {written:?}");
+}
+
+#[test]
 fn one_quoted_argument_decides_the_same_as_the_same_string_via_input() {
     let dir = tempfile::tempdir().expect("tempdir");
     for command in [

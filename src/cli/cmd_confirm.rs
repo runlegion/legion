@@ -184,15 +184,39 @@ mod tests {
         );
     }
 
+    /// The split-argv half of each regression: the words an unquoted shell
+    /// would pass after `--` are refused as a usage error, exit 2, before the
+    /// session, policy, store, or log is touched -- never rebuilt and routed.
+    fn assert_split_argv_is_refused(split: &[&str]) {
+        let argv: Vec<String> = words(split);
+        assert_eq!(command_arg(&argv), Err(MULTI_WORD_USAGE), "{split:?}");
+        let refused = handle_confirm(Some("r".to_string()), &argv).expect_err("refused");
+        assert!(
+            matches!(refused, error::LegionError::ExitWith(2)),
+            "{split:?}: {refused:?}"
+        );
+    }
+
     #[test]
     fn a_subscripted_assignment_prefix_does_not_hide_a_no_go_command() {
         let db = test_db();
         let (log, _dir) = log();
         let now = Utc::now();
-        for typed in [
-            "arr[0]=x git push --force origin main",
-            "arr[i[0]]=x git push --force origin main",
-        ] {
+        let cases: [(&[&str], &str); 2] = [
+            (
+                &["arr[0]=x", "git", "push", "--force", "origin", "main"],
+                "arr[0]=x git push --force origin main",
+            ),
+            (
+                &["arr[i[0]]=x", "git", "push", "--force", "origin", "main"],
+                "arr[i[0]]=x git push --force origin main",
+            ),
+        ];
+        for (split, typed) in cases {
+            // Split argv: a usage error, nothing confirmed.
+            assert_split_argv_is_refused(split);
+
+            // One quoted argument: routed as typed, refused as a no-go.
             let argv: Vec<String> = words(&[typed]);
             let command: &str = command_arg(&argv).expect("one argument");
             let err = confirm(&request(command), &Policy::default(), &db, &log, now)
@@ -218,7 +242,18 @@ mod tests {
             }}}}"#,
         )
         .expect("policy");
-        for typed in ["curl -o ~/notes.txt $HOME/x", "curl ~/a * {a,b}"] {
+        let cases: [(&[&str], &str); 2] = [
+            (
+                &["curl", "-o", "~/notes.txt", "$HOME/x"],
+                "curl -o ~/notes.txt $HOME/x",
+            ),
+            (&["curl", "~/a", "*", "{a,b}"], "curl ~/a * {a,b}"),
+        ];
+        for (split, typed) in cases {
+            // Split argv: a usage error, so no requoted key is ever stored.
+            assert_split_argv_is_refused(split);
+
+            // One quoted argument: the stored key is the hook's key.
             let argv: Vec<String> = words(&[typed]);
             let command: &str = command_arg(&argv).expect("one argument");
             let stored = confirm(&request(command), &policy, &db, &log, now).expect("confirmed");
