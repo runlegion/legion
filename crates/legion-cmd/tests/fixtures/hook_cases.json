@@ -1008,9 +1008,9 @@
     "tool": "Bash",
     "input": { "command": "git -C /tmp/x push" },
     "hook_behavior": "rewrite",
-    "route": "allow",
+    "route": "deny",
     "agrees": false,
-    "note": "the hook walks git's value-taking global options. route's family match drops option words but keeps a separate option value (/tmp/x) in the operand run, so `git push` does not match and the command reaches the allow default. This is the known limitation in evaluate.rs `most_specific_family`, flagged for this issue: fixing it needs per-binary option metadata the policy language does not carry. DISAGREEMENT: hook rewrite, route allow."
+    "note": "the hook walks git's value-taking global options and rewrites to `cd /tmp/x && legion push`. route consumes git's declared global options before matching the family (#1294), so `-C /tmp/x` is read as an option and its value and the command reaches git-push-to-legion; that rewrite does not translate `-C` (legion push has no -C), so route denies naming it rather than dropping it (FR-CMD-008). DISAGREEMENT: hook rewrite, route deny."
   },
   {
     "hook": "no-git-push.sh",
@@ -1135,9 +1135,9 @@
     "tool": "Bash",
     "input": { "command": "git -C /tmp/other commit -m fix" },
     "hook_behavior": "rewrite",
-    "route": "allow",
+    "route": "deny",
     "agrees": false,
-    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route keeps the -C value in the operand run, so `git commit` does not match and the command reaches the allow default: the same known limitation as push-global-dash-c-path. DISAGREEMENT: hook rewrite, route allow."
+    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route consumes git's declared global options before matching the family (#1294), so the command reaches git-commit-to-legion; that rewrite translates -m but not `-C`, so route denies naming `-C` rather than dropping it (FR-CMD-008), as in push-global-dash-c-path. DISAGREEMENT: hook rewrite, route deny."
   },
   {
     "hook": "no-git-commit.sh",

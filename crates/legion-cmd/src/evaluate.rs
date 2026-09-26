@@ -41,6 +41,9 @@ pub struct PartOutcome {
 
 /// Decides one Bash invocation against the policy (FR-CMD-011, FR-CMD-016).
 ///
+/// An option before the subcommand that the binary's declared global options
+/// do not name -> proxy opaque (#1294): route cannot say which word is the
+/// subcommand, so it neither matches a family nor falls to the allow default.
 /// No family matches the binary and its leading operands -> allow (the command
 /// carries no managed binary). A family matches but no rule in it resolves the
 /// arguments -> deny (a managed rule that cannot resolve). A rule matches but
@@ -55,6 +58,9 @@ pub fn decide_bash_invocation(
     args: &[String],
     ctx: &Context,
 ) -> PartOutcome {
+    if policy.subcommand_start(binary, args).is_none() {
+        return opaque_default();
+    }
     let Some(selection) = select_bash_rule(policy, binary, args) else {
         return allow_default();
     };
@@ -100,9 +106,11 @@ pub(crate) struct BashSelection<'a> {
 }
 
 /// The rule that governs one Bash invocation, with the verb its family names.
-/// `None` when no family matches the binary (an unmanaged command); a
-/// selection whose `rule` is `None` when a family matches but no rule in it
-/// resolves the arguments. The one rule-selection step for Bash, shared by
+/// `None` when no family matches the binary (an unmanaged command), or when
+/// its global options cannot be read (#1294), which
+/// [`decide_bash_invocation`] proxies opaque before selecting; a selection
+/// whose `rule` is `None` when a family matches but no rule in it resolves
+/// the arguments. The one rule-selection step for Bash, shared by
 /// [`decide_bash_invocation`] and the lookup pre-pass ([`crate::lookups`]) so
 /// the two cannot disagree about which rule applies.
 pub(crate) fn select_bash_rule<'a>(
@@ -113,7 +121,8 @@ pub(crate) fn select_bash_rule<'a>(
     let ToolRules::Bash { families } = policy.tools.get(&ToolKind::Bash)? else {
         return None;
     };
-    let (verb, family, governed) = most_specific_family(families, binary, args)?;
+    let start = policy.subcommand_start(binary, args)?;
+    let (verb, family, governed) = most_specific_family(families, binary, args, start)?;
     let rule = family
         .rules
         .iter()
@@ -205,15 +214,7 @@ pub fn decide_region(policy: &Policy, region: &Unreduced) -> PartOutcome {
     {
         return sym_outcome(&job.id, &job.sym_command);
     }
-    PartOutcome {
-        decision: Decision::Proxy {
-            reason: ProxyReason::Opaque,
-        },
-        deciding: Deciding::Default,
-        is_sym: false,
-        verb: None,
-        operator_mark: false,
-    }
+    opaque_default()
 }
 
 /// Folds every part into the one Decision route returns (FR-CMD-001,
@@ -583,6 +584,20 @@ fn allow_default() -> PartOutcome {
     }
 }
 
+/// The proxy-opaque part for a command route cannot read (FR-CMD-004): never
+/// allowed, recorded coverage-unknown.
+fn opaque_default() -> PartOutcome {
+    PartOutcome {
+        decision: Decision::Proxy {
+            reason: ProxyReason::Opaque,
+        },
+        deciding: Deciding::Default,
+        is_sym: false,
+        verb: None,
+        operator_mark: false,
+    }
+}
+
 /// The most specific family whose binary and operand words match, with the
 /// verb it names and the argument indices its subcommand words matched. A
 /// family key is whitespace-separated: the first token is the
@@ -590,20 +605,19 @@ fn allow_default() -> PartOutcome {
 /// its leading operands in order. The verb is those subcommand words, or the
 /// binary when the key names none.
 ///
-/// Operands are the non-option arguments, with option tokens (those starting
-/// with `-`) removed rather than stopped at, so a global option before the
-/// subcommand (`git --no-pager push`, `git --git-dir=x show`) does not hide it.
-/// Each argument is dequoted first, so a quoted subcommand (`git "push"`) still
-/// matches. KNOWN LIMITATION (FR-CMD-007 residual, flagged for the hook-parity
-/// issue): a global option that takes a SEPARATE value (`git -C /tmp push`)
-/// leaves its value (`/tmp`) in the operand run, because deciding it is a value
-/// rather than a subcommand needs per-binary option metadata the policy does
-/// not yet carry. Such a command misses its family and reaches the allow
-/// default.
+/// Operands are read from `start`, the index past the binary's declared global
+/// options (#1294), so a global option's separate value (`git -C /tmp push`)
+/// is consumed with its option and never read as the subcommand. From there,
+/// option tokens (those starting with `-`) are removed rather than stopped at,
+/// so an option of a binary that declares none (`gh --no-pager issue list`)
+/// does not hide its subcommand either. Each argument is dequoted first, so a
+/// quoted subcommand (`git "push"`) still matches. The matched indices are
+/// indices into the whole of `args`.
 fn most_specific_family<'a>(
     families: &'a std::collections::BTreeMap<String, Family>,
     binary: &str,
     args: &[String],
+    start: usize,
 ) -> Option<(String, &'a Family, Vec<usize>)> {
     // Each operand with its index in `args`, so the matched subcommand words
     // can be reported by position.
@@ -611,6 +625,7 @@ fn most_specific_family<'a>(
         .iter()
         .map(|a| dequote_outer(a))
         .enumerate()
+        .skip(start)
         .filter(|(_, a)| !a.starts_with('-'))
         .collect();
 
@@ -912,8 +927,9 @@ mod tests {
     #[test]
     fn a_valueless_global_option_before_the_subcommand_does_not_hide_it() {
         // `git --no-pager push` and `git --git-dir=x push` must still match the
-        // `git push` family (the H2 unambiguous half). A separated option value
-        // (`git -C /tmp push`) is a documented residual, not covered here.
+        // `git push` family (the H2 unambiguous half), even with no global
+        // options declared. A separated option value (`git -C /tmp push`)
+        // needs the declaration: see the global-options tests below.
         let p = policy(
             r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
             {"id": "r", "outcome": {"kind": "deny", "reason": "no push", "instead": "x"}}
@@ -933,6 +949,126 @@ mod tests {
                 "args {args_list:?} should match git push",
             );
         }
+    }
+
+    /// A `git push` deny family and a `git commit` allow family, with git's
+    /// global options declared (#1294).
+    const GLOBAL_OPTIONS: &str = r#"{
+        "global_options": [{"binary": "git",
+            "flags": ["--no-pager", "--bare"],
+            "value_options": ["-C", "-c", "--git-dir"]}],
+        "tools": {"Bash": {"families": {
+            "git push": {"rules": [
+                {"id": "push", "outcome": {"kind": "deny", "reason": "no push", "instead": "x"}}]},
+            "git commit": {"rules": [
+                {"id": "commit", "outcome": {"kind": "allow", "note": "committed"}}]}
+        }}}
+    }"#;
+
+    #[test]
+    fn declared_global_options_are_consumed_before_the_subcommand_is_matched() {
+        let p = policy(GLOBAL_OPTIONS);
+        for words in [
+            vec!["-C", "/tmp", "push"],
+            vec!["-C", "push", "push"],
+            vec!["--git-dir", ".git", "push"],
+            vec!["--git-dir=.git", "push"],
+            vec!["--no-pager", "-C", "/tmp", "push", "origin"],
+        ] {
+            let outcome = decide(&p, "git", &words);
+            assert!(
+                matches!(outcome.decision, Decision::Deny(_)),
+                "{words:?} must reach git push, got {:?}",
+                outcome.decision
+            );
+            assert_eq!(outcome.verb.as_deref(), Some("push"), "{words:?}");
+            assert_eq!(
+                outcome.deciding,
+                Deciding::Rule {
+                    id: "push".to_string(),
+                    needs_operator: false
+                },
+                "{words:?}"
+            );
+        }
+        let commit = decide(&p, "git", &["-c", "user.name=x", "commit", "-m", "y"]);
+        assert_eq!(
+            commit.decision,
+            Decision::Allow {
+                note: Some("committed".to_string())
+            }
+        );
+        assert_eq!(commit.verb.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn an_option_value_that_names_a_subcommand_is_not_the_subcommand() {
+        // `-C push` is a path named `push`: the subcommand is `status`, which
+        // no family manages.
+        let p = policy(GLOBAL_OPTIONS);
+        let outcome = decide(&p, "git", &["-C", "push", "status"]);
+        assert_eq!(outcome.decision, Decision::Allow { note: None });
+        assert_eq!(outcome.deciding, Deciding::Default);
+    }
+
+    #[test]
+    fn an_undeclared_option_before_the_subcommand_is_proxied_opaque() {
+        let p = policy(GLOBAL_OPTIONS);
+        for words in [
+            vec!["--bogus", "push"],
+            vec!["--bogus", "status"],
+            vec!["-C", "/tmp", "--bogus", "push"],
+            // A value option with no value left cannot be read either.
+            vec!["-C"],
+        ] {
+            let outcome = decide(&p, "git", &words);
+            assert_eq!(
+                outcome.decision,
+                Decision::Proxy {
+                    reason: ProxyReason::Opaque
+                },
+                "{words:?}"
+            );
+            assert_eq!(outcome.deciding, Deciding::Default, "{words:?}");
+            assert_eq!(outcome.verb, None, "{words:?}");
+        }
+        // After the subcommand, an option is the subcommand's own: it is
+        // judged by the family's rules, never by the global declaration.
+        assert!(matches!(
+            decide(&p, "git", &["push", "--bogus"]).decision,
+            Decision::Deny(_)
+        ));
+        // A binary with no declaration keeps today's reading: its options
+        // are skipped, never proxied.
+        let gh = policy(
+            r#"{"tools": {"Bash": {"families": {"gh issue": {"rules": [
+            {"id": "issue", "outcome": {"kind": "deny", "reason": "r", "instead": "x"}}
+        ]}}}}}"#,
+        );
+        assert!(matches!(
+            decide(&gh, "gh", &["--bogus", "issue", "list"]).decision,
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn a_rewrite_judges_the_global_options_as_arguments() {
+        // The global option and its value are arguments the target must
+        // carry; `-C` is not in the spec, so the rewrite is refused naming it
+        // rather than dropping it (FR-CMD-008).
+        let p = policy(
+            r#"{
+            "global_options": [{"binary": "git", "value_options": ["-C"]}],
+            "tools": {"Bash": {"families": {"git push": {"rules": [
+                {"id": "push", "outcome": {"kind": "rewrite", "target": "legion push",
+                 "reason": "r", "translatable": {}}}
+            ]}}}}
+        }"#,
+        );
+        assert_eq!(rewrite_target(&decide(&p, "git", &["push"])), "legion push");
+        let outcome = decide(&p, "git", &["-C", "/tmp", "push"]);
+        assert!(deny_reason(&outcome).contains("`-C`"));
+        assert_eq!(outcome.verb.as_deref(), Some("push"));
     }
 
     #[test]
