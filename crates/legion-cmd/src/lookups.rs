@@ -74,8 +74,8 @@ fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, Stri
         for invocation in &expanded.invocations {
             let binary: &str = &invocation.binary;
             // Every reading route decides under (#1298): an inline alias's
-            // expansion and the words as typed.
-            // A rule both readings select is one part, queried once.
+            // expansion and the words as typed. A rule both readings select
+            // is one part, queried once.
             let readings = evaluate::bash_readings(policy, binary, &invocation.args);
             let mut rules: Vec<&Rule> = Vec::new();
             for reading in &readings {
