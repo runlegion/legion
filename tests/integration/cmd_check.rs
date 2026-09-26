@@ -927,3 +927,123 @@ fn a_no_go_command_is_refused_and_recorded_through_the_real_binary() {
     assert_eq!(first["hit_count"], 1);
     assert!(first["notice_error"].is_null(), "row: {first}");
 }
+
+// -- the cutover wiring in plugin/hooks/hooks.json (#1236) -------------------
+
+/// The hook scripts the legion-cmd adapter replaced (#1236). None of them may
+/// be registered again beside it.
+const RETIRED_HOOKS: [&str; 12] = [
+    "no-gh.sh",
+    "no-direct-db.sh",
+    "pre-bash-grep.sh",
+    "no-git-push.sh",
+    "no-git-commit.sh",
+    "pre-script-search.sh",
+    "pre-bash-ls.sh",
+    "pre-grep.sh",
+    "pre-read-sym.sh",
+    "no-local-memory.sh",
+    "no-harness-explore.sh",
+    "recall-first.sh",
+];
+
+fn read_source_json(relative: &str) -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} is JSON: {e}", path.display()))
+}
+
+/// Every hook entry in `hooks.json` as (event, matcher, command, timeout).
+fn registered_hooks() -> Vec<(String, String, String, Option<u64>)> {
+    let manifest = read_source_json("plugin/hooks/hooks.json");
+    let events = manifest["hooks"]
+        .as_object()
+        .expect("hooks.json carries a hooks object");
+    let mut entries = Vec::new();
+    for (event, groups) in events {
+        for group in groups.as_array().expect("each event is an array") {
+            let matcher = group["matcher"].as_str().unwrap_or("").to_string();
+            for hook in group["hooks"].as_array().expect("each group has hooks") {
+                entries.push((
+                    event.clone(),
+                    matcher.clone(),
+                    hook["command"].as_str().unwrap_or("").to_string(),
+                    hook["timeout"].as_u64(),
+                ));
+            }
+        }
+    }
+    entries
+}
+
+fn legion_cmd_entries() -> Vec<(String, String, String, Option<u64>)> {
+    registered_hooks()
+        .into_iter()
+        .filter(|(_, _, command, _)| command.ends_with("/hooks/legion-cmd.sh"))
+        .collect()
+}
+
+#[test]
+fn every_registered_legion_cmd_timeout_is_strictly_above_the_route_deadline() {
+    // FR-CMD-009: the adapter's own deadline fires first, so the harness never
+    // times the hook out (a timed-out hook fails open). The shipped policy
+    // states its deadline explicitly, so this compares against the value the
+    // adapter reads, not against a default restated here.
+    let policy = read_source_json("plugin/legion-cmd/policy.json");
+    let deadline_ms: u64 = policy["route"]["deadline_ms"]
+        .as_u64()
+        .expect("the shipped policy sets route.deadline_ms");
+    let entries = legion_cmd_entries();
+    assert!(!entries.is_empty(), "legion-cmd.sh is registered");
+    for (event, matcher, _, timeout) in entries {
+        let timeout_s: u64 =
+            timeout.unwrap_or_else(|| panic!("{event}/{matcher}: legion-cmd.sh sets a timeout"));
+        assert!(
+            timeout_s * 1000 > deadline_ms,
+            "{event}/{matcher}: timeout {timeout_s}s must be strictly above \
+             route.deadline_ms {deadline_ms}"
+        );
+    }
+}
+
+#[test]
+fn legion_cmd_is_the_pre_tool_use_hook_for_every_tool_kind_the_policy_governs() {
+    // FR-CMD-017 / FR-CMD-010: every governed tool kind shells to the adapter,
+    // and none of the retired command hooks is registered beside it.
+    let policy = read_source_json("plugin/legion-cmd/policy.json");
+    let governed: std::collections::BTreeSet<String> = policy["tools"]
+        .as_object()
+        .expect("the shipped policy carries tools")
+        .keys()
+        .cloned()
+        .collect();
+    let registered: std::collections::BTreeSet<String> = legion_cmd_entries()
+        .into_iter()
+        .filter(|(event, _, _, _)| event == "PreToolUse")
+        .flat_map(|(_, matcher, _, _)| {
+            matcher
+                .split('|')
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        })
+        .collect();
+    assert_eq!(registered, governed);
+
+    let hooks = registered_hooks();
+    for retired in RETIRED_HOOKS {
+        assert!(
+            !hooks
+                .iter()
+                .any(|(_, _, command, _)| command.ends_with(&format!("/hooks/{retired}"))),
+            "{retired} is retired by the legion-cmd cutover and must not be registered"
+        );
+        assert!(
+            !PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("plugin/hooks")
+                .join(retired)
+                .exists(),
+            "{retired} is retired by the legion-cmd cutover and must be deleted"
+        );
+    }
+}

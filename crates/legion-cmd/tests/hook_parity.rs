@@ -6,8 +6,9 @@
 //! hook -- the tool-field hooks (#1233) and the seven Bash hooks (#1232) --
 //! enumerated from the hook script's branches and its test suite. The
 //! hooks are accounted for as cases, not transcribed as rules: a row records
-//! what the hook does today (`hook_behavior`) beside what route does against
-//! the SHIPPED `plugin/legion-cmd/policy.json` (`route`), and `agrees` says
+//! what the hook did when the cutover (#1236) retired it (`hook_behavior`)
+//! beside what route does against the SHIPPED `plugin/legion-cmd/policy.json`
+//! (`route`), and `agrees` says
 //! whether the agent sees the same thing from both: the same Decision arm,
 //! and on the allow arm the same presence of text (a silent hook matches only
 //! a route allow with no note, an injecting hook only one with a note). This
@@ -49,7 +50,8 @@ const POLICY_JSON: &str = include_str!("../../../plugin/legion-cmd/policy.json")
 const CASES_JSON: &str = include_str!("fixtures/hook_cases.json");
 
 /// The tool-field hooks this battery accounts for (#1233), by script name as
-/// registered in `plugin/hooks/hooks.json`.
+/// they were registered in `plugin/hooks/hooks.json` before the cutover
+/// (#1236) retired them.
 const TOOL_FIELD_HOOKS: [&str; 6] = [
     "pre-grep.sh",
     "pre-read-sym.sh",
@@ -59,9 +61,10 @@ const TOOL_FIELD_HOOKS: [&str; 6] = [
     "recall-first.sh",
 ];
 
-/// The Bash hooks this battery accounts for (#1232), by script name as
-/// registered in `plugin/hooks/hooks.json`. `pre-script-search.sh` is in both
-/// lists: it is registered under the Bash matcher and the Write/Edit matchers.
+/// The Bash hooks this battery accounts for (#1232), by script name as they
+/// were registered in `plugin/hooks/hooks.json` before the cutover (#1236).
+/// `pre-script-search.sh` is in both lists: it was registered under the Bash
+/// matcher and the Write/Edit matchers.
 const BASH_HOOKS: [&str; 7] = [
     "no-gh.sh",
     "no-direct-db.sh",

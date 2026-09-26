@@ -2381,5 +2381,36 @@
     "agrees": true,
     "instead_contains": "legion pr checks",
     "note": "--interval is not declared translatable, so route denies naming the argument and the target."
+  },
+  {
+    "hook": "no-gh.sh",
+    "case": "gh-jq-with-quoted-pipes-is-one-simple-command",
+    "tool": "Bash",
+    "input": { "command": "gh pr view 1295 --json state --jq '{state:.state}|...'" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion pr view",
+    "note": "every | sits inside single quotes, so route sees one simple gh pr view command, not a pipeline; it denies by the gh-pr-view-to-legion rule's fallback because --json/--jq do not translate, never by the compound-rewrite refusal. The hook denies it as a compound command."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "compound-mentioning-push-is-not-a-git-push",
+    "tool": "Bash",
+    "input": { "command": "legion push --help | head -20" },
+    "hook_behavior": "deny",
+    "route": "allow",
+    "agrees": false,
+    "note": "no part of the pipeline is a git invocation; the hook's text scan refuses any compound command that mentions push. DISAGREEMENT: hook deny, route allow."
+  },
+  {
+    "hook": "no-git-push.sh",
+    "case": "quoted-git-push-words-in-an-argument-are-not-a-git-push",
+    "tool": "Bash",
+    "input": { "command": "legion recall --repo legion --context \"legion push -C directory git -C push commit rewrite dead-end deny\" | head -20" },
+    "hook_behavior": "deny",
+    "route": "allow",
+    "agrees": false,
+    "note": "the words sit inside one double-quoted --context argument to legion; no git invocation exists, so neither the git push nor the git commit family matches. DISAGREEMENT: hook deny, route allow."
   }
 ]
