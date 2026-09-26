@@ -211,7 +211,10 @@ pub(crate) enum AdapterError {
     DeadlineExceeded { deadline_ms: u64 },
     #[error("panic: {0}")]
     Panic(String),
-    /// The confirmation store could not be read (FR-CMD-026).
+    /// The confirmation store could not be read (FR-CMD-026), including when
+    /// the hook call's one store open, before the decision, failed or did not
+    /// finish within the route deadline (#1288): a deny naming why, never a
+    /// second wait on the store (FR-CMD-009).
     #[error("confirmations: {0}")]
     Confirmations(String),
     /// An incident record, or the use of a confirmation, could not be written;
