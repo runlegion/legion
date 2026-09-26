@@ -14,7 +14,7 @@
 //! adapter's job.
 
 use crate::decision::ToolCall;
-use crate::evaluate::{self, FieldsSelection, select_bash_rule, select_fields_rule};
+use crate::evaluate::{self, BashReading, FieldsSelection, select_bash_rule, select_fields_rule};
 use crate::policy::{Policy, Rule, ToolKind};
 use crate::route::{bash_command, expand_command};
 use serde_json::Value;
@@ -70,16 +70,31 @@ fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, Stri
         let Ok(expanded) = expand_command(policy, bash_command(call)) else {
             return Vec::new();
         };
-        return expanded
-            .invocations
-            .iter()
-            .filter_map(|invocation| {
-                let rule = select_bash_rule(policy, &invocation.binary, &invocation.args)?.rule?;
-                let mut words: Vec<&str> = vec![invocation.binary.as_str()];
-                words.extend(invocation.args.iter().map(|a| evaluate::dequote_outer(a)));
-                Some((rule, words.join(" ")))
-            })
-            .collect();
+        let mut matched: Vec<(&Rule, String)> = Vec::new();
+        for invocation in &expanded.invocations {
+            let binary: &str = &invocation.binary;
+            // Every reading route decides under (#1298): an inline alias's
+            // expansion and the words as typed.
+            // A rule both readings select is one part, queried once.
+            let readings = evaluate::bash_readings(policy, binary, &invocation.args);
+            let mut rules: Vec<&Rule> = Vec::new();
+            for reading in &readings {
+                let BashReading::Words { args, start } = reading else {
+                    continue;
+                };
+                if let Some(rule) = select_bash_rule(policy, binary, args, *start)
+                    .and_then(|selection| selection.rule)
+                    && !rules.iter().any(|seen| seen.id == rule.id)
+                {
+                    rules.push(rule);
+                }
+            }
+            let mut words: Vec<&str> = vec![binary];
+            words.extend(invocation.args.iter().map(|a| evaluate::dequote_outer(a)));
+            let query: String = words.join(" ");
+            matched.extend(rules.into_iter().map(|rule| (rule, query.clone())));
+        }
+        return matched;
     }
 
     let Some(kind) = ToolKind::ALL.into_iter().find(|k| k.as_str() == call.tool) else {
@@ -169,6 +184,51 @@ mod tests {
         // The query is the scan's words, dequoted -- not the raw string.
         assert_eq!(found.recall.as_deref(), Some("gh issue view #12"));
         assert!(found.consult.is_none());
+    }
+
+    #[test]
+    fn an_inline_alias_requires_the_lookups_of_both_its_readings() {
+        // Route decides an inline alias under the alias's reading and the
+        // word as typed (#1298), so the pre-pass names the rules of both --
+        // once, when both readings select the same rule.
+        let p = policy(
+            r#"{
+            "global_options": [{"binary": "git", "value_options": ["-c"],
+                "inline_alias": {"options": ["-c"], "prefix": "alias."}}],
+            "tools": {"Bash": {"families": {
+                "git push": {"rules": [
+                    {"id": "git-push", "requires_recall": true, "outcome": {"kind": "allow"}}]},
+                "git fetch": {"rules": [
+                    {"id": "git-fetch", "requires_consult": true, "outcome": {"kind": "allow"}}]}
+            }}}
+        }"#,
+        );
+        let aliased = required_lookups(&p, &bash("git -c alias.p=push p"));
+        assert_eq!(aliased.recall.as_deref(), Some("git -c alias.p=push p"));
+        assert!(aliased.consult.is_none());
+        let both = required_lookups(&p, &bash("git -c alias.fetch=push fetch"));
+        assert_eq!(
+            both.recall.as_deref(),
+            Some("git -c alias.fetch=push fetch")
+        );
+        assert_eq!(
+            both.consult.as_deref(),
+            Some("git -c alias.fetch=push fetch")
+        );
+        // An alias route cannot read still has its typed reading.
+        let opaque = required_lookups(&p, &bash("git -c alias.push=!x push"));
+        assert_eq!(opaque.recall.as_deref(), Some("git -c alias.push=!x push"));
+
+        let whole = policy(
+            r#"{
+            "global_options": [{"binary": "git", "value_options": ["-c"],
+                "inline_alias": {"options": ["-c"], "prefix": "alias."}}],
+            "tools": {"Bash": {"families": {"git": {"rules": [
+                {"id": "git", "requires_recall": true, "outcome": {"kind": "allow"}}]}}}}
+        }"#,
+        );
+        let once = required_lookups(&whole, &bash("git -c alias.p=push p"));
+        assert_eq!(once.recall.as_deref(), Some("git -c alias.p=push p"));
     }
 
     #[test]

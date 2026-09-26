@@ -29,9 +29,9 @@ pub use nogo::{
     BUILTIN_DENY_PATTERNS, CommandKey, NoGoEntry, NoGoPredicate, builtin_no_go, command_key,
 };
 pub use policy::{
-    ArgSpec, BodyLanguage, FallbackDecision, Family, GlobalOptions, Interpreter, OperandShape,
-    Policy, PolicyError, Predicate, RewriteSpec, Rule, RuleOutcome, ScriptCarrier, SymJob,
-    ToolKind, ToolRules, Wrapper, parse_policy,
+    AliasReading, ArgSpec, BodyLanguage, FallbackDecision, Family, GlobalOptions, InlineAlias,
+    Interpreter, OperandShape, Policy, PolicyError, Predicate, RewriteSpec, Rule, RuleOutcome,
+    ScriptCarrier, SymJob, ToolKind, ToolRules, Wrapper, parse_policy,
 };
 pub use route::route;
 pub use splitter::{
