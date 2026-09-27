@@ -1574,6 +1574,45 @@ mod tests {
         );
     }
 
+    /// #1323: a `$(...)` whose heredoc body holds an unbalanced `(` still
+    /// shows its inner command to the no-go check, quoted or bare, exactly
+    /// as its balanced twin does.
+    #[test]
+    fn a_no_go_command_behind_an_unbalanced_heredoc_paren_is_refused() {
+        for body in ["a (b", "a b"] {
+            for command in [
+                format!("echo \"$(rm -rf / <<'EOF'\n{body}\nEOF\n)\""),
+                format!("echo $(rm -rf / <<'EOF'\n{body}\nEOF\n)"),
+            ] {
+                let routed = route(&permissive_policy(), &bash(&command), &Context::default());
+                assert_no_go(&routed, &command);
+            }
+        }
+    }
+
+    /// #1323: a commit message built by a heredoc whose body holds an
+    /// unbalanced `(` is not a plain literal, so the rewrite is refused
+    /// naming the word, as for its balanced twin; the source text
+    /// `$(cat <<'EOF'...` is never carried as the message (FR-CMD-008).
+    #[test]
+    fn a_heredoc_message_with_an_unbalanced_paren_is_never_carried() {
+        for body in ["a (b", "a b"] {
+            let word = format!("\"$(cat <<'EOF'\n{body}\nEOF\n)\"");
+            let command = format!("git commit -m {word}");
+            let routed = route_rewrite_policy(&command);
+            match &routed.decision {
+                Decision::Deny(details) => assert!(
+                    details.reason().contains(&format!("`{word}`"))
+                        && details.reason().contains("not a plain literal"),
+                    "`{command}`: {}",
+                    details.reason()
+                ),
+                other => panic!("`{command}` must be refused, got {other:?}"),
+            }
+            assert!(routed.facts.carried.is_empty(), "`{command}`");
+        }
+    }
+
     #[test]
     fn a_no_go_command_inside_an_opaque_body_is_proxied_opaque_not_denied() {
         let routed = route(
