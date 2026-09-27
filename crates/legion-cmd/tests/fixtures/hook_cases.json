@@ -1025,9 +1025,11 @@
     "tool": "Bash",
     "input": { "command": "git -C /tmp/x push" },
     "hook_behavior": "rewrite",
-    "route": "deny",
-    "agrees": false,
-    "note": "the hook walks git's value-taking global options and rewrites to `cd /tmp/x && legion push`. route consumes git's declared global options before matching the family (#1294), so the git-push rule decides; `-C` and its path come before the verb, so they are not carried, and route denies naming `-C` rather than drop it (#1301 builds on this). DISAGREEMENT: hook rewrite, route deny."
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion push --repo {repo}",
+    "note": "the hook walks git's value-taking global options and rewrites to `cd /tmp/x && legion push`. route consumes git's declared global options before matching the family (#1294), so the git-push rule decides, and it carries `-C` and its path ahead of the words after the verb (#1301); legion push accepts `-C <dir>` and runs as if started there. `--repo` fills from the caller's repo, not from `<dir>`.",
+    "replacement": "legion push --repo legion -C /tmp/x"
   },
   {
     "hook": "no-git-push.sh",
@@ -1158,9 +1160,11 @@
     "tool": "Bash",
     "input": { "command": "git -C /tmp/other commit -m fix" },
     "hook_behavior": "rewrite",
-    "route": "deny",
-    "agrees": false,
-    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route consumes git's declared global options before matching the family (#1294), so the git-commit rule decides; `-C` and its path come before the verb, so they are not carried, and route denies naming `-C` rather than drop it (#1301 builds on this). DISAGREEMENT: hook rewrite, route deny."
+    "route": "rewrite",
+    "agrees": true,
+    "target": "legion commit --repo {repo}",
+    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route consumes git's declared global options before matching the family (#1294), so the git-commit rule decides, and it carries `-C` and its path ahead of the words after the verb (#1301); legion commit accepts `-C <dir>` and commits in that checkout. `--repo` fills from the caller's repo, not from `<dir>`, where the hook named `other`.",
+    "replacement": "legion commit --repo legion -C /tmp/other -m fix"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1242,6 +1246,17 @@
     "agrees": true,
     "instead_contains": "legion commit",
     "note": "the hook names -C (message reuse). route matches the no-message rule first (no -m, --message, -F or --file), so it denies for a different reason. Same arm."
+  },
+  {
+    "hook": "no-git-commit.sh",
+    "case": "commit-reuse-dash-c-with-message",
+    "tool": "Bash",
+    "input": { "command": "git commit -C HEAD -m fix" },
+    "hook_behavior": "deny",
+    "route": "deny",
+    "agrees": true,
+    "instead_contains": "legion commit",
+    "note": "after the verb, git's -C reuses a commit's message; legion commit's -C names a directory (#1301). The git-commit-to-legion rule declares -C in deny_flags, so route refuses to carry it rather than turn it into a commit in a directory named HEAD. Before the verb, -C is git's global option and is carried (commit-global-dash-c-path)."
   },
   {
     "hook": "no-git-commit.sh",

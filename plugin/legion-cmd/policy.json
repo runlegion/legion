@@ -379,7 +379,8 @@
               "outcome": {
                 "kind": "rewrite",
                 "target": "legion commit --repo {repo}",
-                "reason": "the audited commit path (#854): legion commit preflights the signer, refuses message-convention violations by name, and writes an audit row for every attempt"
+                "reason": "the audited commit path (#854): legion commit preflights the signer, refuses message-convention violations by name, and writes an audit row for every attempt",
+                "deny_flags": ["-C"]
               }
             }
           ]

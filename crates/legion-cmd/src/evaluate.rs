@@ -39,9 +39,10 @@ pub struct PartOutcome {
     /// once a confirmation in `Context` answers the ask (FR-CMD-026).
     pub operator_mark: bool,
     /// The argument words a rewrite carries into its target (FR-CMD-003,
-    /// FR-CMD-008): the invocation's words after the family's subcommand
-    /// words, in source order, as literal values. Empty for every other
-    /// outcome. route returns them as [`crate::Facts::carried`].
+    /// FR-CMD-008): the binary's declared global options before the
+    /// subcommand (#1301), then the invocation's words after the family's
+    /// subcommand words, each in source order, as literal values. Empty for
+    /// every other outcome. route returns them as [`crate::Facts::carried`].
     pub carried: Vec<String>,
 }
 
@@ -61,10 +62,11 @@ pub struct PartOutcome {
 /// matches but no rule in it resolves the arguments -> deny (a managed rule
 /// that cannot resolve). A rule matches but its required recall or consult
 /// result is [`Lookup::NotFetched`] -> deny. A rule matches and its lookups
-/// are satisfied -> the rule's outcome. A rewrite rule carries the arguments
-/// after the family's subcommand words into its target (FR-CMD-008), or
-/// denies naming the one it cannot carry (see [`carry`]); whether the target
-/// accepts them is the adapter's parse, not this function's.
+/// are satisfied -> the rule's outcome. A rewrite rule carries the declared
+/// global options before the subcommand and the arguments after the family's
+/// subcommand words into its target (FR-CMD-008, #1301), or denies naming the
+/// one it cannot carry (see [`carry`]); whether the target accepts them is
+/// the adapter's parse, not this function's.
 pub fn decide_bash_invocation(
     policy: &Policy,
     binary: &str,
@@ -154,6 +156,7 @@ fn decide_bash_reading(
             ctx,
             Some(selection.verb),
             args,
+            start,
             &selection.governed,
         ),
         // The family is managed, but no rule resolves these arguments.
@@ -261,7 +264,7 @@ pub fn decide_fields(policy: &Policy, kind: ToolKind, input: &Value, ctx: &Conte
     match select_fields_rule(policy, kind, input) {
         // A Fields call has no argument list: a rewrite here patches one
         // field and keeps the rest, lossless by construction.
-        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None, &[], &[]),
+        FieldsSelection::Rule(rule) => resolve_rule(policy, rule, ctx, None, &[], 0, &[]),
         FieldsSelection::Unresolvable { rule, field } => {
             let tool = kind.as_str();
             rule_outcome(
@@ -365,15 +368,17 @@ fn rewrite_rule_label(deciding: &Deciding) -> String {
 
 /// Resolves a matched rule into a [`PartOutcome`], applying the lookup gates
 /// (FR-CMD-016), the sym action (FR-CMD-007), and a rewrite's carried words
-/// (FR-CMD-008). `args` are the invocation's arguments and `governed` the
-/// indices of the family's subcommand words among them -- both empty for a
-/// Fields call, which carries nothing.
+/// (FR-CMD-008). `args` are the invocation's arguments, `start` the index
+/// past the binary's declared global options, and `governed` the indices of
+/// the family's subcommand words among them -- empty and 0 for a Fields call,
+/// which carries nothing.
 fn resolve_rule(
     policy: &Policy,
     rule: &Rule,
     ctx: &Context,
     verb: Option<String>,
     args: &[String],
+    start: usize,
     governed: &[usize],
 ) -> PartOutcome {
     for (required, lookup, name) in [
@@ -397,7 +402,7 @@ fn resolve_rule(
     let (decision, is_sym) = match &rule.outcome {
         RuleOutcome::Allow { note } => (Decision::Allow { note: note.clone() }, false),
         RuleOutcome::Rewrite { spec, reason } => {
-            let decision = match carry(spec, args, governed) {
+            let decision = match carry(spec, args, start, governed) {
                 Ok(words) => {
                     carried = words;
                     Decision::Rewrite {
@@ -471,23 +476,34 @@ pub fn decide_no_go(policy: &Policy, invocations: &[Invocation]) -> Option<PartO
 /// The argument words a rewrite carries into its target, or the deny that
 /// refuses it naming the one word it cannot carry (FR-CMD-003, FR-CMD-008).
 ///
-/// Carried are the words after the family's subcommand words (the
-/// `governed` indices), in source order, each as the literal value the shell
-/// passes ([`crate::splitter::literal_word`]). Whether the target accepts
-/// them is not judged here: the adapter parses the candidate command with the
-/// target's own definition. Three things are judged here, because only the
-/// words themselves can show them, and each denies naming the word as typed
+/// Carried are, first, the words before `start` -- the binary's declared
+/// global options and their values (`git -C <dir>`, #1301) -- and then the
+/// words after the family's subcommand words (the `governed` indices), each
+/// run in source order, each as the literal value the shell passes
+/// ([`crate::splitter::literal_word`]). The adapter places them after the
+/// target's prefix in that order. Whether the target accepts them is not
+/// judged here: the adapter parses the candidate command with the target's
+/// own definition, so a global option the target does not define (`git -c`)
+/// is refused there. Three things are judged here, because only the words
+/// themselves can show them, and each denies naming the word as typed
 /// (FR-CMD-005):
 ///
-/// - a word before or among the subcommand words (a global option such as
-///   `git -C <path>`): it is not after the verb, so it is not carried, and
-///   the rewrite would drop it;
+/// - a word from `start` on that sits before or among the subcommand words
+///   and no global-option declaration resolves (`gh --no-pager pr view`): it
+///   is not after the verb, so it is not carried, and the rewrite would drop
+///   it;
 /// - a word that is not a plain literal (`"$MSG"`, a glob): the value the
 ///   command receives is decided at run time, so no carried text is it;
 /// - a flag the rule's `deny_flags` names, as `--flag` or `--flag=value`,
-///   before any `--`: its name collides with a target flag of different
-///   meaning.
-fn carry(spec: &RewriteSpec, args: &[String], governed: &[usize]) -> Result<Vec<String>, Decision> {
+///   after the verb and before any `--`: its name collides with a target flag
+///   of different meaning. The global options are not checked against it:
+///   `deny_flags` names the subcommand's own flags, not the binary's.
+fn carry(
+    spec: &RewriteSpec,
+    args: &[String],
+    start: usize,
+    governed: &[usize],
+) -> Result<Vec<String>, Decision> {
     let target = spec.target.as_str();
     let refuse = |raw: &str, why: &str| {
         deny(
@@ -496,20 +512,24 @@ fn carry(spec: &RewriteSpec, args: &[String], governed: &[usize]) -> Result<Vec<
         )
     };
     let verb_end: usize = governed.iter().max().map_or(0, |last| last + 1);
-    if let Some(early) = (0..verb_end).find(|index| !governed.contains(index)) {
+    if let Some(early) = (start..verb_end).find(|index| !governed.contains(index)) {
         return Err(refuse(
             &args[early],
             "comes before the subcommand the rewrite replaces and would be dropped",
         ));
     }
-    let mut carried: Vec<String> = Vec::with_capacity(args.len() - verb_end);
+    let not_literal = "is not a plain literal word (the shell expands it when the command runs)";
+    let mut carried: Vec<String> = Vec::with_capacity(start + args.len() - verb_end);
+    for raw in &args[..start] {
+        let Some(word) = crate::splitter::literal_word(raw) else {
+            return Err(refuse(raw, not_literal));
+        };
+        carried.push(word);
+    }
     let mut options_ended = false;
     for raw in &args[verb_end..] {
         let Some(word) = crate::splitter::literal_word(raw) else {
-            return Err(refuse(
-                raw,
-                "is not a plain literal word (the shell expands it when the command runs)",
-            ));
+            return Err(refuse(raw, not_literal));
         };
         if !options_ended && word == "--" {
             options_ended = true;
@@ -1105,22 +1125,41 @@ mod tests {
 
     #[test]
     fn a_rewrite_refuses_a_global_option_it_cannot_carry() {
-        // The global option and its value come before the subcommand, so they
-        // are not carried; the rewrite is refused naming `-C` rather than
-        // dropping it (FR-CMD-008).
-        let p = policy(
-            r#"{
-            "global_options": [{"binary": "git", "value_options": ["-C"]}],
-            "tools": {"Bash": {"families": {"git push": {"rules": [
+        // A declared global option and its value are carried ahead of the
+        // words after the verb (#1301); the target's parse judges them.
+        let rule = r#""tools": {"Bash": {"families": {"git push": {"rules": [
                 {"id": "push", "outcome": {"kind": "rewrite", "target": "legion push",
-                 "reason": "r"}}
-            ]}}}}
-        }"#,
+                 "reason": "r", "deny_flags": ["-C"]}}
+            ]}}}}"#;
+        let declared = policy(&format!(
+            r#"{{"global_options": [{{"binary": "git", "value_options": ["-C"]}}], {rule}}}"#
+        ));
+        assert_eq!(
+            rewrite_target(&decide(&declared, "git", &["push"])),
+            "legion push"
         );
-        assert_eq!(rewrite_target(&decide(&p, "git", &["push"])), "legion push");
-        let outcome = decide(&p, "git", &["-C", "/tmp", "push"]);
-        assert!(deny_reason(&outcome).contains("`-C`"));
+        let outcome = decide(&declared, "git", &["-C", "'/tmp'", "push", "origin"]);
+        assert_eq!(rewrite_target(&outcome), "legion push");
         assert_eq!(outcome.verb.as_deref(), Some("push"));
+        assert_eq!(outcome.carried, args(&["-C", "/tmp", "origin"]));
+        // `deny_flags` names the subcommand's flags, so it refuses `-C` only
+        // after the verb.
+        let after = decide(&declared, "git", &["push", "-C", "/tmp"]);
+        assert!(deny_reason(&after).contains("different meaning"));
+        // A global option's value is judged as a literal like any carried word.
+        let expanded = decide(&declared, "git", &["-C", "\"$D\"", "push"]);
+        assert!(deny_reason(&expanded).contains("`\"$D\"`"));
+        assert!(deny_reason(&expanded).contains("not a plain literal"));
+
+        // A word before the subcommand that no declaration resolves is not
+        // carried: the rewrite is refused naming it rather than dropping it
+        // (FR-CMD-008).
+        let undeclared = policy(&format!("{{{rule}}}"));
+        let outcome = decide(&undeclared, "git", &["--no-pager", "push"]);
+        assert!(deny_reason(&outcome).contains("`--no-pager`"));
+        assert!(deny_reason(&outcome).contains("would be dropped"));
+        assert_eq!(outcome.verb.as_deref(), Some("push"));
+        assert!(outcome.carried.is_empty());
     }
 
     /// A `git push` deny family and a `git status` allow family, with git's
