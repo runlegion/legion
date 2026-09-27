@@ -132,8 +132,12 @@ fn checked_out_branch_in(dir: &Path) -> error::Result<String> {
 fn handle_push_tag(repo: String, tag: String, dir: Option<PathBuf>) -> error::Result<()> {
     validate_tag(&tag)?;
 
+    // Absolute either way, so the audit row and the confirmation line name
+    // the same shape of path whether or not `-C` was given.
     let checkout: PathBuf = match dir {
-        Some(d) => d,
+        Some(d) => std::path::absolute(&d).map_err(|e| {
+            error::LegionError::WorkSource(format!("cannot resolve -C {}: {e}", d.display()))
+        })?,
         None => std::env::current_dir().map_err(|e| {
             error::LegionError::WorkSource(format!("cannot resolve the current directory: {e}"))
         })?,

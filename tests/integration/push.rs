@@ -945,3 +945,37 @@ fn push_with_dash_c_outside_git_names_the_dir() {
         "expected a WorkSource error naming the -C dir, got: {stderr}"
     );
 }
+
+/// The tag path under `-C` resolves the tag and pushes it from `<dir>`, not
+/// the CWD: run from a directory outside any repo, `legion push -C <dir>
+/// --tag` pushes a tag only `<dir>`'s repo has.
+#[cfg(unix)]
+#[test]
+fn push_with_dash_c_pushes_a_tag_from_another_cwd() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path()); // on feat/x
+    let lp = local.path();
+    // The tagged commit must be on origin, or the dangling-tag refusal fires.
+    run_git_fixture(lp, &["push", "-q", "origin", "feat/x"]);
+    run_git_fixture(lp, &["tag", "v-dash-c"]);
+    let tagged = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(push_cmd(data_dir.path(), elsewhere.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "-C",
+        lp.to_str().unwrap(),
+        "--tag",
+        "v-dash-c",
+    ]));
+    assert!(stdout.contains("v-dash-c"), "got: {stdout}");
+    assert_eq!(
+        String::from_utf8_lossy(&rev_parse(remote.path(), "refs/tags/v-dash-c").stdout).trim(),
+        tagged,
+        "expected the tag on the remote after push -C <dir> --tag"
+    );
+}
