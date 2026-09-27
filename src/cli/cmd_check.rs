@@ -86,9 +86,9 @@ fn check_with(
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         // No session work: a dry run never records, notifies, or uses up a
         // confirmation (#1237).
-        let (routed, policy) = route_call(policy_text, call, lookups, legion_repo, cwd, None)?;
-        let replacement = replacement_for(&routed, &policy, &original)?;
-        Ok((routed, replacement))
+        let decided = route_call(policy_text, call, lookups, legion_repo, cwd, None)?;
+        let replacement = replacement_for(&decided, &original)?;
+        Ok((decided.routed, replacement))
     }))
     .unwrap_or_else(|payload| Err(AdapterError::Panic(panic_message(&payload))));
     let elapsed = started.elapsed();
@@ -255,6 +255,7 @@ fn render_text(report: &CheckReport) -> String {
     lines.push(format!("  paths:         {}", listed(&facts.paths)));
     lines.push(format!("  issue numbers: {}", listed(&issue_numbers)));
     lines.push(format!("  keywords:      {}", listed(&facts.keywords)));
+    lines.push(format!("  carried:       {}", listed(&facts.carried)));
     if let Some(replacement) = &report.replacement {
         lines.push(format!("replacement: {}", replaced_value(replacement)));
     }
@@ -358,9 +359,8 @@ mod tests {
             "Bash": {"families": {
                 "gh issue view": {"rules": [
                     {"id": "gh-issue-view",
-                     "outcome": {"kind": "rewrite", "target": "legion issue view",
-                                 "reason": "legion tracks issues",
-                                 "translatable": {"flags": ["--web"], "operands": ["integer"]}}}
+                     "outcome": {"kind": "rewrite", "target": "legion issue view --repo {repo}",
+                                 "reason": "legion tracks issues", "positional": ["--number"]}}
                 ]},
                 "rm": {"rules": [
                     {"id": "rm-rf", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
@@ -368,8 +368,8 @@ mod tests {
                 ]},
                 "gh issue list": {"rules": [
                     {"id": "gh-issue-list",
-                     "outcome": {"kind": "rewrite", "target": "legion issue list",
-                                 "reason": "legion tracks issues", "translatable": {}}}
+                     "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                                 "reason": "legion tracks issues"}}
                 ]},
                 "gh pr": {"rules": [
                     {"id": "gh-pr", "outcome": {"kind": "ask", "question": "touch the PR?",
@@ -445,13 +445,35 @@ mod tests {
         assert!(matches!(report.decision, Decision::Rewrite { .. }));
         assert_eq!(
             report.replacement,
-            Some(serde_json::json!({"command": "legion issue list", "timeout": 9000}))
+            Some(
+                serde_json::json!({"command": "legion issue list --repo legion", "timeout": 9000})
+            )
         );
         let text = render_text(&report);
         assert!(text.contains("decision: rewrite"), "{text}");
-        assert!(text.contains("target:   legion issue list"), "{text}");
+        assert!(
+            text.contains("target:   legion issue list --repo {repo}"),
+            "{text}"
+        );
         assert!(text.contains("reason:   legion tracks issues"), "{text}");
-        assert!(text.contains("replacement: legion issue list"), "{text}");
+        assert!(
+            text.contains("replacement: legion issue list --repo legion"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_reports_the_words_it_carried() {
+        // FR-CMD-003 rev 2: the carried words are a fact, reported beside the
+        // replacement built from them.
+        let report = check_policy(bash("gh issue view 7"), POLICY);
+        assert_eq!(report.facts.carried, vec!["7".to_string()]);
+        let text = render_text(&report);
+        assert!(text.contains("  carried:       7"), "{text}");
+        assert!(
+            text.contains("replacement: legion issue view --repo legion --number 7"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -508,9 +530,16 @@ mod tests {
         let report = check_policy(bash("gh issue list"), POLICY);
         let value: Value = serde_json::to_value(&report).expect("serializes");
         assert_eq!(value["decision"]["kind"], "rewrite");
-        assert_eq!(value["decision"]["target"], "legion issue list");
+        assert_eq!(
+            value["decision"]["target"],
+            "legion issue list --repo {repo}"
+        );
         assert_eq!(value["facts"]["verb"], "issue list");
-        assert_eq!(value["replacement"]["command"], "legion issue list");
+        assert_eq!(value["facts"]["carried"], serde_json::json!([]));
+        assert_eq!(
+            value["replacement"]["command"],
+            "legion issue list --repo legion"
+        );
         assert!(value["elapsed"].is_object());
     }
 
@@ -625,30 +654,26 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_under_a_rule_declaring_translatable_arguments_reports_the_hook_deny() {
-        // #1267 through the shared core: route returns Rewrite for the
-        // covered `7 --web`, the replacement builder refuses because the rule
-        // declares translatable arguments, and cmd-check reports exactly the
-        // reason and instead the hook's deny_for_error renders.
+    fn a_rewrite_the_target_rejects_reports_the_hook_deny() {
+        // #1278 through the shared core: route returns Rewrite carrying
+        // `7 --web`, the target's own parse rejects `--web`, and cmd-check
+        // reports exactly the reason and instead the hook's deny_for_error
+        // renders.
         let command = "gh issue view 7 --web";
         let report = check_policy(bash(command), POLICY);
         let Decision::Deny(details) = &report.decision else {
             panic!("expected a deny, got {:?}", report.decision);
         };
         let expected_error = AdapterError::Replacement(
-            crate::cmd::replacement::ReplacementError::ArgumentsNotCarried(
-                "gh-issue-view".to_string(),
-            )
+            crate::cmd::replacement::ReplacementError::Rejected {
+                target: "legion issue view --repo {repo}".to_string(),
+                reason: "error: unexpected argument '--web' found".to_string(),
+            }
             .to_string(),
         );
         let (reason, instead) = error_deny_text(&expected_error, Some(command));
         assert_eq!(details.reason(), reason);
         assert_eq!(details.instead(), instead);
-        assert!(
-            details.reason().contains("rewrite rule 'gh-issue-view'"),
-            "{}",
-            details.reason()
-        );
         assert!(report.replacement.is_none());
     }
 
