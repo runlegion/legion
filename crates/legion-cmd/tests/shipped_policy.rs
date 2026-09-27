@@ -42,7 +42,7 @@ fn mirror_policy() -> Policy {
         r#"{
         "sym_jobs": [
             {"id": "find-content", "sym_command": "legion sym etc find-content",
-             "interpreter_patterns": ["rglob", "read_text"]}
+             "interpreter_patterns": ["rglob", "read_text"], "pipe_filter": true}
         ],
         "wrappers": [
             {"binary": "env",
@@ -339,6 +339,85 @@ fn mirror_policy_routes_a_python_search_one_liner_to_sym() {
 
 fn shipped_route(policy: &Policy, command: &str) -> Routed {
     route(policy, &bash(command), &Context::default())
+}
+
+// -- a sym-job binary reading a pipe, over the shipped artifact (#1319) -------
+
+/// The sym command a shipped-policy deny names, or `None` for any other
+/// Decision.
+fn shipped_sym_instead(policy: &Policy, command: &str) -> Option<String> {
+    match shipped_route(policy, command).decision {
+        Decision::Deny(details) if details.instead().starts_with("legion sym ") => {
+            Some(details.instead().to_string())
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn shipped_grep_reading_a_pipe_is_not_denied_as_a_content_search() {
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
+    for command in [
+        "ls ~/Library/Application\\ Support/ | grep -i legion",
+        "ls | grep -i legion",
+        "legion sym etc find-content foo | grep bar",
+        "ls | FOO=1 grep x",
+        "cat src/main.rs | rg fn_main",
+    ] {
+        let routed = shipped_route(&policy, command);
+        assert!(
+            matches!(routed.decision, Decision::Allow { .. }),
+            "`{command}` filters a pipe and must be allowed, got {:?}",
+            routed.decision
+        );
+    }
+}
+
+#[test]
+fn shipped_sym_job_binary_outside_a_pipe_stage_is_still_sent_to_sym() {
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
+    for command in [
+        "grep -rn foo . | head",
+        "cd src && grep -rn foo .",
+        "ls; grep -rn foo .",
+        "false || grep -rn foo .",
+        // A wrapper payload and a shell-interpreter body are split as their
+        // own text, so the re-entered grep reads no pipe there.
+        "ls | xargs grep foo",
+        "ls | sh -c 'grep foo'",
+    ] {
+        assert_eq!(
+            shipped_sym_instead(&policy, command).as_deref(),
+            Some("legion sym etc find-content"),
+            "`{command}` must be routed to find-content"
+        );
+    }
+    // `find` is itself a find-file sym job here, first in the pipeline.
+    assert!(
+        shipped_sym_instead(&policy, "find . | xargs grep foo").is_some(),
+        "`find . | xargs grep foo` must be routed to sym"
+    );
+}
+
+#[test]
+fn shipped_find_file_jobs_are_not_pipe_filters() {
+    // find, fd and git ls-files do not filter stdin: after a pipe they are
+    // still the find-file job.
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
+    assert!(!policy.sym_job("find-file").expect("find-file").pipe_filter);
+    assert!(
+        policy
+            .sym_job("find-content")
+            .expect("find-content")
+            .pipe_filter
+    );
+    for command in ["ls | find . -name x", "ls | fd x", "ls | git ls-files"] {
+        assert_eq!(
+            shipped_sym_instead(&policy, command).as_deref(),
+            Some("legion sym etc find-file"),
+            "`{command}`"
+        );
+    }
 }
 
 #[test]

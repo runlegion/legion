@@ -104,8 +104,13 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
 
     let mut parts: Vec<PartOutcome> = Vec::new();
     for invocation in &expanded.invocations {
-        let part =
-            evaluate::decide_bash_invocation(policy, &invocation.binary, &invocation.args, ctx);
+        let part = evaluate::decide_bash_invocation(
+            policy,
+            &invocation.binary,
+            &invocation.args,
+            invocation.reads_pipe,
+            ctx,
+        );
         parts.push(evaluate::refuse_rewrite_dropping_shell_words(
             part, invocation,
         ));
@@ -604,6 +609,76 @@ mod tests {
         match decide("grep -rn foo . | head").decision {
             Decision::Deny(details) => assert_eq!(details.instead(), "legion sym find-content"),
             other => panic!("expected deny naming sym, got {other:?}"),
+        }
+    }
+
+    /// `sample_policy` with its find-content job declared a pipe filter.
+    fn pipe_filter_policy() -> Policy {
+        policy(
+            r#"{
+            "sym_jobs": [
+                {"id": "find-content", "sym_command": "legion sym find-content",
+                 "interpreter_patterns": ["rglob", "read_text"], "pipe_filter": true}
+            ],
+            "wrappers": [{"binary": "xargs"}],
+            "interpreters": [{"binary": "sh", "flag": "-c", "body": "shell"}],
+            "tools": {"Bash": {"families": {
+                "grep": {"rules": [
+                    {"id": "grep-search", "outcome": {"kind": "sym", "job": "find-content"}}
+                ]},
+                "curl": {"rules": [
+                    {"id": "curl-proxy", "outcome": {"kind": "proxy", "reason": "binary"}}
+                ]}
+            }}}
+        }"#,
+        )
+    }
+
+    fn sym_instead(routed: &Routed) -> Option<&str> {
+        match &routed.decision {
+            Decision::Deny(details) => Some(details.instead()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_pipe_filter_binary_reading_a_pipe_takes_the_strictest_part() {
+        // FR-CMD-007 rev 13: the grep stage is not a sym job, so the pipeline
+        // folds by the strictest Decision among its parts.
+        let p = pipe_filter_policy();
+        let ctx = Context::default();
+        assert_eq!(
+            route(&p, &bash("ls | grep -i legion"), &ctx).decision,
+            Decision::Allow { note: None }
+        );
+        assert_eq!(
+            route(&p, &bash("ls | FOO=1 grep x"), &ctx).decision,
+            Decision::Allow { note: None }
+        );
+        assert_eq!(
+            route(&p, &bash("curl example.com | grep ok"), &ctx).decision,
+            Decision::Proxy {
+                reason: ProxyReason::Binary
+            }
+        );
+    }
+
+    #[test]
+    fn a_pipe_filter_binary_outside_a_pipe_stage_is_still_sent_to_sym() {
+        let p = pipe_filter_policy();
+        let ctx = Context::default();
+        for command in [
+            "grep -rn foo . | head",
+            "cd src && grep -rn foo .",
+            // Re-entered payloads are split as their own text.
+            "ls | xargs grep foo",
+            "ls | sh -c 'grep foo'",
+        ] {
+            assert_eq!(
+                sym_instead(&route(&p, &bash(command), &ctx)),
+                Some("legion sym find-content"),
+                "`{command}`"
+            );
         }
     }
 

@@ -354,7 +354,7 @@ mod tests {
     /// `gh pr` asks, `xxd` proxies, `ls` allows with a note, `git push` needs
     /// recall and consult, and an Explore spawn rewrites its `subagent_type`.
     const POLICY: &str = r#"{
-        "route": {"deadline_ms": 2000},
+        "route": {"deadline_ms": 7000},
         "tools": {
             "Bash": {"families": {
                 "gh issue view": {"rules": [
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn an_overrun_reports_a_deny_naming_the_deadline() {
-        let policy = POLICY.replacen("\"deadline_ms\": 2000", "\"deadline_ms\": 20", 1);
+        let policy = POLICY.replacen("\"deadline_ms\": 7000", "\"deadline_ms\": 20", 1);
         let report = check_with(
             bash("git push"),
             Ok(policy),

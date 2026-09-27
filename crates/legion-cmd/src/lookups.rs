@@ -82,8 +82,9 @@ fn matched_rules<'a>(policy: &'a Policy, call: &ToolCall) -> Vec<(&'a Rule, Stri
                 let BashReading::Words { args, start } = reading else {
                     continue;
                 };
-                if let Some(rule) = select_bash_rule(policy, binary, args, *start)
-                    .and_then(|selection| selection.rule)
+                if let Some(rule) =
+                    select_bash_rule(policy, binary, args, *start, invocation.reads_pipe)
+                        .and_then(|selection| selection.rule)
                     && !rules.iter().any(|seen| seen.id == rule.id)
                 {
                     rules.push(rule);
@@ -259,6 +260,26 @@ mod tests {
         let found = required_lookups(&sample_policy(), &bash("gh issue list | gh pr merge 7"));
         assert_eq!(found.recall.as_deref(), Some("gh issue list gh pr merge 7"));
         assert_eq!(found.consult.as_deref(), Some("gh pr merge 7"));
+    }
+
+    #[test]
+    fn a_pipe_filter_rule_passed_over_in_a_pipe_stage_requires_nothing() {
+        // The pre-pass selects the rule route selects: a grep reading a pipe
+        // is not managed by a pipe-filter sym job (#1319), so its lookup is
+        // not required there, while the same grep first in a pipeline is.
+        let p = policy(
+            r#"{
+            "sym_jobs": [{"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": true}],
+            "tools": {"Bash": {"families": {"grep": {"rules": [
+                {"id": "grep-to-sym", "requires_recall": true, "outcome": {"kind": "sym", "job": "content"}}
+            ]}}}}
+        }"#,
+        );
+        assert!(required_lookups(&p, &bash("ls | grep x")).is_empty());
+        assert_eq!(
+            required_lookups(&p, &bash("grep x")).recall.as_deref(),
+            Some("grep x")
+        );
     }
 
     #[test]
