@@ -359,7 +359,14 @@ fn shell_quote(word: &str) -> String {
     if !word.is_empty() && word.chars().all(plain) {
         return word.to_string();
     }
-    format!("'{}'", word.replace('\'', r"'\''"))
+    shell_single_quote(word)
+}
+
+/// Single-quotes `text` for a shell command line, closing and reopening the
+/// quote around every embedded single quote (`'\''`), so a command carrying
+/// quotes or metacharacters stays one word.
+pub(crate) fn shell_single_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]

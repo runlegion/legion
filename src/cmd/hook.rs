@@ -110,7 +110,7 @@ use crate::cmd::config::RouteSettings;
 use crate::cmd::confirm::{live_confirmations, use_confirmation, was_used};
 use crate::cmd::incident::{IncidentLog, Origin};
 use crate::cmd::prediction::{self, AppliedRewrite};
-use crate::cmd::replacement::{build_replacement, rewritable_field};
+use crate::cmd::replacement::{build_replacement, rewritable_field, shell_single_quote};
 use crate::db::Database;
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
@@ -1205,13 +1205,6 @@ fn quoted_command(command: Option<&str>) -> String {
         Some(command) => shell_single_quote(command),
         None => "<command>".to_string(),
     }
-}
-
-/// Single-quotes `text` for a shell command line, closing and reopening the
-/// quote around every embedded single quote (`'\''`), so a command carrying
-/// quotes or metacharacters stays one word.
-fn shell_single_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
