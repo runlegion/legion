@@ -306,13 +306,15 @@ fn run() -> error::Result<()> {
             tag,
             force,
             force_reason,
-        } => cli::push::handle_push(repo, branch, tag, force, force_reason)?,
+            dir,
+        } => cli::push::handle_push(repo, branch, tag, force, force_reason, dir)?,
         Commands::Commit {
             repo,
             message,
             message_file,
             card,
-        } => cli::commit::handle_commit(repo, message, message_file, card)?,
+            dir,
+        } => cli::commit::handle_commit(repo, message, message_file, card, dir)?,
         Commands::Comment { repo, number, body } => cli::issue::handle_comment(repo, number, body)?,
         Commands::Audit {
             repo,

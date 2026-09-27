@@ -827,3 +827,155 @@ fn push_force_conflicts_with_tag() {
         "expected clap's conflicts_with refusal, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1301: `legion push -C <dir>` behaves as if started in <dir>.
+// ---------------------------------------------------------------------------
+
+/// Run from the first checkout (on `main`), `legion push -C <worktree>` with
+/// no `--branch` pushes the branch the WORKTREE has checked out -- the
+/// default branch is read in `<dir>`, not the CWD. Without `-C` the default
+/// would be the CWD's `main`, which is refused.
+#[cfg(unix)]
+#[test]
+fn push_with_dash_c_pushes_that_checkouts_branch_from_another_cwd() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path());
+    run_git_fixture(local.path(), &["checkout", "-q", "main"]);
+
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked_path = linked_parent.path().join("linked-checkout");
+    run_git_fixture(
+        local.path(),
+        &["worktree", "add", linked_path.to_str().unwrap(), "feat/x"],
+    );
+
+    let data_dir = tempfile::tempdir().unwrap();
+    let stdout = run_ok(push_cmd(data_dir.path(), local.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "-C",
+        linked_path.to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("feat/x"),
+        "expected the worktree's branch feat/x to be pushed, got: {stdout}"
+    );
+    assert!(
+        rev_parse(remote.path(), "refs/heads/feat/x")
+            .status
+            .success(),
+        "expected feat/x on the remote after push -C <worktree>"
+    );
+}
+
+/// `-C` changes where the command stands, never what it refuses: `main` is
+/// still refused, and a `--force` that would orphan a commit is still
+/// refused without `--force-reason`. The CWD is a directory outside any
+/// repo, so every git read the refusals depend on had to come from `-C`.
+#[cfg(unix)]
+#[test]
+fn push_with_dash_c_still_refuses_main() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path()); // on feat/x
+    let lp = local.path();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), elsewhere.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "-C",
+        lp.to_str().unwrap(),
+        "--branch",
+        "main",
+    ]));
+    assert!(
+        stderr.contains("refusing to push 'main'"),
+        "expected PushRefused naming main, got: {stderr}"
+    );
+
+    // An orphaning rewrite: push feat/x, then drop its only commit locally.
+    run_git_fixture(lp, &["push", "-q", "origin", "feat/x"]);
+    let orphan_sha = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+    run_git_fixture(lp, &["reset", "-q", "--hard", "main"]);
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), elsewhere.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "-C",
+        lp.to_str().unwrap(),
+        "--force",
+    ]));
+    assert!(
+        stderr.contains("refusing to push 'feat/x'") && stderr.contains("--force-reason"),
+        "expected the orphan refusal naming the override, got: {stderr}"
+    );
+    assert!(stderr.contains(&orphan_sha), "got: {stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&rev_parse(remote.path(), "refs/heads/feat/x").stdout).trim(),
+        orphan_sha,
+        "the refused push must not have touched the remote"
+    );
+}
+
+/// A `-C` directory that is not inside a git repository is refused naming
+/// the directory, as a work-source error.
+#[cfg(unix)]
+#[test]
+fn push_with_dash_c_outside_git_names_the_dir() {
+    let not_a_repo = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(push_cmd(data_dir.path(), not_a_repo.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "-C",
+        not_a_repo.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("work source error")
+            && stderr.contains(not_a_repo.path().to_str().unwrap()),
+        "expected a WorkSource error naming the -C dir, got: {stderr}"
+    );
+}
+
+/// The tag path under `-C` resolves the tag and pushes it from `<dir>`, not
+/// the CWD: run from a directory outside any repo, `legion push -C <dir>
+/// --tag` pushes a tag only `<dir>`'s repo has.
+#[cfg(unix)]
+#[test]
+fn push_with_dash_c_pushes_a_tag_from_another_cwd() {
+    let _guard = RealRepoConfigGuard::new();
+    let remote = init_bare_remote();
+    let local = setup_local_repo(remote.path()); // on feat/x
+    let lp = local.path();
+    // The tagged commit must be on origin, or the dangling-tag refusal fires.
+    run_git_fixture(lp, &["push", "-q", "origin", "feat/x"]);
+    run_git_fixture(lp, &["tag", "v-dash-c"]);
+    let tagged = run_git_fixture_output(lp, &["rev-parse", "HEAD"]);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let stdout = run_ok(push_cmd(data_dir.path(), elsewhere.path()).args([
+        "push",
+        "--repo",
+        "test-agent",
+        "-C",
+        lp.to_str().unwrap(),
+        "--tag",
+        "v-dash-c",
+    ]));
+    assert!(stdout.contains("v-dash-c"), "got: {stdout}");
+    assert_eq!(
+        String::from_utf8_lossy(&rev_parse(remote.path(), "refs/tags/v-dash-c").stdout).trim(),
+        tagged,
+        "expected the tag on the remote after push -C <dir> --tag"
+    );
+}

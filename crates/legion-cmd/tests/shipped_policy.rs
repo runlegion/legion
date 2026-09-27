@@ -423,19 +423,24 @@ fn shipped_find_file_jobs_are_not_pipe_filters() {
 #[test]
 fn shipped_git_global_options_route_by_the_subcommand_family() {
     let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    for (command, rule, verb, option) in [
-        ("git -C /tmp push", "git-push-to-legion", "push", "-C"),
+    for (command, rule, verb, carried) in [
+        (
+            "git -C /tmp push",
+            "git-push-to-legion",
+            "push",
+            vec!["-C", "/tmp"],
+        ),
         (
             "git -c user.name=x commit -m y",
             "git-commit-to-legion",
             "commit",
-            "-c",
+            vec!["-c", "user.name=x", "-m", "y"],
         ),
         (
             "git --git-dir=.git push",
             "git-push-to-legion",
             "push",
-            "--git-dir=.git",
+            vec!["--git-dir=.git"],
         ),
     ] {
         let routed = shipped_route(&policy, command);
@@ -449,17 +454,55 @@ fn shipped_git_global_options_route_by_the_subcommand_family() {
             "`{command}`"
         );
         assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
-        // That rule carries the words after its verb; the global option
-        // comes before it, so it is not carried, and it is refused by name
-        // rather than dropped (FR-CMD-008).
+        // That rule carries the declared global options ahead of the words
+        // after its verb (#1301). Whether the target accepts them is its own
+        // parse, in the adapter: legion push and commit take `-C`, and refuse
+        // `-c` and `--git-dir` by name (src/cmd/hook.rs).
+        assert!(
+            matches!(routed.decision, Decision::Rewrite { .. }),
+            "`{command}`: {:?}",
+            routed.decision
+        );
+        let expected: Vec<String> = carried.iter().map(|w| w.to_string()).collect();
+        assert_eq!(routed.facts.carried, expected, "`{command}`");
+    }
+}
+
+#[test]
+fn git_dash_c_push_and_commit_rewrite_carrying_dash_c() {
+    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
+    for (command, target, carried) in [
+        (
+            "git -C /tmp/x push",
+            "legion push --repo {repo}",
+            vec!["-C", "/tmp/x"],
+        ),
+        (
+            "git -C /tmp/x commit -m \"fix: y\"",
+            "legion commit --repo {repo}",
+            vec!["-C", "/tmp/x", "-m", "fix: y"],
+        ),
+    ] {
+        let routed = shipped_route(&policy, command);
         match &routed.decision {
-            Decision::Deny(details) => assert!(
-                details.reason().contains(&format!("`{option}`")),
-                "`{command}`: {}",
-                details.reason()
-            ),
-            other => panic!("`{command}` should be denied naming `{option}`, got {other:?}"),
+            Decision::Rewrite { target: got, .. } => {
+                assert_eq!(got.as_str(), target, "`{command}`")
+            }
+            other => panic!("`{command}` should rewrite, got {other:?}"),
         }
+        let expected: Vec<String> = carried.iter().map(|w| w.to_string()).collect();
+        assert_eq!(routed.facts.carried, expected, "`{command}`");
+    }
+    // After the verb, git commit's `-C` reuses a message; legion commit's
+    // names a directory, so the rule refuses to carry it (deny_flags).
+    let reuse = shipped_route(&policy, "git commit -C HEAD -m fix");
+    match &reuse.decision {
+        Decision::Deny(details) => assert!(
+            details.reason().contains("`-C`") && details.reason().contains("different meaning"),
+            "{}",
+            details.reason()
+        ),
+        other => panic!("post-verb -C should be denied, got {other:?}"),
     }
 }
 
@@ -634,14 +677,19 @@ fn mirror_policy_routes_an_inline_git_alias_by_what_it_runs() {
             "`{command}`"
         );
         assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
-        // The rule carries the words after its verb; `-c` comes before it,
-        // so it is refused by name rather than dropped (FR-CMD-008).
-        match &routed.decision {
-            Decision::Deny(details) => {
-                assert!(details.reason().contains("`-c`"), "`{command}`")
-            }
-            other => panic!("`{command}` should be denied naming `-c`, got {other:?}"),
-        }
+        // The rule carries the declared global options ahead of the words
+        // after its verb (#1301), so `-c` is carried, never dropped; the
+        // target's own parse in the adapter refuses it by name (FR-CMD-008).
+        assert!(
+            matches!(routed.decision, Decision::Rewrite { .. }),
+            "`{command}`: {:?}",
+            routed.decision
+        );
+        assert_eq!(
+            routed.facts.carried.first().map(String::as_str),
+            Some("-c"),
+            "`{command}`"
+        );
     }
     for command in ["git -c alias.s=status s", "git -c alias.p=push status"] {
         assert_eq!(

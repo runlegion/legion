@@ -2796,6 +2796,13 @@ mod tests {
                 "gh issue list --repo runlegion/legion",
                 "legion issue list --repo legion",
             ),
+            // git's -C before the verb is carried; legion push and commit
+            // take it (#1301).
+            ("git -C /tmp/x push", "legion push --repo legion -C /tmp/x"),
+            (
+                "git -C /tmp/x commit -m \"fix: y\"",
+                "legion commit --repo legion -C /tmp/x -m 'fix: y'",
+            ),
         ] {
             let response = shipped(command);
             assert_eq!(
@@ -2818,6 +2825,12 @@ mod tests {
             ("gh issue view 7 --json title", "`--json`"),
             ("git commit -m \"$MSG\"", "`\"$MSG\"`"),
             ("git commit -m *.txt", "`*.txt`"),
+            // A global option other than -C is carried and the target, which
+            // defines only -C, refuses it (#1301).
+            ("git -c user.name=x commit -m y", "'-c'"),
+            ("git --git-dir=.git push", "'--git-dir'"),
+            // After the verb, git commit's -C reuses a message (#1301).
+            ("git commit -C HEAD -m x", "`-C`"),
         ] {
             let response = shipped(command);
             assert_denied(&response);

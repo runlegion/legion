@@ -936,6 +936,11 @@ pub(crate) enum Commands {
         /// genuine orphan; ignored when every discarded commit survives.
         #[arg(long, requires = "force")]
         force_reason: Option<String>,
+
+        /// Run as if legion was started in <DIR> (git's -C): every git invocation
+        /// this command makes, and every relative path it reads, resolves against <DIR>.
+        #[arg(short = 'C', value_name = "DIR")]
+        dir: Option<std::path::PathBuf>,
     },
 
     /// Commit the staged index -- the sanctioned in-band commit path (#854).
@@ -980,6 +985,11 @@ pub(crate) enum Commands {
         /// kanban card this used to name is gone).
         #[arg(long)]
         card: Option<String>,
+
+        /// Run as if legion was started in <DIR> (git's -C): every git invocation
+        /// this command makes, and every relative path it reads, resolves against <DIR>.
+        #[arg(short = 'C', value_name = "DIR")]
+        dir: Option<std::path::PathBuf>,
     },
 
     /// View the audit log of work source actions
