@@ -1,5 +1,111 @@
 # Legion Changelog
 
+## 0.42.1
+
+The carried-arguments release. In 0.42.0 the shipped policy built no Bash rewrite: every
+Bash rewrite rule declared translatable arguments, the adapter refused them, and `git push`,
+`git commit` and the managed gh verbs were denied with the legion command to type instead.
+Rewrites now carry the agent's arguments into the legion command, and legion's own clap
+definition decides whether the result is lossless. So `git commit -m "..."`, `git push`,
+`gh pr view 1234`, `gh issue list` and `git -C <dir> push` run as their audited legion
+equivalents instead of being denied. An argument the legion command does not accept (for
+example `git push -u`, since `legion push` has no `-u`) is refused with clap's message
+naming it. `legion commit` gains `-m` and `-F` (git's spellings), and `legion push` and
+`legion commit` gain `-C <dir>`. Two routing fixes ship with it. A `$(...)` whose heredoc body holds an unbalanced `(` no longer
+hides the command inside it from the no-go list. A `grep` reading a pipe is no longer
+denied as a content search.
+
+Patch release: behavior within the existing legion-cmd rewrite surface and short flags
+added to existing commands. No wire-format change and no schema migration. The policy
+format changes for rewrite rules: `translatable` is gone, replaced by the exception fields
+`positional`, `reshape` and `deny_flags`. A custom policy that sets `translatable` needs
+those exception fields instead.
+
+### New
+
+- **Bash rewrites carry the agent's arguments, judged by the target's clap tree** (PR
+  #1322, #1278). Route now carries the words after the matched verb as literal values
+  (`Facts::carried`). It denies, naming the word, when a word comes before the verb, when
+  the shell would expand a word, or when a word hits the rule's `deny_flags`. The adapter
+  (`src/cmd/replacement.rs`) builds the replacement from the carried words, never from the
+  raw command string. It starts from the rule's target prefix and fills `{repo}` with the
+  repo it derived from `LEGION_REPO` or the working directory. A source flag that the
+  prefix also sets replaces the prefix's value in place, after any `reshape` exception
+  has transformed it (`reshape` `repo_name` turns `gh pr view --repo owner/name` into
+  `--repo name`). Each
+  positional that the rule's `positional` exception names becomes its named flag
+  (`gh pr view 1234` becomes `--number 1234`), and every other carried word follows in
+  source order. The assembled command is parsed with `Cli::command()` before it is
+  returned. If the parse accepts, the words are shell-quoted and joined. If it rejects,
+  the rewrite is refused with clap's own message naming the argument. A help or version
+  request is refused as well, because it would run nothing the agent asked for. Which
+  word is a flag's value comes from the target's declared arity, not from a table in the
+  adapter. The shipped policy lists exceptions only. `gh pr view`, `gh pr checks` and
+  `gh issue view` map their positional to `--number`. `gh pr list` and `gh issue list`,
+  which 0.42.0 denied because the target could not carry `--repo`, now rewrite. Every gh
+  rule denies `--json`. `git-push-to-legion` denies `--repo` and `--force`, and
+  `git-commit-to-legion` denies `-C` (see the `-C` bullet). `legion commit` gains `-m` as
+  the short form of `--message` and `-F` as the short form of `--message-file`, so a
+  `git commit -m` rewrite carries its flag unchanged. `ArgSpec`, `OperandShape`,
+  `translatable`, `FallbackDecision`/`otherwise`, the untranslatable check and the
+  `*NotCarried` refusals are removed. `hook_cases.json` is updated for the rewrites that
+  now build.
+
+- **`legion push -C` and `legion commit -C`, so `git -C <dir> push/commit` rewrites** (PR
+  #1325, #1301). Both commands accept `-C <dir>` and behave as if started in `<dir>`.
+  `legion push` reads its default branch, its worktree list and the tag path's checkout
+  in `<dir>`. The tag path's checkout is made absolute, so the audit row and confirmation
+  line have the same path shape as a run without `-C`. Branch-to-worktree resolution, the
+  main/master and refspec refusals and the `--force` gate are unchanged. `legion commit`
+  resolves its checkout with `git -C <dir> rev-parse --show-toplevel` and reads a relative
+  `--message-file` from `<dir>`. A `<dir>` outside any repository fails with `WorkSource`
+  (push) or `CommitRefused` (commit), naming the directory. On the routing side,
+  `evaluate::carry` now also carries the words before the verb that the binary's
+  `global_options` declaration resolves (for git, `-C <dir>`), ahead of the words after
+  the verb. The target's clap parse judges them like any other carried argument, so
+  `legion push` and `legion commit` accept `-C` and refuse `-c` and `--git-dir` by name. A
+  pre-verb word that no declaration resolves still denies, naming the word. Pre-verb words
+  get the literal check but not `deny_flags`, because `deny_flags` names the subcommand's
+  own flags. `git-commit-to-legion` lists `-C` in `deny_flags` because the two meanings
+  differ: after the verb, git's `-C` reuses a commit's message, while legion commit's `-C`
+  names a directory.
+
+### Fixed
+
+- **A substitution hidden by an unbalanced heredoc paren is recovered** (PR #1324, #1323).
+  brush-parser's `word::parse` does not read here-documents. When a `$(...)` has an
+  unbalanced `(` in its heredoc body, the substitution rule failed and the word came back
+  as plain text starting with `$(`. The command-level tokenizer does read heredocs and took
+  the same text as one substitution, so the two parsers disagreed. As a result,
+  `echo "$(rm -rf / <<'EOF' ... a (b ... EOF)"` routed allow because the no-go check never
+  saw `rm`. `git commit -m "$(cat <<'EOF' ... a (b ... EOF)"` rewrote with the raw source
+  text as the commit message. The fix is in `parse_word_pieces`, the one entry point for
+  the walk, the command-word classifier, `is_plain_word` and `literal_word`. When a text
+  piece holds an unescaped `$(`, the tokenizer finds where the substitution ends: the
+  shortest `$(...)` prefix that it reads as exactly one word. The word is then re-parsed
+  with the body masked to an empty `$()`, and the body is put back into that piece. If
+  any step cannot be proven, the word is Unparsed and never literal. That covers no end
+  found, an empty body, a `$((` that may be arithmetic, and no `$()` piece where the mask
+  went. Both commands now scan and route like their balanced versions. The `rm` form is a
+  no-go deny, quoted or bare. The commit form is refused, naming the word as not a plain
+  literal, and carries nothing. Battery rows cover both.
+
+- **A grep reading a pipe is not a content search** (PR #1320, #1319). A sym-job binary in
+  a pipeline stage after the first filters the previous command's output, which sym cannot
+  do. `cmd | grep foo` was denied and pointed at `legion sym etc find-content` anyway. The
+  splitter's `Invocation` gains `reads_pipe`, true for every pipeline stage after the first
+  and independent of `Position`. Wrapper payloads and interpreter bodies are split as
+  their own text, so their first stage starts false. `SymJob` gains `pipe_filter` (policy
+  key `pipe_filter`, default false), and the shipped policy sets it on `find-content`
+  only. `select_bash_rule` skips a pipe-filter sym rule for a stage that reads a pipe. When
+  that was the only rule that matched, the invocation takes the no-match default. Route
+  and the lookup pre-pass both pass `reads_pipe`, so they select the same rule. Three
+  grep-after-pipe rows in `hook_cases.json` now route allow and agree with the retired
+  hook. The same PR raises the adapter test policies' route deadline from 2000 ms to the
+  production 7000 ms. Since #1278 a rewrite builds and parses the clap command tree, and a
+  debug build on the Windows runner took 2.29 s on one rewrite test. A release build answers
+  in about 6 ms, so this is test headroom and not a production cost.
+
 ## 0.42.0
 
 The one-router release. The twelve PreToolUse command hooks are gone. One hook,
