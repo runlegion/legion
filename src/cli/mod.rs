@@ -971,12 +971,14 @@ pub(crate) enum Commands {
 
         /// Commit message. Mutually exclusive with --message-file. Omit
         /// both to read from stdin (#917) -- the only shell-safe way to
-        /// pass a message containing backticks or $(...).
-        #[arg(long)]
+        /// pass a message containing backticks or $(...). `-m` is git's own
+        /// spelling, so a `git commit -m` rewrite carries it unchanged (#1278).
+        #[arg(long, short = 'm')]
         message: Option<String>,
 
         /// File holding the commit message. Mutually exclusive with --message.
-        #[arg(long)]
+        /// `-F` is git's own spelling of the same option (#1278).
+        #[arg(long, short = 'F')]
         message_file: Option<String>,
 
         /// Opaque work-item label recorded on the audit row (#931: the

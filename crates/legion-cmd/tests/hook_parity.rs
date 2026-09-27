@@ -32,6 +32,12 @@
 //! - optional `target` (a rewrite's target name), `facts` (the four Facts
 //!   fields a rewrite row shows), `note_contains` / `note_excludes` (an
 //!   allow's note), `instead_contains` (a deny's replacement)
+//! - on every Bash rewrite row, exactly one of `replacement` (the command the
+//!   adapter builds) or `adapter_denies` (text the adapter's deny names when
+//!   the target's own parse rejects the carried words, #1278). route cannot
+//!   check these -- the target's clap tree lives in the adapter -- so
+//!   `src/cmd/hook.rs` runs every such row through the adapter over this same
+//!   policy and holds it to them.
 //!
 //! Every failing row is reported by hook and case id, not only the first. The
 //! policy and the fixture are compiled in with `include_str!`, so no test here
@@ -120,6 +126,13 @@ struct HookCase {
     note_excludes: Option<String>,
     #[serde(default)]
     instead_contains: Option<String>,
+    /// On a Bash rewrite row: the command the adapter builds (#1278).
+    #[serde(default)]
+    replacement: Option<String>,
+    /// On a Bash rewrite row: text the adapter's deny names, when the
+    /// target's own parse rejects the carried words (#1278).
+    #[serde(default)]
+    adapter_denies: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +263,22 @@ fn hook_cases_fixture_is_well_formed_and_honest() {
         if case.instead_contains.is_some() && case.route != "deny" {
             problems.push(format!(
                 "{id}: instead_contains is only meaningful on a deny row"
+            ));
+        }
+        // A Bash rewrite is decided twice: route's arm here, then the
+        // target's own parse in the adapter (FR-CMD-008 rev 3). The row says
+        // which way the second went, so the adapter's test can hold it to it.
+        let adapter_outcomes =
+            usize::from(case.replacement.is_some()) + usize::from(case.adapter_denies.is_some());
+        let bash_rewrite = case.tool == "Bash" && case.route == "rewrite";
+        if bash_rewrite && adapter_outcomes != 1 {
+            problems.push(format!(
+                "{id}: a Bash rewrite row carries exactly one of replacement / adapter_denies"
+            ));
+        }
+        if !bash_rewrite && adapter_outcomes != 0 {
+            problems.push(format!(
+                "{id}: replacement / adapter_denies are only meaningful on a Bash rewrite row"
             ));
         }
     }
@@ -433,6 +462,9 @@ fn every_hook_case_matches_routes_actual_decision() {
                 // The fixtures pin the extracted words, not the key derived from
                 // the whole command (#1237); nogo.rs tests the key.
                 command_key: routed.facts.command_key.clone(),
+                // The carried words are pinned by the adapter's replacement
+                // tests over this same policy (#1278), not by these rows.
+                carried: routed.facts.carried.clone(),
             };
             if routed.facts != expected {
                 failures.push(format!(
@@ -502,8 +534,9 @@ fn a_call_missing_a_field_its_rule_reads_is_denied_not_a_panic() {
 #[test]
 fn a_bash_family_policy_error_reports_its_json_pointer() {
     // The Bash side of the same Error Handling: a field predicate under a
-    // Bash family, and a rewrite with no declared translatable arguments,
-    // each fail with the exact pointer of the entry at fault.
+    // Bash family, and a rewrite still carrying a per-flag `translatable`
+    // list (FR-CMD-008 rev 3 retired it), each fail with the exact pointer of
+    // the entry at fault.
     let field_under_bash = r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
         {"id": "p", "predicates": [{"kind": "field-present", "field": "command"}], "outcome": {"kind": "allow"}}
     ]}}}}}"#;
@@ -515,15 +548,15 @@ fn a_bash_family_policy_error_reports_its_json_pointer() {
         "got {err}"
     );
 
-    let verb_only_rewrite = r#"{"tools": {"Bash": {"families": {"gh pr view": {"rules": [
-        {"id": "v", "outcome": {"kind": "rewrite", "target": "legion pr view", "reason": "audit"}}
+    let per_flag_list = r#"{"tools": {"Bash": {"families": {"gh pr view": {"rules": [
+        {"id": "v", "outcome": {"kind": "rewrite", "target": "legion pr view", "reason": "audit",
+         "translatable": {"operands": ["integer"]}}}
     ]}}}}}"#;
-    let err =
-        parse_policy(verb_only_rewrite).expect_err("a rewrite with no translatable must not parse");
+    let err = parse_policy(per_flag_list).expect_err("a per-flag list must not parse");
     assert_eq!(
         err,
-        PolicyError::MissingField {
-            pointer: "/tools/Bash/families/gh pr view/rules/0/outcome".to_string(),
+        PolicyError::UnknownField {
+            pointer: "/tools/Bash/families/gh pr view/rules/0/outcome/translatable".to_string(),
             field: "translatable".to_string(),
         }
     );
