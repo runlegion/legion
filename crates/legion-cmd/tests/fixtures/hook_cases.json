@@ -1885,9 +1885,9 @@
     "tool": "Bash",
     "input": { "command": "cat src/main.rs | grep fn_main" },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "the hook classifies by the leading binary only, so a grep after a pipe passes. FR-CMD-007: a managed binary after a pipe is routed identically. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "the hook classifies by the leading binary only, so a grep after a pipe passes. FR-CMD-007 rev 13 (#1319): a grep reading a pipe filters the previous command's output, so the pipe-filter find-content job does not claim it and it takes the allow default."
   },
   {
     "hook": "pre-bash-grep.sh",
@@ -1915,10 +1915,9 @@
     "tool": "Bash",
     "input": { "command": "legion bullpen --repo shingle | grep checkpoint" },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "instead_contains": "legion sym etc find-content",
-    "note": "#1264: a grep filtering legion's own stdout searches no repository file. The hook checks the leading binary only (legion), so it already passes this today; the refusals agents hit most likely came from the operator's permissions.deny. #1264 asks that it be allowed. route judges each invocation alone and a sym part wins the fold; the policy language has no predicate on where a stage's input comes from (pipeline context), and FR-CMD-007 routes a managed binary after a pipe identically. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "#1264: a grep filtering legion's own stdout searches no repository file. The hook checks the leading binary only (legion), so it already passes this today. FR-CMD-007 rev 13 (#1319): the grep reads a pipe, and the find-content job is declared a pipe filter, so it is not a sym job there and takes the allow default."
   },
   {
     "hook": "pre-bash-grep.sh",
@@ -1926,9 +1925,9 @@
     "tool": "Bash",
     "input": { "command": "legion post --help | grep repo" },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "#1264: as bgrep-1264-grep-of-legion-stdout, on legion's help text. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "#1264: as bgrep-1264-grep-of-legion-stdout, on legion's help text (#1319)."
   },
   {
     "hook": "pre-bash-grep.sh",

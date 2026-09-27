@@ -287,6 +287,12 @@ pub struct SymJob {
     pub id: String,
     pub sym_command: String,
     pub interpreter_patterns: Vec<String>,
+    /// True when the job's binaries also filter standard input, so one that
+    /// reads a pipe (`ls | grep x`) is filtering the previous command's
+    /// output, which sym cannot serve, rather than searching files
+    /// (FR-CMD-007 rev 13). Declared per job so the evaluator names no
+    /// binary; policy key `"pipe_filter"`, default false.
+    pub pipe_filter: bool,
 }
 
 /// A name the policy says wraps a shell command (FR-CMD-007). route re-enters
@@ -1548,7 +1554,7 @@ fn parse_sym_jobs(
         check_known_keys(
             map,
             &job_pointer,
-            &["id", "sym_command", "interpreter_patterns"],
+            &["id", "sym_command", "interpreter_patterns", "pipe_filter"],
         )?;
         let id = require_string(map, "id", &job_pointer)?;
         if id.is_empty() {
@@ -1570,10 +1576,12 @@ fn parse_sym_jobs(
             )?,
             None => Vec::new(),
         };
+        let pipe_filter = optional_bool(map, "pipe_filter", &job_pointer)?;
         jobs.push(SymJob {
             id,
             sym_command,
             interpreter_patterns,
+            pipe_filter,
         });
     }
     Ok(jobs)
@@ -2509,6 +2517,34 @@ mod tests {
             err,
             PolicyError::EmptySymJobId {
                 pointer: "/sym_jobs/0/id".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_sym_job_reads_pipe_filter_and_defaults_it_to_false() {
+        let text = r#"{"sym_jobs": [
+            {"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": true},
+            {"id": "file", "sym_command": "legion sym etc find-file"},
+            {"id": "tree", "sym_command": "legion sym tree", "pipe_filter": false}
+        ]}"#;
+        let policy = parse_policy(text).expect("valid policy");
+        assert!(policy.sym_job("content").expect("content").pipe_filter);
+        assert!(!policy.sym_job("file").expect("file").pipe_filter);
+        assert!(!policy.sym_job("tree").expect("tree").pipe_filter);
+    }
+
+    #[test]
+    fn a_non_boolean_pipe_filter_is_rejected() {
+        let text = r#"{"sym_jobs": [
+            {"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": "yes"}
+        ]}"#;
+        let err = parse_policy(text).expect_err("string pipe_filter");
+        assert_eq!(
+            err,
+            PolicyError::WrongType {
+                pointer: "/sym_jobs/0/pipe_filter".to_string(),
+                expected: "a boolean".to_string(),
             }
         );
     }

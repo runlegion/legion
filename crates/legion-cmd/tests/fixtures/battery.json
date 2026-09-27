@@ -724,5 +724,23 @@
     "note": "-S is a git log flag, not a separate command",
     "expected": "benign",
     "managed": [["git", "first"]]
+  },
+  {
+    "id": "nogo-in-quoted-subst-heredoc-unbalanced-paren",
+    "source": "#1323",
+    "cmd": "echo \"$(rm -rf / <<'EOF'\na (b\nEOF\n)\"",
+    "note": "brush's word parse reads a $(...) whose heredoc body has an unbalanced ( as plain text; the splitter must still record rm inside the substitution so the no-go check sees it",
+    "expected": "visible",
+    "managed": [["echo", "first"], ["rm", "substitution"]],
+    "unreduced": ["interpreter-body"]
+  },
+  {
+    "id": "commit-msg-heredoc-unbalanced-paren",
+    "source": "#1323",
+    "cmd": "git commit -m \"$(cat <<'EOF'\na (b\nEOF\n)\"",
+    "note": "the same word-parse gap in the commit idiom: the message word is a substitution, never literal source text a rewrite could carry",
+    "expected": "visible",
+    "managed": [["git", "first"], ["cat", "substitution"]],
+    "unreduced": ["interpreter-body"]
   }
 ]

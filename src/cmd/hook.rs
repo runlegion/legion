@@ -1336,7 +1336,7 @@ mod tests {
     /// note, `git push` needs recall and consult. The Agent and Edit rewrite
     /// rules back the hand-built `Routed` values that name them.
     const POLICY: &str = r#"{
-        "route": {"deadline_ms": 2000},
+        "route": {"deadline_ms": 7000},
         "tools": {
           "Agent": {"rules": [
               {"id": "agent-explore-to-legion",
@@ -2324,7 +2324,7 @@ mod tests {
     #[test]
     fn a_slow_lookup_overruns_the_configured_deadline_end_to_end() {
         let slow = RecordingLookups::new(Duration::from_millis(400));
-        let policy = POLICY.replacen("\"deadline_ms\": 2000", "\"deadline_ms\": 20", 1);
+        let policy = POLICY.replacen("\"deadline_ms\": 7000", "\"deadline_ms\": 20", 1);
         let response =
             respond_with(&payload("git push"), Ok(policy), slow, temp_store(), None).response;
         assert_denied(&response);
@@ -2586,7 +2586,7 @@ mod tests {
         .expect("emits");
 
         let deadline = Duration::from_millis(400);
-        let policy: String = POLICY.replace(r#""deadline_ms": 2000"#, r#""deadline_ms": 400"#);
+        let policy: String = POLICY.replace(r#""deadline_ms": 7000"#, r#""deadline_ms": 400"#);
         assert_ne!(
             policy, POLICY,
             "the test policy must carry the short deadline"
@@ -2656,7 +2656,7 @@ mod tests {
         // #1288: the largest deadline the policy accepts reaches the
         // decision, not a panic deny.
         let policy: String = POLICY.replace(
-            r#""deadline_ms": 2000"#,
+            r#""deadline_ms": 7000"#,
             &format!(r#""deadline_ms": {}"#, u64::MAX),
         );
         assert_ne!(policy, POLICY, "the test policy must carry the deadline");
