@@ -5,7 +5,8 @@
     {
       "id": "find-content",
       "sym_command": "legion sym etc find-content",
-      "interpreter_patterns": ["rglob", "read_text"]
+      "interpreter_patterns": ["rglob", "read_text"],
+      "pipe_filter": true
     },
     {
       "id": "find-file",

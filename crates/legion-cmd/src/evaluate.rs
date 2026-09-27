@@ -60,10 +60,15 @@ pub struct PartOutcome {
 /// are satisfied -> the rule's outcome. A rewrite rule's outcome is judged
 /// from the arguments beyond the family's subcommand words (FR-CMD-008): the
 /// rewrite when all of them translate, the rule's fallback otherwise.
+///
+/// `reads_pipe` is the invocation's [`Invocation::reads_pipe`]: a pipe-filter
+/// sym job does not claim a stage that reads a pipe (see
+/// [`select_bash_rule`]).
 pub fn decide_bash_invocation(
     policy: &Policy,
     binary: &str,
     args: &[String],
+    reads_pipe: bool,
     ctx: &Context,
 ) -> PartOutcome {
     combine(
@@ -71,7 +76,7 @@ pub fn decide_bash_invocation(
             .iter()
             .map(|reading| match reading {
                 BashReading::Words { args, start } => {
-                    decide_bash_reading(policy, binary, args, *start, ctx)
+                    decide_bash_reading(policy, binary, args, *start, reads_pipe, ctx)
                 }
                 BashReading::Opaque => opaque_default(),
             })
@@ -132,9 +137,10 @@ fn decide_bash_reading(
     binary: &str,
     args: &[String],
     start: usize,
+    reads_pipe: bool,
     ctx: &Context,
 ) -> PartOutcome {
-    let Some(selection) = select_bash_rule(policy, binary, args, start) else {
+    let Some(selection) = select_bash_rule(policy, binary, args, start, reads_pipe) else {
         return allow_default();
     };
 
@@ -186,20 +192,39 @@ pub(crate) struct BashSelection<'a> {
 /// step for Bash, shared by [`decide_bash_invocation`] and the lookup
 /// pre-pass ([`crate::lookups`]) so the two cannot disagree about which rule
 /// applies.
+///
+/// When `reads_pipe` is true (the invocation is a pipeline stage after the
+/// first), a rule routing to a sym job the policy marks
+/// [`crate::SymJob::pipe_filter`] is passed over: the stage is filtering the
+/// previous command's output, which sym cannot serve (FR-CMD-007 rev 13).
+/// A later rule whose predicates hold still governs; when such a sym rule
+/// was the only one that held, the invocation is not managed there and this
+/// returns `None`, the no-match default.
 pub(crate) fn select_bash_rule<'a>(
     policy: &'a Policy,
     binary: &str,
     args: &[String],
     start: usize,
+    reads_pipe: bool,
 ) -> Option<BashSelection<'a>> {
     let ToolRules::Bash { families } = policy.tools.get(&ToolKind::Bash)? else {
         return None;
     };
     let (verb, family, governed) = most_specific_family(families, binary, args, start)?;
-    let rule = family
-        .rules
-        .iter()
-        .find(|rule| predicates_hold(&rule.predicates, args));
+    let mut passed_over = false;
+    let rule = family.rules.iter().find(|rule| {
+        if !predicates_hold(&rule.predicates, args) {
+            return false;
+        }
+        if reads_pipe && is_pipe_filter_sym(policy, rule) {
+            passed_over = true;
+            return false;
+        }
+        true
+    });
+    if rule.is_none() && passed_over {
+        return None;
+    }
     Some(BashSelection {
         verb,
         rule,
@@ -623,6 +648,14 @@ fn matching_sym_job<'a>(policy: &'a Policy, text: &str) -> Option<&'a crate::Sym
     })
 }
 
+/// True when `rule` routes to a sym job the policy marks as a pipe filter.
+fn is_pipe_filter_sym(policy: &Policy, rule: &Rule) -> bool {
+    match &rule.outcome {
+        RuleOutcome::Sym { job } => policy.sym_job(job).is_some_and(|job| job.pipe_filter),
+        _ => false,
+    }
+}
+
 fn sym_outcome(job_id: &str, sym_command: &str) -> PartOutcome {
     sym_outcome_with_verb(job_id, sym_command, None)
 }
@@ -901,8 +934,13 @@ mod tests {
         );
         // `git stash push` does not match the `git push` family: the subcommand
         // word is `stash`, not `push`.
-        let outcome =
-            decide_bash_invocation(&p, "git", &args(&["stash", "push"]), &Context::default());
+        let outcome = decide_bash_invocation(
+            &p,
+            "git",
+            &args(&["stash", "push"]),
+            false,
+            &Context::default(),
+        );
         assert_eq!(outcome.decision, Decision::Allow { note: None });
         assert_eq!(outcome.deciding, Deciding::Default);
     }
@@ -915,7 +953,8 @@ mod tests {
              "outcome": {"kind": "deny", "reason": "force", "instead": "x"}}
         ]}}}}}"#,
         );
-        let outcome = decide_bash_invocation(&p, "git", &args(&["push"]), &Context::default());
+        let outcome =
+            decide_bash_invocation(&p, "git", &args(&["push"]), false, &Context::default());
         // A managed rule that cannot resolve yields deny (FR-CMD-016).
         assert!(matches!(outcome.decision, Decision::Deny(_)));
         assert_eq!(outcome.verb.as_deref(), Some("push"));
@@ -928,7 +967,7 @@ mod tests {
             {"id": "r", "requires_recall": true, "outcome": {"kind": "allow"}}
         ]}}}}}"#,
         );
-        let outcome = decide_bash_invocation(&p, "gh", &args(&[]), &Context::default());
+        let outcome = decide_bash_invocation(&p, "gh", &args(&[]), false, &Context::default());
         assert!(matches!(outcome.decision, Decision::Deny(_)));
         assert_eq!(
             outcome.deciding,
@@ -948,7 +987,7 @@ mod tests {
         );
         // NotFetched -> deny (FR-CMD-016).
         assert!(matches!(
-            decide_bash_invocation(&p, "gh", &args(&[]), &Context::default()).decision,
+            decide_bash_invocation(&p, "gh", &args(&[]), false, &Context::default()).decision,
             Decision::Deny(_)
         ));
         // Fetched (even Empty) -> the rule's own outcome.
@@ -957,7 +996,7 @@ mod tests {
             ..Context::default()
         };
         assert_eq!(
-            decide_bash_invocation(&p, "gh", &args(&[]), &ctx).decision,
+            decide_bash_invocation(&p, "gh", &args(&[]), false, &ctx).decision,
             Decision::Allow { note: None }
         );
     }
@@ -972,7 +1011,8 @@ mod tests {
         ]}}}}}"#,
         );
         assert!(matches!(
-            decide_bash_invocation(&p, "git", &args(&["\"push\""]), &Context::default()).decision,
+            decide_bash_invocation(&p, "git", &args(&["\"push\""]), false, &Context::default())
+                .decision,
             Decision::Deny(_)
         ));
     }
@@ -990,6 +1030,7 @@ mod tests {
                 &p,
                 "git",
                 &args(&["push", "\"--force\""]),
+                false,
                 &Context::default()
             )
             .decision,
@@ -1015,8 +1056,14 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    decide_bash_invocation(&p, "git", &args(&args_list), &Context::default())
-                        .decision,
+                    decide_bash_invocation(
+                        &p,
+                        "git",
+                        &args(&args_list),
+                        false,
+                        &Context::default()
+                    )
+                    .decision,
                     Decision::Deny(_)
                 ),
                 "args {args_list:?} should match git push",
@@ -1208,7 +1255,7 @@ mod tests {
              "needs_operator": true}}
         ]}}}}}"#,
         );
-        let outcome = decide_bash_invocation(&p, "gh", &args(&[]), &Context::default());
+        let outcome = decide_bash_invocation(&p, "gh", &args(&[]), false, &Context::default());
         assert!(matches!(outcome.decision, Decision::Ask(_)));
         // The rule's mark is set, but route's output mark is unset (FR-CMD-006).
         assert_eq!(
@@ -1236,23 +1283,23 @@ mod tests {
         );
         let ctx = Context::default();
         assert!(matches!(
-            decide_bash_invocation(&p, "a", &[], &ctx).decision,
+            decide_bash_invocation(&p, "a", &[], false, &ctx).decision,
             Decision::Allow { .. }
         ));
         assert!(matches!(
-            decide_bash_invocation(&p, "b", &[], &ctx).decision,
+            decide_bash_invocation(&p, "b", &[], false, &ctx).decision,
             Decision::Rewrite { .. }
         ));
         assert!(matches!(
-            decide_bash_invocation(&p, "c", &[], &ctx).decision,
+            decide_bash_invocation(&p, "c", &[], false, &ctx).decision,
             Decision::Proxy { .. }
         ));
         assert!(matches!(
-            decide_bash_invocation(&p, "d", &[], &ctx).decision,
+            decide_bash_invocation(&p, "d", &[], false, &ctx).decision,
             Decision::Deny(_)
         ));
         assert!(matches!(
-            decide_bash_invocation(&p, "e", &[], &ctx).decision,
+            decide_bash_invocation(&p, "e", &[], false, &ctx).decision,
             Decision::Ask(_)
         ));
     }
@@ -1630,7 +1677,7 @@ mod tests {
     ]}}}}}"#;
 
     fn decide(p: &Policy, binary: &str, words: &[&str]) -> PartOutcome {
-        decide_bash_invocation(p, binary, &args(words), &Context::default())
+        decide_bash_invocation(p, binary, &args(words), false, &Context::default())
     }
 
     fn rewrite_target(outcome: &PartOutcome) -> &str {
@@ -1865,6 +1912,7 @@ mod tests {
             &p,
             "grep",
             &args(&["-rn", "foo", "src"]),
+            false,
             &Context::default(),
         );
         assert!(outcome.is_sym);
@@ -1872,5 +1920,72 @@ mod tests {
             Decision::Deny(details) => assert_eq!(details.instead(), "legion sym find-content"),
             other => panic!("expected deny naming sym, got {other:?}"),
         }
+    }
+
+    /// `grep` routes to a pipe-filter job; `find` to a job that is not one.
+    const PIPE_FILTER_POLICY: &str = r#"{
+        "sym_jobs": [
+            {"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": true},
+            {"id": "file", "sym_command": "legion sym etc find-file"}
+        ],
+        "tools": {"Bash": {"families": {
+            "grep": {"rules": [{"id": "grep-to-sym", "outcome": {"kind": "sym", "job": "content"}}]},
+            "find": {"rules": [{"id": "find-to-sym", "outcome": {"kind": "sym", "job": "file"}}]}
+        }}}
+    }"#;
+
+    #[test]
+    fn a_pipe_filter_sym_job_does_not_claim_a_stage_reading_a_pipe() {
+        let p = policy(PIPE_FILTER_POLICY);
+        let piped =
+            decide_bash_invocation(&p, "grep", &args(&["-i", "x"]), true, &Context::default());
+        // Not managed there: the no-match default, not a sym part.
+        assert_eq!(piped.decision, Decision::Allow { note: None });
+        assert_eq!(piped.deciding, Deciding::Default);
+        assert!(!piped.is_sym);
+        assert!(piped.verb.is_none());
+        // The same invocation outside a pipe stage is still the sym job.
+        let first =
+            decide_bash_invocation(&p, "grep", &args(&["-i", "x"]), false, &Context::default());
+        assert!(first.is_sym);
+    }
+
+    #[test]
+    fn a_sym_job_that_is_not_a_pipe_filter_still_claims_a_stage_reading_a_pipe() {
+        let p = policy(PIPE_FILTER_POLICY);
+        let piped = decide_bash_invocation(
+            &p,
+            "find",
+            &args(&[".", "-name", "x"]),
+            true,
+            &Context::default(),
+        );
+        assert!(piped.is_sym);
+        match piped.decision {
+            Decision::Deny(details) => assert_eq!(details.instead(), "legion sym etc find-file"),
+            other => panic!("expected deny naming sym, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_later_rule_still_governs_a_stage_a_pipe_filter_rule_passes_over() {
+        let p = policy(
+            r#"{
+            "sym_jobs": [{"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": true}],
+            "tools": {"Bash": {"families": {"grep": {"rules": [
+                {"id": "grep-to-sym", "outcome": {"kind": "sym", "job": "content"}},
+                {"id": "grep-piped", "outcome": {"kind": "proxy", "reason": "binary"}}
+            ]}}}}
+        }"#,
+        );
+        let piped = decide_bash_invocation(&p, "grep", &args(&["x"]), true, &Context::default());
+        assert_eq!(
+            piped.deciding,
+            Deciding::Rule {
+                id: "grep-piped".to_string(),
+                needs_operator: false
+            }
+        );
+        assert!(!piped.is_sym);
     }
 }

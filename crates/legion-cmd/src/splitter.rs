@@ -109,6 +109,14 @@ pub struct Invocation {
     /// or, set by the router, one on a wrapper or interpreter it re-entered
     /// the command from (`FOO=1 env cmd`).
     pub assigned: bool,
+    /// True when the command is a pipeline stage after the first, so its
+    /// standard input is the previous stage's output (`ls | grep x`). It is a
+    /// grammar fact independent of [`Position`]: `ls | FOO=1 grep x` is
+    /// `AfterAssignment` and still reads the pipe, while the first command of
+    /// a pipeline behind `&&`, `;` or `||` does not. A command the router
+    /// re-enters from a wrapper payload or interpreter body starts at false,
+    /// because the payload is split as its own text.
+    pub reads_pipe: bool,
 }
 
 /// Why a region was not reduced to a command (FR-CMD-007). Closed set.
@@ -703,21 +711,29 @@ fn walk_pipeline(
         } else {
             Position::AfterOperator
         };
-        walk_command(text, command, depth, tag, seq_position, scan);
+        // Read from the stage index alone, not from `stage_is_first`: the
+        // first stage of a pipeline behind `&&` is `AfterOperator` but reads
+        // no pipe.
+        let reads_pipe = index > 0;
+        walk_command(text, command, depth, tag, seq_position, reads_pipe, scan);
     }
 }
 
+/// `reads_pipe` is true when `command` is a pipeline stage after the first.
+/// Only a simple command records it: a compound stage's inner commands are
+/// walked as their own lists and start at false.
 fn walk_command(
     text: &str,
     command: &Command,
     depth: u8,
     tag: Tag,
     seq_position: Position,
+    reads_pipe: bool,
     scan: &mut Scan,
 ) {
     match command {
         Command::Simple(simple) => {
-            walk_simple_command(text, simple, depth, tag, seq_position, scan)
+            walk_simple_command(text, simple, depth, tag, seq_position, reads_pipe, scan)
         }
         Command::Compound(compound, redirects) => {
             let first_inner = scan.invocations.len();
@@ -766,6 +782,7 @@ fn walk_simple_command(
     depth: u8,
     tag: Tag,
     seq_position: Position,
+    reads_pipe: bool,
     scan: &mut Scan,
 ) {
     let mut has_assignment = false;
@@ -832,6 +849,7 @@ fn walk_simple_command(
                     depth,
                     redirected,
                     assigned: has_assignment,
+                    reads_pipe,
                 });
             }
         }
@@ -1372,6 +1390,7 @@ fn walk_compound_command_tagged(
                 depth,
                 tag,
                 tag.unwrap_or(Position::First),
+                false,
                 scan,
             );
         }
@@ -1478,6 +1497,58 @@ mod tests {
         let scan = scan("cat x | FOO=1 grep y").expect("parses");
         assert_eq!(positions(&scan, "grep"), vec![Position::AfterAssignment]);
         assert_eq!(positions(&scan, "cat"), vec![Position::First]);
+    }
+
+    fn reads_pipe(scan: &Scan, binary: &str) -> Vec<bool> {
+        scan.invocations
+            .iter()
+            .filter(|inv| inv.binary == binary)
+            .map(|inv| inv.reads_pipe)
+            .collect()
+    }
+
+    #[test]
+    fn a_pipeline_stage_after_the_first_reads_the_pipe() {
+        let scan = scan("ls | grep -i legion | head").expect("parses");
+        assert_eq!(reads_pipe(&scan, "ls"), vec![false]);
+        assert_eq!(reads_pipe(&scan, "grep"), vec![true]);
+        assert_eq!(reads_pipe(&scan, "head"), vec![true]);
+    }
+
+    #[test]
+    fn reads_pipe_is_independent_of_an_assignment_prefix() {
+        // `AfterAssignment` still outranks the pipe for Position; the pipe
+        // fact is kept beside it.
+        let scan = scan("ls | FOO=1 grep x").expect("parses");
+        assert_eq!(positions(&scan, "grep"), vec![Position::AfterAssignment]);
+        assert_eq!(reads_pipe(&scan, "grep"), vec![true]);
+    }
+
+    #[test]
+    fn the_first_command_of_a_pipeline_behind_a_list_operator_reads_no_pipe() {
+        for command in [
+            "cd src && grep -rn foo .",
+            "cd src; grep -rn foo .",
+            "false || grep -rn foo .",
+            "cd src && grep -rn foo . | head",
+        ] {
+            let scan = scan(command).expect("parses");
+            assert_eq!(
+                positions(&scan, "grep"),
+                vec![Position::AfterOperator],
+                "`{command}`"
+            );
+            assert_eq!(reads_pipe(&scan, "grep"), vec![false], "`{command}`");
+        }
+        let scan = scan("cd src && ls | grep foo").expect("parses");
+        assert_eq!(reads_pipe(&scan, "ls"), vec![false]);
+        assert_eq!(reads_pipe(&scan, "grep"), vec![true]);
+    }
+
+    #[test]
+    fn a_first_command_reads_no_pipe() {
+        let scan = scan("grep -rn foo src").expect("parses");
+        assert_eq!(reads_pipe(&scan, "grep"), vec![false]);
     }
 
     #[test]
