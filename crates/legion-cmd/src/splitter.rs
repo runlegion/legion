@@ -1090,6 +1090,16 @@ fn walk_redirect_target(text: &str, target: &IoFileRedirectTarget, depth: u8, sc
 /// raw text is nested past the bound is refused before `word::parse` ever
 /// sees it, the same way `scan_at` refuses a command string. A word the
 /// guard passes but `word::parse` still cannot parse comes back `Unparsed`.
+///
+/// `word::parse` does not read here-documents, so a `$(...)` whose heredoc
+/// body holds an unbalanced `(` fails its substitution rule and comes back
+/// as plain `Text` starting with `$(` (#1323), while the command-level
+/// tokenizer, which does read heredocs, took the same text as one
+/// substitution. Every caller -- the walk, the command-word classifier,
+/// `is_plain_word`, `literal_word` -- reads pieces through here, so the
+/// disagreement is settled once: the substitution is recovered
+/// ([`repair_hidden_substitution`]) or the word is `Unparsed`, and it is
+/// never handed on as literal text.
 fn parse_word_pieces(
     value: &str,
     depth: u8,
@@ -1098,7 +1108,116 @@ fn parse_word_pieces(
         return Err(UnreducedReason::TooDeep);
     }
     let options = ParserOptions::default();
-    word::parse(value, &options).map_err(|_| UnreducedReason::Unparsed)
+    let pieces: Vec<word::WordPieceWithSource> =
+        word::parse(value, &options).map_err(|_| UnreducedReason::Unparsed)?;
+    match hidden_substitution(value, &pieces) {
+        None => Ok(pieces),
+        Some(dollar) => repair_hidden_substitution(value, dollar, depth),
+    }
+}
+
+/// The byte offset of the first `$(` that `word::parse` left inside a
+/// `Text` piece, bare or within double quotes. Unquoted or double-quoted,
+/// `$(` always opens a substitution in bash; an escaped `\$` is its own
+/// `EscapeSequence` piece and single-quoted text is `SingleQuotedText`, so
+/// neither is ever looked at here.
+fn hidden_substitution(value: &str, pieces: &[word::WordPieceWithSource]) -> Option<usize> {
+    pieces.iter().find_map(|piece| match &piece.piece {
+        WordPiece::Text(text) => text
+            .match_indices('$')
+            .map(|(offset, _)| piece.start_index + offset)
+            .find(|&dollar| value.as_bytes().get(dollar + 1) == Some(&b'(')),
+        WordPiece::DoubleQuotedSequence(inner) | WordPiece::GettextDoubleQuotedSequence(inner) => {
+            hidden_substitution(value, inner)
+        }
+        _ => None,
+    })
+}
+
+/// Rebuilds `value`'s pieces with the substitution at `dollar` as a
+/// `CommandSubstitution`. Its extent comes from `brush-parser`'s tokenizer
+/// ([`substitution_end`]); the word is re-parsed with the body masked to an
+/// empty `$()`, which the word grammar reads, and the body is put back into
+/// that piece. Anything not proven -- no end the tokenizer accepts, an empty
+/// body, a `$((` that may be arithmetic, no `$()` piece where the mask
+/// went -- is `Unparsed`, so the word is refused rather than carried.
+/// Recursion through `parse_word_pieces` repairs a later hidden
+/// substitution in the same word; each pass shortens the text, so it ends.
+fn repair_hidden_substitution(
+    value: &str,
+    dollar: usize,
+    depth: u8,
+) -> Result<Vec<word::WordPieceWithSource>, UnreducedReason> {
+    if value.as_bytes().get(dollar + 2) == Some(&b'(') {
+        return Err(UnreducedReason::Unparsed);
+    }
+    let end: usize = substitution_end(value, dollar).ok_or(UnreducedReason::Unparsed)?;
+    let (Some(before), Some(body), Some(after)) = (
+        value.get(..dollar),
+        value.get(dollar + 2..end - 1),
+        value.get(end..),
+    ) else {
+        return Err(UnreducedReason::Unparsed);
+    };
+    if body.is_empty() {
+        return Err(UnreducedReason::Unparsed);
+    }
+    let masked = format!("{before}$(){after}");
+    let mut pieces: Vec<word::WordPieceWithSource> = parse_word_pieces(&masked, depth)?;
+    if restore_body(&mut pieces, dollar, body) {
+        Ok(pieces)
+    } else {
+        Err(UnreducedReason::Unparsed)
+    }
+}
+
+/// The byte offset just past the `)` that closes the substitution opened at
+/// `dollar`, as the command-level tokenizer reads it: the shortest
+/// `$(...)` prefix it takes as exactly one word. A shorter candidate either
+/// leaves the heredoc or the substitution open (a tokenizer error) or
+/// splits into more than one token.
+fn substitution_end(value: &str, dollar: usize) -> Option<usize> {
+    let options = ParserOptions::default().tokenizer_options();
+    let tail: &str = value.get(dollar..)?;
+    tail.match_indices(')')
+        .map(|(offset, _)| dollar + offset + 1)
+        .find(|&end| {
+            value.get(dollar..end).is_some_and(|candidate| {
+                matches!(
+                    brush_parser::uncached_tokenize_str(candidate, &options).as_deref(),
+                    Ok([brush_parser::Token::Word(..)])
+                )
+            })
+        })
+}
+
+/// Puts `body` into the empty `CommandSubstitution` piece starting at
+/// `dollar`, and moves every source index past `dollar` along by the body's
+/// length so the pieces index `value` rather than the masked text. False when
+/// no such piece exists.
+fn restore_body(pieces: &mut [word::WordPieceWithSource], dollar: usize, body: &str) -> bool {
+    let mut restored = false;
+    for piece in pieces {
+        let at_dollar = piece.start_index == dollar;
+        if piece.start_index > dollar {
+            piece.start_index += body.len();
+        }
+        if piece.end_index > dollar {
+            piece.end_index += body.len();
+        }
+        match &mut piece.piece {
+            WordPiece::CommandSubstitution(inner) if at_dollar && inner.is_empty() && !restored => {
+                *inner = body.to_string();
+                restored = true;
+            }
+            WordPiece::DoubleQuotedSequence(inner)
+            | WordPiece::GettextDoubleQuotedSequence(inner) => {
+                restored |= restore_body(inner, dollar, body);
+            }
+            _ => {}
+        }
+    }
+    restored
 }
 
 /// Scans a word for embedded command or backquoted substitutions
@@ -2326,6 +2445,104 @@ mod tests {
             "$'\\x67'",
         ] {
             assert_eq!(literal_word(raw), None, "`{raw}`");
+        }
+    }
+
+    /// One invocation's binary, position, depth and redirect mark.
+    type InvocationShape = (String, Position, u8, bool);
+
+    /// The grammar shape of a scan, without the raw word text that differs
+    /// between a command and its balanced twin.
+    fn shape(scan: &Scan) -> (Vec<InvocationShape>, Vec<(UnreducedReason, u8)>) {
+        let invocations = scan
+            .invocations
+            .iter()
+            .map(|inv| (inv.binary.clone(), inv.position, inv.depth, inv.redirected))
+            .collect();
+        let unreduced = scan.unreduced.iter().map(|u| (u.reason, u.depth)).collect();
+        (invocations, unreduced)
+    }
+
+    /// #1323: `word::parse` reads a `$(...)` whose heredoc body has an
+    /// unbalanced `(` as plain text. The word is repaired to the
+    /// substitution the command-level parse saw, so each command scans
+    /// exactly like its balanced twin: the inner command is recorded, the
+    /// heredoc body is an InterpreterBody region holding the body as
+    /// written, and the word is not literal.
+    #[test]
+    fn an_unbalanced_paren_in_a_heredoc_body_does_not_hide_the_substitution() {
+        for (inner, template) in [
+            ("rm", "echo \"$(rm -rf / <<'EOF'\n{body}\nEOF\n)\""),
+            ("rm", "echo $(rm -rf / <<'EOF'\n{body}\nEOF\n)"),
+            ("cat", "git commit -m \"$(cat <<'EOF'\n{body}\nEOF\n)\""),
+            (
+                "cat",
+                "git commit -m \"é $(cat <<'EOF'\nà {body}\nEOF\n) ü\"",
+            ),
+            ("cat", "\"$(cat <<'EOF'\n{body}\nEOF\n)\" x"),
+        ] {
+            let fixed = template.replace("{body}", "a (b");
+            let twin = template.replace("{body}", "a b");
+            let fixed_scan = scan(&fixed).expect("parses");
+            let twin_scan = scan(&twin).expect("parses");
+            assert_eq!(shape(&fixed_scan), shape(&twin_scan), "`{fixed}`");
+            assert_eq!(positions(&fixed_scan, inner), vec![Position::Substitution]);
+            assert!(!fixed_scan.single_simple, "`{fixed}`");
+            assert!(
+                fixed_scan
+                    .unreduced
+                    .iter()
+                    .any(|u| u.reason == UnreducedReason::InterpreterBody
+                        && u.text.ends_with("a (b\n")),
+                "`{fixed}`: {:#?}",
+                fixed_scan.unreduced
+            );
+        }
+        let rm = scan("echo \"$(rm -rf / <<'EOF'\na (b\nEOF\n)\"").expect("parses");
+        assert_eq!(args_for(&rm, "rm"), ["-rf", "/"]);
+        for raw in [
+            "\"$(cat <<'EOF'\na (b\nEOF\n)\"",
+            "$(cat <<'EOF'\na (b\nEOF\n)",
+            "\"$(cat <<'EOF'\na (b\nEOF\n) $(cat <<'EOF'\nc (d\nEOF\n)\"",
+        ] {
+            assert_eq!(literal_word(raw), None, "`{raw}`");
+        }
+    }
+
+    /// Both hidden substitutions in one word are recovered, in source order.
+    #[test]
+    fn every_hidden_substitution_in_a_word_is_recovered() {
+        let scan = scan("echo \"$(cat <<'EOF'\na (b\nEOF\n) $(ls <<'EOF'\nc (d\nEOF\n)\"")
+            .expect("parses");
+        assert_eq!(positions(&scan, "cat"), vec![Position::Substitution]);
+        assert_eq!(positions(&scan, "ls"), vec![Position::Substitution]);
+    }
+
+    /// A `$(` the parse cannot prove the extent of is refused as `Unparsed`,
+    /// never passed on as literal text.
+    #[test]
+    fn a_hidden_substitution_that_cannot_be_recovered_is_unparsed() {
+        for raw in ["$((cat <<'EOF'\na (b\nEOF\n) )", "\"$(a (b\""] {
+            assert_eq!(
+                parse_word_pieces(raw, 0).map(|_| ()),
+                Err(UnreducedReason::Unparsed),
+                "`{raw}`"
+            );
+            assert_eq!(literal_word(raw), None, "`{raw}`");
+        }
+    }
+
+    /// A `$(` the shell does not expand stays literal text: escaped, in
+    /// double quotes, or single-quoted.
+    #[test]
+    fn an_escaped_or_single_quoted_dollar_paren_stays_literal() {
+        for (raw, value) in [
+            ("\\$(x", "$(x"),
+            ("\"\\$(x\"", "$(x"),
+            ("'$(x'", "$(x"),
+            ("\"costs \\$(5)\"", "costs $(5)"),
+        ] {
+            assert_eq!(literal_word(raw).as_deref(), Some(value), "`{raw}`");
         }
     }
 }
