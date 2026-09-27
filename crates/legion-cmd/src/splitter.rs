@@ -999,6 +999,28 @@ fn piece_literal_text(piece: &WordPiece) -> String {
     }
 }
 
+/// Characters that make an unquoted word something the shell expands rather
+/// than passes through: a glob (`*`, `?`, `[`), a brace expansion (`{`), or a
+/// tilde the parser did not mark as one (`a=~/x`).
+const UNQUOTED_EXPANDING: [char; 5] = ['*', '?', '[', '{', '~'];
+
+/// The value the shell passes for one argument word `raw`, as the splitter
+/// parsed it (FR-CMD-008): quotes and escapes resolved piece by piece, the
+/// same assembly [`word_literal_text`] gives a command word. `None` when the
+/// word is not a plain literal -- a parameter or command substitution, an
+/// arithmetic expansion, a tilde, an ANSI-C escape the parser leaves
+/// undecoded, or an unquoted glob or brace character -- because the value the
+/// command receives is then decided at run time, and a rewrite that carried
+/// the source text would pass the target something else.
+pub(crate) fn literal_word(raw: &str) -> Option<String> {
+    let pieces: Vec<word::WordPieceWithSource> = parse_word_pieces(raw, 0).ok()?;
+    let expands = pieces.iter().any(|p| match &p.piece {
+        WordPiece::Text(text) => text.contains(UNQUOTED_EXPANDING),
+        piece => is_dynamic_piece(piece),
+    });
+    (!expands).then(|| word_literal_text(&pieces))
+}
+
 /// Basename of the command word: the text after the last `/`
 /// (FR-CMD-007's `Invocation::binary`). `raw` is already a word's literal
 /// text (`word_literal_text`), assembled piece-by-piece with quotes and
@@ -2265,6 +2287,45 @@ mod tests {
             "f() { git push; }",
         ] {
             assert!(!scan(text).expect("parses").single_simple, "`{text}`");
+        }
+    }
+
+    #[test]
+    fn a_literal_word_is_the_value_the_shell_passes() {
+        for (raw, value) in [
+            ("plain", "plain"),
+            ("\"a b\"", "a b"),
+            ("'a b'", "a b"),
+            (
+                "'docs: $(date) stays literal'",
+                "docs: $(date) stays literal",
+            ),
+            ("a\\ b", "a b"),
+            ("--repo=runlegion/legion", "--repo=runlegion/legion"),
+            ("\"*\"", "*"),
+            ("'~/x'", "~/x"),
+            ("pre\"mid\"'post'", "premidpost"),
+        ] {
+            assert_eq!(literal_word(raw).as_deref(), Some(value), "`{raw}`");
+        }
+    }
+
+    #[test]
+    fn a_word_the_shell_expands_is_not_a_literal() {
+        for raw in [
+            "\"$MSG\"",
+            "$MSG",
+            "$(date)",
+            "`date`",
+            "$((1 + 2))",
+            "~/notes.txt",
+            "*.rs",
+            "src/?.rs",
+            "[ab]",
+            "{a,b}",
+            "$'\\x67'",
+        ] {
+            assert_eq!(literal_word(raw), None, "`{raw}`");
         }
     }
 }

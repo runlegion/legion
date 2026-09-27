@@ -279,9 +279,11 @@
               "id": "gh-pr-view-to-legion",
               "outcome": {
                 "kind": "rewrite",
-                "target": "legion pr view",
+                "target": "legion pr view --repo {repo}",
                 "reason": "the audited work-source path: legion pr view lands in `legion audit` the way a raw gh call never does",
-                "translatable": { "operands": ["integer"] }
+                "positional": ["--number"],
+                "reshape": { "--repo": "repo_name" },
+                "deny_flags": ["--json"]
               }
             }
           ]
@@ -292,9 +294,11 @@
               "id": "gh-pr-checks-to-legion",
               "outcome": {
                 "kind": "rewrite",
-                "target": "legion pr checks",
+                "target": "legion pr checks --repo {repo}",
                 "reason": "the audited work-source path: legion pr checks lands in `legion audit` the way a raw gh call never does",
-                "translatable": { "operands": ["integer"] }
+                "positional": ["--number"],
+                "reshape": { "--repo": "repo_name" },
+                "deny_flags": ["--json"]
               }
             }
           ]
@@ -304,9 +308,11 @@
             {
               "id": "gh-pr-list-to-legion",
               "outcome": {
-                "kind": "deny",
-                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`); this is not rewritten because the rewrite target cannot carry the required --repo until rewrites carry arguments (#1278)",
-                "instead": "legion pr list --repo <repo>"
+                "kind": "rewrite",
+                "target": "legion pr list --repo {repo}",
+                "reason": "the audited work-source path: legion pr list lands in `legion audit` the way a raw gh call never does",
+                "reshape": { "--repo": "repo_name" },
+                "deny_flags": ["--json"]
               }
             }
           ]
@@ -317,9 +323,11 @@
               "id": "gh-issue-view-to-legion",
               "outcome": {
                 "kind": "rewrite",
-                "target": "legion issue view",
+                "target": "legion issue view --repo {repo}",
                 "reason": "the audited work-source path: legion issue view lands in `legion audit` the way a raw gh call never does",
-                "translatable": { "operands": ["integer"] }
+                "positional": ["--number"],
+                "reshape": { "--repo": "repo_name" },
+                "deny_flags": ["--json"]
               }
             }
           ]
@@ -329,9 +337,11 @@
             {
               "id": "gh-issue-list-to-legion",
               "outcome": {
-                "kind": "deny",
-                "reason": "work-source actions go through legion so they land in the audit log (`legion audit`); this is not rewritten because the rewrite target cannot carry the required --repo until rewrites carry arguments (#1278)",
-                "instead": "legion issue list --repo <repo>"
+                "kind": "rewrite",
+                "target": "legion issue list --repo {repo}",
+                "reason": "the audited work-source path: legion issue list lands in `legion audit` the way a raw gh call never does",
+                "reshape": { "--repo": "repo_name" },
+                "deny_flags": ["--json"]
               }
             }
           ]
@@ -342,11 +352,9 @@
               "id": "git-push-to-legion",
               "outcome": {
                 "kind": "rewrite",
-                "target": "legion push",
+                "target": "legion push --repo {repo}",
                 "reason": "the audited push path (#791): legion push resolves the checkout that has the branch, refuses main/master, and writes an audit row carrying the branch, checkout and head SHA",
-                "translatable": {
-                  "flags": ["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress"]
-                }
+                "deny_flags": ["--repo", "--force"]
               }
             }
           ]
@@ -371,11 +379,8 @@
               "id": "git-commit-to-legion",
               "outcome": {
                 "kind": "rewrite",
-                "target": "legion commit",
-                "reason": "the audited commit path (#854): legion commit preflights the signer, refuses message-convention violations by name, and writes an audit row for every attempt",
-                "translatable": {
-                  "valued_flags": ["-m", "--message", "-F", "--file"]
-                }
+                "target": "legion commit --repo {repo}",
+                "reason": "the audited commit path (#854): legion commit preflights the signer, refuses message-convention violations by name, and writes an audit row for every attempt"
               }
             }
           ]

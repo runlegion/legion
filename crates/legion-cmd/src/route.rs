@@ -136,6 +136,13 @@ fn route_bash(policy: &Policy, call: &ToolCall, ctx: &Context) -> Routed {
     }
     let mut facts = extract_facts(&expanded.invocations, winner.verb.clone());
     facts.command_key = command_key;
+    // The words a rewrite carries are a fact route extracted (FR-CMD-003), so
+    // the adapter builds the replacement from them and never re-parses the
+    // command (FR-CMD-017). Only a rewrite that survived the refusals above
+    // carries any.
+    if matches!(winner.decision, Decision::Rewrite { .. }) {
+        facts.carried = winner.carried;
+    }
     // A confirmation is used only when the command goes on to run or to the
     // operator prompt; a deny -- from another part, or from the compound
     // refusal above -- leaves it unused.
@@ -425,6 +432,7 @@ fn extract_facts(invocations: &[Invocation], verb: Option<String>) -> Facts {
         issue_numbers,
         keywords,
         command_key: None,
+        carried: Vec::new(),
     }
 }
 
@@ -951,7 +959,7 @@ mod tests {
             "tools": {"Bash": {"families": {
                 "gh pr list": {"rules": [
                     {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
-                     "reason": "legion tracks PRs", "translatable": {}}}
+                     "reason": "legion tracks PRs"}}
                 ]}
             }}}}"#,
         )
@@ -1095,27 +1103,27 @@ mod tests {
             "tools": {"Bash": {"families": {
                 "git push": {"rules": [
                     {"id": "push-rewrite", "outcome": {"kind": "rewrite", "target": "legion push",
-                     "reason": "legion pushes", "translatable": {}}}
+                     "reason": "legion pushes"}}
                 ]},
                 "git add": {"rules": [
                     {"id": "add-rewrite", "outcome": {"kind": "rewrite", "target": "legion add",
-                     "reason": "legion stages", "translatable": {"flags": ["-A"]}}}
+                     "reason": "legion stages"}}
                 ]},
                 "git commit": {"rules": [
                     {"id": "commit-rewrite", "outcome": {"kind": "rewrite", "target": "legion commit",
-                     "reason": "legion signs", "translatable": {"valued_flags": ["-m"]}}}
+                     "reason": "legion signs"}}
                 ]},
                 "gh pr view": {"rules": [
                     {"id": "pr-view", "outcome": {"kind": "rewrite", "target": "legion pr view",
-                     "reason": "legion tracks PRs", "translatable": {"operands": ["integer"]}}}
+                     "reason": "legion tracks PRs"}}
                 ]},
                 "gh pr list": {"rules": [
                     {"id": "pr-list", "outcome": {"kind": "rewrite", "target": "legion pr list",
-                     "reason": "legion tracks PRs", "translatable": {}}}
+                     "reason": "legion tracks PRs"}}
                 ]},
                 "gh issue view": {"rules": [
                     {"id": "issue-view", "outcome": {"kind": "rewrite", "target": "legion issue view",
-                     "reason": "legion tracks issues", "translatable": {"operands": ["any"]}}}
+                     "reason": "legion tracks issues"}}
                 ]}
             }}}}"#,
         )
@@ -1209,13 +1217,10 @@ mod tests {
             ("(( 0 )) && gh pr list", "pr-list"),
             ("(X=1) || gh pr list", "pr-list"),
             ("{ X=1; } || gh pr list", "pr-list"),
-            // A substitution in an operand the rule translates runs something
-            // the rewrite would drop -- here, truncating out.txt. Only the
-            // compound rule catches these: no redirect, no assignment prefix.
-            ("gh issue view \"$(> out.txt)\"", "issue-view"),
-            ("gh issue view `> out.txt`", "issue-view"),
+            // A process substitution is an argument word that runs a command
+            // of its own -- here, truncating out.txt -- so the line is not one
+            // simple command.
             ("gh issue view <(> out.txt)", "issue-view"),
-            ("gh issue view ${!x}", "issue-view"),
         ] {
             let routed = route_rewrite_policy(command);
             match &routed.decision {
@@ -1242,6 +1247,61 @@ mod tests {
                 "`{command}`"
             );
         }
+    }
+
+    /// A substitution in a word the rewrite would carry runs something the
+    /// rewrite would drop -- here, truncating out.txt -- with no redirect and
+    /// no assignment prefix. The word is not a plain literal, so it is never
+    /// carried: the rewrite is refused naming it (FR-CMD-008).
+    #[test]
+    fn a_substitution_in_a_carried_word_is_refused_naming_the_word() {
+        for (command, word) in [
+            ("gh issue view \"$(> out.txt)\"", "\"$(> out.txt)\""),
+            ("gh issue view `> out.txt`", "`> out.txt`"),
+            ("gh issue view ${!x}", "${!x}"),
+        ] {
+            let routed = route_rewrite_policy(command);
+            match &routed.decision {
+                Decision::Deny(details) => assert!(
+                    details.reason().contains(&format!("`{word}`")),
+                    "`{command}`: {}",
+                    details.reason()
+                ),
+                other => panic!("`{command}` must be refused, got {other:?}"),
+            }
+            assert!(routed.facts.carried.is_empty(), "`{command}`");
+            assert_eq!(
+                routed.deciding,
+                Deciding::Rule {
+                    id: "issue-view".to_string(),
+                    needs_operator: false
+                },
+                "`{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rewrite_returns_its_carried_words_as_a_fact() {
+        // FR-CMD-003 rev 2: the carried words are an extracted fact, so the
+        // adapter builds the replacement without re-parsing the command.
+        for (command, carried) in [
+            ("git commit -m \"a b\"", vec!["-m", "a b"]),
+            ("env git commit -m 'a b'", vec!["-m", "a b"]),
+            ("sh -c 'gh pr view 42'", vec!["42"]),
+            ("git push", vec![]),
+        ] {
+            let routed = route_rewrite_policy(command);
+            assert!(
+                matches!(routed.decision, Decision::Rewrite { .. }),
+                "`{command}`: {:?}",
+                routed.decision
+            );
+            assert_eq!(routed.facts.carried, carried, "`{command}`");
+        }
+        // A refused rewrite carries nothing.
+        let refused = route_rewrite_policy("git push && echo done");
+        assert!(refused.facts.carried.is_empty());
     }
 
     /// A substitution carried by a redirect or an assignment prefix is refused
@@ -1295,7 +1355,7 @@ mod tests {
                 "rm": {"rules": [{"id": "rm-allow", "outcome": {"kind": "allow"}}]},
                 "mkfs.ext4": {"rules": [{"id": "mkfs-proxy", "outcome": {"kind": "proxy", "reason": "binary"}}]},
                 "dd": {"rules": [{"id": "dd-rewrite", "outcome": {"kind": "rewrite", "target": "legion x",
-                    "reason": "r", "translatable": {"operands": ["any", "any"]}}}]},
+                    "reason": "r"}}]},
                 "git push": {"rules": [{"id": "push-ask", "outcome": {"kind": "ask", "question": "push?",
                     "reason": "pushes", "needs_operator": true}}]},
                 "chmod": {"rules": [{"id": "chmod-allow", "outcome": {"kind": "allow"}}]}
@@ -1688,7 +1748,7 @@ mod tests {
                 "curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
                     "question": "fetch?", "reason": "network"}}]},
                 "git push": {"rules": [{"id": "push-rewrite", "outcome": {"kind": "rewrite",
-                    "target": "legion push", "reason": "legion pushes", "translatable": {}}}]}
+                    "target": "legion push", "reason": "legion pushes"}}]}
             }}}}"#,
         );
         let command = "curl example.com && git push";

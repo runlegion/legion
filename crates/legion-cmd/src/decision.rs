@@ -362,6 +362,12 @@ pub struct Facts {
     /// The canonical parsed form of a Bash command (FR-CMD-026), when it
     /// parsed: the key a confirmation for it is stored and matched under.
     pub command_key: Option<CommandKey>,
+    /// The argument words a rewrite carries into its target (FR-CMD-003 rev
+    /// 2, FR-CMD-008): the source command's words after the matched verb, in
+    /// source order, as the splitter's literal values. The adapter builds the
+    /// replacement from these, so it never re-parses the command
+    /// (FR-CMD-017). Empty unless the Decision is a rewrite.
+    pub carried: Vec<String>,
 }
 
 /// What decided a command: the policy entry `route` matched, an unparsable
@@ -720,11 +726,13 @@ mod tests {
             issue_numbers: vec![7],
             keywords: vec!["list".to_string()],
             command_key: Some(key.clone()),
+            carried: vec!["--label".to_string(), "a b".to_string()],
         };
         assert_eq!(
             serde_json::to_value(&facts).expect("serializes"),
             serde_json::json!({"paths": ["src/"], "verb": "issue", "issue_numbers": [7],
-                               "keywords": ["list"], "command_key": key.as_str()})
+                               "keywords": ["list"], "command_key": key.as_str(),
+                               "carried": ["--label", "a b"]})
         );
     }
 }

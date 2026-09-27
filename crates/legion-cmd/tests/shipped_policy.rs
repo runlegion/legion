@@ -78,18 +78,17 @@ fn mirror_policy() -> Policy {
         ],
         "tools": {"Bash": {"families": {
             "git push": {"rules": [
-                {"id": "git-push-to-legion", "outcome": {"kind": "rewrite", "target": "legion push",
-                 "reason": "the audited push path",
-                 "translatable": {"flags": ["-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--progress"]}}}
+                {"id": "git-push-to-legion", "outcome": {"kind": "rewrite",
+                 "target": "legion push --repo {repo}", "reason": "the audited push path",
+                 "deny_flags": ["--repo", "--force"]}}
             ]},
             "git commit": {"rules": [
                 {"id": "git-commit-without-message", "predicates": [
                     {"kind": "arg-absent", "arg": "-m"}, {"kind": "arg-absent", "arg": "--message"},
                     {"kind": "arg-absent", "arg": "-F"}, {"kind": "arg-absent", "arg": "--file"}],
                  "outcome": {"kind": "deny", "reason": "opens an editor", "instead": "legion commit"}},
-                {"id": "git-commit-to-legion", "outcome": {"kind": "rewrite", "target": "legion commit",
-                 "reason": "the audited commit path",
-                 "translatable": {"valued_flags": ["-m", "--message", "-F", "--file"]}}}
+                {"id": "git-commit-to-legion", "outcome": {"kind": "rewrite",
+                 "target": "legion commit --repo {repo}", "reason": "the audited commit path"}}
             ]},
             "grep": {"rules": [{"id": "grep-to-sym", "outcome": {"kind": "sym", "job": "find-content"}}]},
             "rm": {"rules": [
@@ -450,8 +449,8 @@ fn shipped_git_global_options_route_by_the_subcommand_family() {
             "`{command}`"
         );
         assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
-        // That rule rewrites only when every argument translates; the global
-        // option has no lossless translation, so it is refused by name
+        // That rule carries the words after its verb; the global option
+        // comes before it, so it is not carried, and it is refused by name
         // rather than dropped (FR-CMD-008).
         match &routed.decision {
             Decision::Deny(details) => assert!(
@@ -635,8 +634,8 @@ fn mirror_policy_routes_an_inline_git_alias_by_what_it_runs() {
             "`{command}`"
         );
         assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
-        // The rule rewrites only when every argument translates; `-c` does
-        // not, so it is refused by name (FR-CMD-008).
+        // The rule carries the words after its verb; `-c` comes before it,
+        // so it is refused by name rather than dropped (FR-CMD-008).
         match &routed.decision {
             Decision::Deny(details) => {
                 assert!(details.reason().contains("`-c`"), "`{command}`")
