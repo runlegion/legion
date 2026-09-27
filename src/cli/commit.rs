@@ -94,11 +94,18 @@ const PROBE_MESSAGE: &str = "legion signer preflight (#854)";
 /// signer needs the operator to go unlock something while a malformed
 /// subject is a five-second fix. Surfacing the slow failure first means one
 /// round trip instead of two.
+///
+/// `dir` is git's `-C` (#1301): the checkout is resolved from `dir` instead
+/// of the process CWD, and a relative `--message-file` is read from `dir`,
+/// as `git -C <dir> commit -F <file>` would read it -- so `git -C <dir>
+/// commit` can be rewritten to this command without changing which repo it
+/// commits in or which file it reads.
 pub(crate) fn handle_commit(
     repo: String,
     message: Option<String>,
     message_file: Option<String>,
     card: Option<String>,
+    dir: Option<PathBuf>,
 ) -> error::Result<()> {
     // #917: fall to stdin only when neither --message nor --message-file was
     // given. Resolved here (not inside `resolve_message`) so that function
@@ -108,9 +115,10 @@ pub(crate) fn handle_commit(
 
     // Argument-shape errors are resolved before anything is audited: no
     // mutation has been attempted yet, so there is nothing to record.
-    let text: String = resolve_message(message.as_deref(), message_file.as_deref())?;
+    let text: String =
+        resolve_message(message.as_deref(), message_file.as_deref(), dir.as_deref())?;
 
-    let checkout: PathBuf = resolve_checkout()?;
+    let checkout: PathBuf = resolve_checkout(dir.as_deref())?;
     let branch: String = current_branch(&checkout)?;
     let pre_sha: Option<String> = head_sha(&checkout)?;
 
@@ -233,7 +241,15 @@ fn preflight_validate_and_commit(
 /// `--message-file`. Both or neither is a refusal rather than a silent
 /// precedence rule -- a verb that quietly picks one when given two is how a
 /// stale file ends up as the commit message.
-fn resolve_message(message: Option<&str>, message_file: Option<&str>) -> error::Result<String> {
+///
+/// A relative `message_file` resolves against `dir` when one is given (the
+/// `-C` directory), matching git's `-F` under `-C`; an absolute one is read
+/// as given.
+fn resolve_message(
+    message: Option<&str>,
+    message_file: Option<&str>,
+    dir: Option<&Path>,
+) -> error::Result<String> {
     match (message, message_file) {
         (Some(_), Some(_)) => Err(error::LegionError::CommitRefused {
             reason: "--message and --message-file are mutually exclusive -- pass exactly one"
@@ -241,8 +257,12 @@ fn resolve_message(message: Option<&str>, message_file: Option<&str>) -> error::
         }),
         (Some(m), None) => Ok(m.to_string()),
         (None, Some(p)) => {
-            std::fs::read_to_string(p).map_err(|e| error::LegionError::CommitRefused {
-                reason: format!("failed to read --message-file '{p}': {e}"),
+            let path: PathBuf = match dir {
+                Some(d) => d.join(p),
+                None => PathBuf::from(p),
+            };
+            std::fs::read_to_string(&path).map_err(|e| error::LegionError::CommitRefused {
+                reason: format!("failed to read --message-file '{}': {e}", path.display()),
             })
         }
         (None, None) => Err(error::LegionError::CommitRefused {
@@ -260,17 +280,31 @@ fn resolve_message(message: Option<&str>, message_file: Option<&str>) -> error::
 /// has. Resolving to the repo root (rather than using the CWD verbatim)
 /// still matters -- it makes the verb work from a subdirectory, and it is
 /// the path recorded on the audit row.
-fn resolve_checkout() -> error::Result<PathBuf> {
-    let output = Command::new("git")
+///
+/// Under `-C`, `dir` stands in for the CWD (`git -C <dir> rev-parse
+/// --show-toplevel`), and a `dir` that does not exist or is not in a repo is
+/// refused naming it.
+fn resolve_checkout(dir: Option<&Path>) -> error::Result<PathBuf> {
+    let mut cmd = Command::new("git");
+    if let Some(d) = dir {
+        cmd.arg("-C").arg(d);
+    }
+    let output = cmd
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .map_err(|e| error::LegionError::WorkSource(format!("failed to run git rev-parse: {e}")))?;
     if !output.status.success() {
-        return Err(error::LegionError::CommitRefused {
-            reason: "not inside a git repository -- run legion commit from the checkout whose \
+        let reason: String = match dir {
+            Some(d) => format!(
+                "-C {} is not a directory inside a git repository -- pass the checkout whose \
+                 staged changes you want committed",
+                d.display()
+            ),
+            None => "not inside a git repository -- run legion commit from the checkout whose \
                      staged changes you want committed"
                 .to_string(),
-        });
+        };
+        return Err(error::LegionError::CommitRefused { reason });
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if path.is_empty() {
@@ -1007,22 +1041,65 @@ mod tests {
 
     #[test]
     fn resolve_message_requires_exactly_one_source() {
-        let reason = refusal_reason(resolve_message(None, None).unwrap_err());
+        let reason = refusal_reason(resolve_message(None, None, None).unwrap_err());
         assert!(
             reason.contains("--message or --message-file"),
             "got: {reason}"
         );
 
-        let reason = refusal_reason(resolve_message(Some("x"), Some("y")).unwrap_err());
+        let reason = refusal_reason(resolve_message(Some("x"), Some("y"), None).unwrap_err());
         assert!(reason.contains("mutually exclusive"), "got: {reason}");
 
-        assert_eq!(resolve_message(Some("hello"), None).unwrap(), "hello");
+        assert_eq!(resolve_message(Some("hello"), None, None).unwrap(), "hello");
+    }
+
+    /// `-C` (#1301): a relative `--message-file` is read from the `-C`
+    /// directory, and an absolute one is read as given.
+    #[test]
+    fn resolve_message_reads_a_relative_file_from_the_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("msg.txt"), "from dir").expect("write msg");
+        assert_eq!(
+            resolve_message(None, Some("msg.txt"), Some(dir.path())).unwrap(),
+            "from dir"
+        );
+
+        let other = tempfile::tempdir().expect("tempdir");
+        let absolute = other.path().join("abs.txt");
+        std::fs::write(&absolute, "absolute").expect("write abs");
+        assert_eq!(
+            resolve_message(None, absolute.to_str(), Some(dir.path())).unwrap(),
+            "absolute"
+        );
+    }
+
+    /// `-C` (#1301): a directory outside any git repository -- here one that
+    /// does not exist at all -- is a `CommitRefused` naming the directory.
+    #[test]
+    fn resolve_checkout_with_a_dir_outside_git_is_refused() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let missing = parent.path().join("no-such-checkout");
+        let reason = refusal_reason(resolve_checkout(Some(&missing)).unwrap_err());
+        assert!(
+            reason.contains(&missing.display().to_string()),
+            "the refusal must name the -C directory, got: {reason}"
+        );
+
+        // An existing directory with no repository around it: a fresh
+        // system tempdir, which no checkout encloses.
+        let not_a_repo = tempfile::tempdir().expect("tempdir");
+        let reason = refusal_reason(resolve_checkout(Some(not_a_repo.path())).unwrap_err());
+        assert!(
+            reason.contains(&not_a_repo.path().display().to_string()),
+            "the refusal must name the -C directory, got: {reason}"
+        );
     }
 
     #[test]
     fn resolve_message_names_the_unreadable_file() {
-        let reason =
-            refusal_reason(resolve_message(None, Some("/nonexistent/legion/msg")).unwrap_err());
+        let reason = refusal_reason(
+            resolve_message(None, Some("/nonexistent/legion/msg"), None).unwrap_err(),
+        );
         assert!(reason.contains("/nonexistent/legion/msg"), "got: {reason}");
     }
 

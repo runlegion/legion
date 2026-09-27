@@ -34,20 +34,90 @@ struct WorktreeEntry {
     branch: Option<String>,
 }
 
+/// Push a branch or a tag, audited.
+///
+/// `dir` is git's `-C` (#1301): with it, the ambient git reads this command
+/// makes -- the default branch, the worktree list, the tag path's checkout --
+/// happen in `dir` instead of the process CWD, so `git -C <dir> push` can be
+/// rewritten to this command without changing which repo it acts on. It
+/// changes where the command stands, never what it refuses: the branch
+/// refusals and the `--force` gate run exactly as they do without it.
 pub(crate) fn handle_push(
     repo: String,
     branch: Option<String>,
     tag: Option<String>,
     force: bool,
     force_reason: Option<String>,
+    dir: Option<PathBuf>,
 ) -> error::Result<()> {
+    if let Some(d) = dir.as_deref() {
+        require_git_dir(d)?;
+    }
     if let Some(t) = tag {
         // clap's `conflicts_with = "tag"` on `force` already refuses this
         // combination before we get here; force/force_reason are inert on
         // the tag path.
-        return handle_push_tag(repo, t);
+        return handle_push_tag(repo, t, dir);
     }
-    handle_push_branch(repo, branch, force, force_reason)
+    handle_push_branch(repo, branch, force, force_reason, dir.as_deref())
+}
+
+/// A `git` command standing in `dir` when one was given (`git -C <dir>`),
+/// or in the process CWD otherwise -- the one place `-C` becomes a working
+/// directory, so no ambient read can forget it.
+fn git_in(dir: Option<&Path>) -> Command {
+    let mut cmd = Command::new("git");
+    if let Some(d) = dir {
+        cmd.arg("-C").arg(d);
+    }
+    cmd
+}
+
+/// Refuse a `-C` directory that does not exist or is not inside a git
+/// repository, naming it. Checked up front so the fault is reported as the
+/// directory the caller named rather than as whichever git read happened to
+/// run first and fail.
+fn require_git_dir(dir: &Path) -> error::Result<()> {
+    let output = git_in(Some(dir))
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .map_err(|e| {
+            error::LegionError::WorkSource(format!(
+                "failed to run git rev-parse in -C {}: {e}",
+                dir.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(error::LegionError::WorkSource(format!(
+            "-C {} is not a directory inside a git repository: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// The branch checked out in `dir`, the default when `--branch` is omitted
+/// under `-C`. Without `-C` the caller uses
+/// [`git_head_commit_and_branch`] unchanged, so today's behavior does not
+/// move; this is its branch half, scoped to `dir`.
+fn checked_out_branch_in(dir: &Path) -> error::Result<String> {
+    let output = git_in(Some(dir))
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .map_err(|e| {
+            error::LegionError::WorkSource(format!(
+                "failed to read the git branch in {}: {e}",
+                dir.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(error::LegionError::WorkSource(format!(
+            "git rev-parse --abbrev-ref HEAD failed in {} -- does it have a commit?",
+            dir.display()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Push a tag (#915).
@@ -57,13 +127,17 @@ pub(crate) fn handle_push(
 /// exists because the pre-push hook reviews the CWD's checked-out branch. A
 /// tag is a repo-wide ref owned by no worktree, so there is no "checkout that
 /// has it" to find -- every worktree shares the object store that holds it.
-/// We push from the cwd and record which checkout that was.
-fn handle_push_tag(repo: String, tag: String) -> error::Result<()> {
+/// We push from the cwd (or the `-C` directory) and record which checkout
+/// that was.
+fn handle_push_tag(repo: String, tag: String, dir: Option<PathBuf>) -> error::Result<()> {
     validate_tag(&tag)?;
 
-    let checkout = std::env::current_dir().map_err(|e| {
-        error::LegionError::WorkSource(format!("cannot resolve the current directory: {e}"))
-    })?;
+    let checkout: PathBuf = match dir {
+        Some(d) => d,
+        None => std::env::current_dir().map_err(|e| {
+            error::LegionError::WorkSource(format!("cannot resolve the current directory: {e}"))
+        })?,
+    };
 
     // Resolve before pushing so a nonexistent tag is a named refusal rather
     // than a git error surfacing from inside the push.
@@ -128,10 +202,12 @@ fn handle_push_branch(
     branch: Option<String>,
     force: bool,
     force_reason: Option<String>,
+    dir: Option<&Path>,
 ) -> error::Result<()> {
-    let target_branch = match branch {
-        Some(b) => b,
-        None => {
+    let target_branch = match (branch, dir) {
+        (Some(b), _) => b,
+        (None, Some(d)) => checked_out_branch_in(d)?,
+        (None, None) => {
             let (_, cwd_branch) = git_head_commit_and_branch()?;
             cwd_branch
         }
@@ -139,7 +215,7 @@ fn handle_push_branch(
 
     validate_branch(&target_branch)?;
 
-    let entries = list_worktrees()?;
+    let entries = list_worktrees(dir)?;
     let entry = resolve_checkout(&entries, &target_branch)?;
     let checkout_path = entry.path.clone();
     let head_sha = entry.head_sha.clone();
@@ -702,11 +778,12 @@ fn resolve_checkout<'a>(
         })
 }
 
-/// Run `git worktree list --porcelain` (ambient CWD -- lists every worktree
-/// of whichever repo the caller is standing in, regardless of which linked
-/// checkout that happens to be) and parse the result.
-fn list_worktrees() -> error::Result<Vec<WorktreeEntry>> {
-    let output = Command::new("git")
+/// Run `git worktree list --porcelain` (ambient CWD, or `dir` under `-C` --
+/// lists every worktree of whichever repo the caller is standing in,
+/// regardless of which linked checkout that happens to be) and parse the
+/// result.
+fn list_worktrees(dir: Option<&Path>) -> error::Result<Vec<WorktreeEntry>> {
+    let output = git_in(dir)
         .args(["worktree", "list", "--porcelain"])
         .output()
         .map_err(|e| {

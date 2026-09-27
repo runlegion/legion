@@ -789,3 +789,101 @@ fn commit_message_file_is_not_shadowed_by_stdin() {
         "stdin must not be read when --message-file is given, got: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1301: `legion commit -C <dir>` behaves as if started in <dir>.
+// ---------------------------------------------------------------------------
+
+/// With staged changes in `<dir>` and the CWD in a different repo (which has
+/// its own staged change), `legion commit -C <dir>` commits in `<dir>` and
+/// leaves the CWD's repo exactly as it was: same HEAD, change still staged.
+#[cfg(unix)]
+#[test]
+fn commit_with_dash_c_commits_in_that_checkout() {
+    let _guard = RealRepoConfigGuard::new();
+    let target = setup_repo_with_staged_change();
+    let cwd_repo = setup_repo_with_staged_change();
+    let data_dir = tempfile::tempdir().unwrap();
+    let target_before = head_sha(target.path());
+    let cwd_before = head_sha(cwd_repo.path());
+
+    let stdout = run_ok(commit_cmd(data_dir.path(), cwd_repo.path()).args([
+        "commit",
+        "--repo",
+        "test-agent",
+        "-C",
+        target.path().to_str().unwrap(),
+        "--message",
+        "fix(#1301): x",
+    ]));
+
+    let target_after = head_sha(target.path());
+    assert_ne!(
+        target_before, target_after,
+        "expected <dir>'s HEAD to advance"
+    );
+    assert!(head_message(target.path()).contains("fix(#1301): x"));
+    assert!(
+        stdout.contains(&target_after[..8]),
+        "expected the confirmation to name the new commit, got: {stdout}"
+    );
+
+    assert_eq!(
+        head_sha(cwd_repo.path()),
+        cwd_before,
+        "the CWD's repo must not have been committed in"
+    );
+    let staged = run_git_fixture_output(cwd_repo.path(), &["diff", "--cached", "--name-only"]);
+    assert_eq!(
+        staged, "feature.txt",
+        "the CWD's staged change must still be staged"
+    );
+}
+
+/// A relative `--message-file` under `-C` is read from `<dir>`, as git's `-F`
+/// is under `-C` -- the CWD holds no such file, so reading it there fails.
+#[cfg(unix)]
+#[test]
+fn commit_with_dash_c_reads_a_relative_message_file_from_that_dir() {
+    let _guard = RealRepoConfigGuard::new();
+    let target = setup_repo_with_staged_change();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+    // Untracked, never staged, so it does not become part of the commit.
+    std::fs::write(target.path().join("msg.txt"), GOOD_MESSAGE).unwrap();
+
+    run_ok(commit_cmd(data_dir.path(), elsewhere.path()).args([
+        "commit",
+        "--repo",
+        "test-agent",
+        "-C",
+        target.path().to_str().unwrap(),
+        "--message-file",
+        "msg.txt",
+    ]));
+    assert!(head_message(target.path()).contains("feat(#854): add a thing"));
+}
+
+/// A `-C` directory outside any git repository is a commit refusal naming
+/// the directory.
+#[cfg(unix)]
+#[test]
+fn commit_with_dash_c_outside_git_names_the_dir() {
+    let not_a_repo = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr) = run_fail(commit_cmd(data_dir.path(), not_a_repo.path()).args([
+        "commit",
+        "--repo",
+        "test-agent",
+        "-C",
+        not_a_repo.path().to_str().unwrap(),
+        "--message",
+        GOOD_MESSAGE,
+    ]));
+    assert!(
+        stderr.contains("refusing to commit")
+            && stderr.contains(not_a_repo.path().to_str().unwrap()),
+        "expected CommitRefused naming the -C dir, got: {stderr}"
+    );
+}
