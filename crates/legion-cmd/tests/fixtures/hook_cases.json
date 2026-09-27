@@ -841,8 +841,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion push",
-    "note": "a bare push carries no argument beyond the family's own subcommand word, so every argument translates and route names legion push. Adapter (#1274): the rule declares translatable arguments and the replacement carries none forward, so src/cmd/replacement.rs refuses this rewrite with a deny naming the rule."
+    "target": "legion push --repo {repo}",
+    "note": "a bare push carries no word after its verb; the adapter fills the repo, and legion push's own parse accepts the result.",
+    "replacement": "legion push --repo legion"
   },
   {
     "hook": "no-git-push.sh",
@@ -851,9 +852,10 @@
     "input": { "command": "git push -u" },
     "hook_behavior": "rewrite",
     "route": "rewrite",
-    "agrees": true,
-    "target": "legion push",
-    "note": "-u/--set-upstream is declared translatable: legion push always sets upstream. -q/-v/--progress are declared too, as the hook treats them as benign. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "agrees": false,
+    "target": "legion push --repo {repo}",
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push declares no -u, so the adapter denies naming `-u`. DISAGREEMENT: hook rewrite, adapter deny.",
+    "adapter_denies": "'-u'"
   },
   {
     "hook": "no-git-push.sh",
@@ -863,8 +865,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion push",
-    "note": "both resolve git by basename. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion push --repo {repo}",
+    "note": "both resolve git by basename; the rewrite carries nothing and legion push's parse accepts it.",
+    "replacement": "legion push --repo legion"
   },
   {
     "hook": "no-git-push.sh",
@@ -872,10 +875,11 @@
     "tool": "Bash",
     "input": { "command": "git push origin" },
     "hook_behavior": "rewrite",
-    "route": "deny",
+    "route": "rewrite",
     "agrees": false,
-    "instead_contains": "legion push",
-    "note": "the hook drops the remote and rewrites, since legion push always pushes to origin. The rewrite rule declares no operand: an operand shape cannot say 'only origin', so `git push upstream` would be rewritten to a push to origin. route denies naming legion push. DISAGREEMENT: hook rewrite, route deny."
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push takes no remote operand (it always pushes to origin), and a rewrite that dropped the operand would push `git push upstream` to origin, so the adapter denies naming `origin`. DISAGREEMENT: hook rewrite, adapter deny.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'origin'"
   },
   {
     "hook": "no-git-push.sh",
@@ -883,10 +887,11 @@
     "tool": "Bash",
     "input": { "command": "git push origin feat/x" },
     "hook_behavior": "rewrite",
-    "route": "deny",
+    "route": "rewrite",
     "agrees": false,
-    "instead_contains": "legion push",
-    "note": "the hook carries the branch into `legion push --branch feat/x`. The rule declares no operands (see push-remote-operand), so route denies naming legion push. DISAGREEMENT: hook rewrite, route deny."
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push takes no positional remote or branch; the hook carried the branch into `--branch`, which no policy exception spells, so the adapter denies naming `origin`. DISAGREEMENT: hook rewrite, adapter deny.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'origin'"
   },
   {
     "hook": "no-git-push.sh",
@@ -894,10 +899,11 @@
     "tool": "Bash",
     "input": { "command": "git push origin v9.9.9" },
     "hook_behavior": "rewrite",
-    "route": "deny",
+    "route": "rewrite",
     "agrees": false,
-    "instead_contains": "legion push",
-    "note": "#915: the hook asks the repository whether the ref is a branch or a tag and rewrites to `legion push --tag v9.9.9`. route performs no I/O and cannot resolve a ref; with no declared operands it denies naming legion push. DISAGREEMENT: hook rewrite, route deny."
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push takes no positional remote or tag, so the adapter denies naming `origin`. DISAGREEMENT: hook rewrite, adapter deny.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'origin'"
   },
   {
     "hook": "no-git-push.sh",
@@ -908,7 +914,7 @@
     "route": "deny",
     "agrees": true,
     "instead_contains": "legion push",
-    "note": "--force is not declared translatable; the default fallback denies naming the argument and legion push."
+    "note": "--force is in the rule's deny_flags: git's force overwrites the remote unconditionally, while legion push --force is gated by its discarded-commit survival analysis and a lease, a different meaning. route denies naming it and legion push."
   },
   {
     "hook": "no-git-push.sh",
@@ -916,9 +922,11 @@
     "tool": "Bash",
     "input": { "command": "git push -f origin feat/x" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "-f is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push declares no -f, so the adapter denies naming `-f`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'-f'"
   },
   {
     "hook": "no-git-push.sh",
@@ -926,9 +934,11 @@
     "tool": "Bash",
     "input": { "command": "git push --force-with-lease" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "--force-with-lease is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push declares no --force-with-lease, so the adapter denies naming `--force-with-lease`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'--force-with-lease'"
   },
   {
     "hook": "no-git-push.sh",
@@ -936,9 +946,11 @@
     "tool": "Bash",
     "input": { "command": "git push origin --delete feat/x" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "--delete (and -d, --mirror, --prune, --all) are not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push takes no remote operand, and declares no --delete either, so the adapter denies naming `origin`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'origin'"
   },
   {
     "hook": "no-git-push.sh",
@@ -946,9 +958,11 @@
     "tool": "Bash",
     "input": { "command": "git push --tags" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "--tags is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push declares --tag <TAG>, not --tags, and clap does not infer long options, so the adapter denies naming `--tags`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'--tags'"
   },
   {
     "hook": "no-git-push.sh",
@@ -956,9 +970,11 @@
     "tool": "Bash",
     "input": { "command": "git push origin HEAD:main" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "the hook denies a src:dst refspec by shape; route denies because the rule declares no operand at all."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push takes no remote or refspec operand, so the adapter denies naming `origin`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'origin'"
   },
   {
     "hook": "no-git-push.sh",
@@ -999,8 +1015,9 @@
     "hook_behavior": "deny",
     "route": "rewrite",
     "agrees": false,
-    "target": "legion push",
-    "note": "#883: the hook's whitespace tokenizer reads `push;` as one word and denies the compound. route's parser reads a plain `git push` followed by an empty list terminator and rewrites it, which is lossless here; #1277 does not treat a trailing terminator as a compound. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments, so the agent sees a deny either way. DISAGREEMENT: hook deny, route rewrite."
+    "target": "legion push --repo {repo}",
+    "note": "#883: the hook's whitespace tokenizer reads `push;` as one word and denies the compound. route's parser reads a plain `git push` followed by an empty list terminator and rewrites it, which is lossless here; #1277 does not treat a trailing terminator as a compound. The adapter builds `legion push --repo legion`. DISAGREEMENT: hook deny, route rewrite.",
+    "replacement": "legion push --repo legion"
   },
   {
     "hook": "no-git-push.sh",
@@ -1010,7 +1027,7 @@
     "hook_behavior": "rewrite",
     "route": "deny",
     "agrees": false,
-    "note": "the hook walks git's value-taking global options and rewrites to `cd /tmp/x && legion push`. route consumes git's declared global options before matching the family (#1294), so `-C /tmp/x` is read as an option and its value and the command reaches git-push-to-legion; that rewrite does not translate `-C` (legion push has no -C), so route denies naming it rather than dropping it (FR-CMD-008). DISAGREEMENT: hook rewrite, route deny."
+    "note": "the hook walks git's value-taking global options and rewrites to `cd /tmp/x && legion push`. route consumes git's declared global options before matching the family (#1294), so the git-push rule decides; `-C` and its path come before the verb, so they are not carried, and route denies naming `-C` rather than drop it (#1301 builds on this). DISAGREEMENT: hook rewrite, route deny."
   },
   {
     "hook": "no-git-push.sh",
@@ -1070,8 +1087,9 @@
     "hook_behavior": "allow",
     "route": "rewrite",
     "agrees": false,
-    "target": "legion push",
-    "note": "the hook passes every command in a repo legion does not cover (#353). route's Context carries the repo but no rule predicate reads coverage, so the rewrite applies everywhere. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments. DISAGREEMENT: hook allow, route rewrite."
+    "target": "legion push --repo {repo}",
+    "note": "the hook passes every command in a repo legion does not cover (#353). route's Context carries the repo but no rule predicate reads coverage, so the rewrite applies everywhere, and the adapter builds `legion push --repo legion`. DISAGREEMENT: hook allow, route rewrite.",
+    "replacement": "legion push --repo legion"
   },
 
   {
@@ -1082,8 +1100,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion commit",
-    "note": "-m and its value are declared translatable (valued flag). The hook writes the message to a tempfile for --message-file; route names the target and returns the message among its facts for the adapter. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments and the replacement does not carry the message."
+    "target": "legion commit --repo {repo}",
+    "note": "route carries `-m` and the message; `-m` is legion commit's own short for --message (git's spelling, #1278), so the parse accepts it and the adapter shell-quotes the message. The hook wrote the message to a tempfile for --message-file.",
+    "replacement": "legion commit --repo legion -m 'fix(cmd): tighten the rule'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1093,8 +1112,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion commit",
-    "note": "--message is declared as a valued flag. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion commit --repo {repo}",
+    "note": "--message carries through unchanged; the adapter shell-quotes the message.",
+    "replacement": "legion commit --repo legion --message 'fix(cmd): tighten the rule'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1104,8 +1124,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion commit",
-    "note": "-F/--file is declared as a valued flag. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion commit --repo {repo}",
+    "note": "`-F` is legion commit's own short for --message-file (git's spelling, #1278), so it carries unchanged. git's long `--file` has no such alias and the parse rejects it.",
+    "replacement": "legion commit --repo legion -F msg.txt"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1115,8 +1136,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion commit",
-    "note": "both resolve git by basename. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion commit --repo {repo}",
+    "note": "both resolve git by basename.",
+    "replacement": "legion commit --repo legion -m fix"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1126,8 +1148,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion commit",
-    "note": "single quotes are inert, so the hook rewrites; route's parser reads one quoted word and finds no substitution. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion commit --repo {repo}",
+    "note": "single quotes are inert, so the hook rewrites; route's parser reads one quoted literal word, carries its value, and the adapter quotes it again, so `$(date)` never runs.",
+    "replacement": "legion commit --repo legion -m 'docs: $(date) stays literal'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1137,7 +1160,7 @@
     "hook_behavior": "rewrite",
     "route": "deny",
     "agrees": false,
-    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route consumes git's declared global options before matching the family (#1294), so the command reaches git-commit-to-legion; that rewrite translates -m but not `-C`, so route denies naming `-C` rather than dropping it (FR-CMD-008), as in push-global-dash-c-path. DISAGREEMENT: hook rewrite, route deny."
+    "note": "the hook rewrites to `cd /tmp/other && legion commit --repo other ...`. route consumes git's declared global options before matching the family (#1294), so the git-commit rule decides; `-C` and its path come before the verb, so they are not carried, and route denies naming `-C` rather than drop it (#1301 builds on this). DISAGREEMENT: hook rewrite, route deny."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1145,10 +1168,11 @@
     "tool": "Bash",
     "input": { "command": "git commit -a -m fix" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "instead_contains": "legion commit",
-    "note": "-a is not declared translatable; legion commit only commits the staged index."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit only commits the staged index and declares no -a, so the adapter denies naming `-a`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'-a'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1158,7 +1182,7 @@
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
-    "note": "a combined short-option cluster is untranslatable unless declared verbatim."
+    "note": "`-am` is not `-m`, so every arg-absent predicate of the no-message rule holds and route denies naming legion commit, as the hook does."
   },
   {
     "hook": "no-git-commit.sh",
@@ -1166,9 +1190,11 @@
     "tool": "Bash",
     "input": { "command": "git commit --amend -m fix" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "--amend is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit declares no --amend, so the adapter denies naming `--amend`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'--amend'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1176,9 +1202,11 @@
     "tool": "Bash",
     "input": { "command": "git commit -n -m fix" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "-n/--no-verify is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit declares no -n, so the adapter denies naming `-n`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'-n'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1186,9 +1214,11 @@
     "tool": "Bash",
     "input": { "command": "git commit --allow-empty-message -m ''" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "--allow-empty-message is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit declares no --allow-empty-message, so the adapter denies naming `--allow-empty-message`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'--allow-empty-message'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1196,9 +1226,11 @@
     "tool": "Bash",
     "input": { "command": "git commit -e -m fix" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "-e/--edit/--interactive/--patch are not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit declares no -e, so the adapter denies naming `-e`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'-e'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1238,9 +1270,11 @@
     "tool": "Bash",
     "input": { "command": "git commit -m fix src/a.rs" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "the rule declares no operand, so a pathspec is untranslatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit takes no pathspec operand, so the adapter denies naming `src/a.rs`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'src/a.rs'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1250,8 +1284,9 @@
     "hook_behavior": "deny",
     "route": "rewrite",
     "agrees": false,
-    "target": "legion commit",
-    "note": "the hook denies more than one -m because its lexer takes exactly one value. route's valued-flag declaration covers each -m and its value, so the arguments translate. Carrying both paragraphs is left to the adapter, which since #1274 refuses this rewrite because the rule declares translatable arguments, so the agent sees a deny either way. DISAGREEMENT: hook deny, route rewrite."
+    "target": "legion commit --repo {repo}",
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): git joins two -m values as paragraphs, and legion commit's --message takes one value, so its parse rejects the repeat and the adapter denies. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "adapter_denies": "cannot be used multiple times"
   },
   {
     "hook": "no-git-commit.sh",
@@ -1333,8 +1368,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion pr view",
-    "note": "one integer operand is declared translatable; the number travels in route's facts for the adapter to place. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments and the replacement does not carry the number."
+    "target": "legion pr view --repo {repo}",
+    "note": "the rule's positional exception writes the number as --number, after the prefix and its filled repo.",
+    "replacement": "legion pr view --repo legion --number 42"
   },
   {
     "hook": "no-gh.sh",
@@ -1344,8 +1380,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion pr view",
-    "note": "both resolve gh by basename. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion pr view --repo {repo}",
+    "note": "both resolve gh by basename.",
+    "replacement": "legion pr view --repo legion --number 1"
   },
   {
     "hook": "no-gh.sh",
@@ -1355,8 +1392,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion pr checks",
-    "note": "one integer operand is declared translatable. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion pr checks --repo {repo}",
+    "note": "the rule's positional exception writes the number as --number.",
+    "replacement": "legion pr checks --repo legion --number 42"
   },
   {
     "hook": "no-gh.sh",
@@ -1364,10 +1402,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr list" },
     "hook_behavior": "rewrite",
-    "route": "deny",
-    "agrees": false,
-    "instead_contains": "legion pr list --repo <repo>",
-    "note": "the hook rewrites to `legion pr list --repo <repo>`, filling in the repo itself. A policy rewrite target is static text and cannot carry the required --repo, so the rewrite the adapter would build fails as a usage error. The rule denies instead, naming the working command, until rewrites carry arguments (#1278). DISAGREEMENT: hook rewrite, route deny."
+    "route": "rewrite",
+    "agrees": true,
+    "note": "the target prefix carries the {repo} fill-in, so the rewrite the hook built by hand is the policy's own (#1278).",
+    "target": "legion pr list --repo {repo}",
+    "replacement": "legion pr list --repo legion"
   },
   {
     "hook": "no-gh.sh",
@@ -1377,8 +1416,9 @@
     "hook_behavior": "rewrite",
     "route": "rewrite",
     "agrees": true,
-    "target": "legion issue view",
-    "note": "one integer operand is declared translatable. Adapter (#1274): refuses this rewrite, since the rule declares translatable arguments."
+    "target": "legion issue view --repo {repo}",
+    "note": "the rule's positional exception writes the number as --number.",
+    "replacement": "legion issue view --repo legion --number 7"
   },
   {
     "hook": "no-gh.sh",
@@ -1386,10 +1426,11 @@
     "tool": "Bash",
     "input": { "command": "gh issue list" },
     "hook_behavior": "rewrite",
-    "route": "deny",
-    "agrees": false,
-    "instead_contains": "legion issue list --repo <repo>",
-    "note": "as gh-pr-list-bare: the rule denies naming `legion issue list --repo <repo>`, because a static target cannot carry the required --repo, until rewrites carry arguments (#1278). DISAGREEMENT: hook rewrite, route deny."
+    "route": "rewrite",
+    "agrees": true,
+    "note": "as gh-pr-list-bare: the prefix fills the repo.",
+    "target": "legion issue list --repo {repo}",
+    "replacement": "legion issue list --repo legion"
   },
   {
     "hook": "no-gh.sh",
@@ -1397,10 +1438,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr view --number 99" },
     "hook_behavior": "rewrite",
-    "route": "deny",
-    "agrees": false,
-    "instead_contains": "legion pr view",
-    "note": "the hook reads legion's own --number spelling off a gh command. gh has no --number flag, and the rule declares only arguments gh accepts, so route denies naming legion pr view. DISAGREEMENT: hook rewrite, route deny."
+    "route": "rewrite",
+    "agrees": true,
+    "note": "`--number 99` carries through as the flag legion pr view declares, so its parse accepts it, as the hook's rewrite did.",
+    "target": "legion pr view --repo {repo}",
+    "replacement": "legion pr view --repo legion --number 99"
   },
   {
     "hook": "no-gh.sh",
@@ -1410,8 +1452,9 @@
     "hook_behavior": "deny",
     "route": "rewrite",
     "agrees": false,
-    "target": "legion pr view",
-    "note": "gh resolves an omitted number from the branch and legion has no equivalent, so the hook denies. The rule's operands are an upper bound, and the policy language has no predicate that requires an operand, so route rewrites. The adapter refuses it since #1274 (the rule declares translatable arguments), so the agent sees a deny either way. DISAGREEMENT: hook deny, route rewrite."
+    "target": "legion pr view --repo {repo}",
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): gh resolves an omitted number from the branch and legion has no equivalent; legion pr view requires --number, so its parse rejects the command and the adapter denies naming it. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "adapter_denies": "--number"
   },
   {
     "hook": "no-gh.sh",
@@ -1422,7 +1465,7 @@
     "route": "deny",
     "agrees": true,
     "instead_contains": "legion pr view",
-    "note": "--json is not declared translatable; the deny names it and the target."
+    "note": "--json is in the rule's deny_flags: gh's --json takes a field list, legion's is a switch. route denies naming it and the target."
   },
   {
     "hook": "no-gh.sh",
@@ -1432,7 +1475,7 @@
     "hook_behavior": "deny",
     "route": "deny",
     "agrees": true,
-    "note": "--json= is not a declared valued flag."
+    "note": "the joined form is the same deny_flags hit: route compares the name before `=`."
   },
   {
     "hook": "no-gh.sh",
@@ -1440,9 +1483,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr view 42 -c" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "-c/--comments is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion pr view declares no -c, so the adapter denies naming `-c`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion pr view --repo {repo}",
+    "adapter_denies": "'-c'"
   },
   {
     "hook": "no-gh.sh",
@@ -1450,9 +1495,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr view 42 -R owner/repo" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "-R/--repo is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion pr view declares no -R (the long --repo is reshaped, the short is not), so the adapter denies naming `-R`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion pr view --repo {repo}",
+    "adapter_denies": "'-R'"
   },
   {
     "hook": "no-gh.sh",
@@ -1460,9 +1507,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr view 42 -w" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "-w/--web is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion pr view declares no -w, so the adapter denies naming `-w`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion pr view --repo {repo}",
+    "adapter_denies": "'-w'"
   },
   {
     "hook": "no-gh.sh",
@@ -1470,10 +1519,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr checks 42 --watch" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "instead_contains": "legion pr checks",
-    "note": "--watch (and --required, --fail-fast, -i) are not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion pr checks declares no --watch, so the adapter denies naming `--watch`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion pr checks --repo {repo}",
+    "adapter_denies": "'--watch'"
   },
   {
     "hook": "no-gh.sh",
@@ -1481,10 +1531,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr list --state closed" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "instead_contains": "legion pr list",
-    "note": "the gh pr list rule denies every invocation, naming legion pr list --repo <repo>; legion pr list takes no filter either."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion pr list declares no --state, so the adapter denies naming `--state`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion pr list --repo {repo}",
+    "adapter_denies": "'--state'"
   },
   {
     "hook": "no-gh.sh",
@@ -1492,9 +1543,11 @@
     "tool": "Bash",
     "input": { "command": "gh issue view 7 --jq .title" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "--jq is not declared translatable."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion issue view declares no --jq, so the adapter denies naming `--jq`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion issue view --repo {repo}",
+    "adapter_denies": "'--jq'"
   },
   {
     "hook": "no-gh.sh",
@@ -1502,9 +1555,11 @@
     "tool": "Bash",
     "input": { "command": "gh issue list --label bug" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "the gh issue list rule denies every invocation, naming legion issue list --repo <repo>."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "legion issue list declares --label with gh's meaning (a label filter forwarded to the work source), so its parse accepts the command and it runs audited. DISAGREEMENT: hook deny, route rewrite.",
+    "target": "legion issue list --repo {repo}",
+    "replacement": "legion issue list --repo legion --label bug"
   },
   {
     "hook": "no-gh.sh",
@@ -2355,10 +2410,11 @@
     "tool": "Bash",
     "input": { "command": "git push --dry-run" },
     "hook_behavior": "rewrite",
-    "route": "deny",
+    "route": "rewrite",
     "agrees": false,
-    "instead_contains": "legion push",
-    "note": "the hook treats any flag it does not name as benign and rewrites, dropping --dry-run, so a dry run becomes a real push. The rule does not declare --dry-run, so route denies, naming the argument and legion push. DISAGREEMENT: hook rewrite, route deny."
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion push declares no --dry-run, so the adapter denies naming `--dry-run`. DISAGREEMENT: hook rewrite, adapter deny.",
+    "target": "legion push --repo {repo}",
+    "adapter_denies": "'--dry-run'"
   },
   {
     "hook": "no-git-commit.sh",
@@ -2366,10 +2422,11 @@
     "tool": "Bash",
     "input": { "command": "git commit --dry-run -m fix" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "instead_contains": "legion commit",
-    "note": "an undeclared flag makes the rewrite ineligible, and the default fallback denies naming the argument and the target. The hook denies it as an unrecognized flag."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion commit declares no --dry-run, so the adapter denies naming `--dry-run`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion commit --repo {repo}",
+    "adapter_denies": "'--dry-run'"
   },
   {
     "hook": "no-gh.sh",
@@ -2377,10 +2434,11 @@
     "tool": "Bash",
     "input": { "command": "gh pr checks 42 --interval 5" },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "instead_contains": "legion pr checks",
-    "note": "--interval is not declared translatable, so route denies naming the argument and the target."
+    "route": "rewrite",
+    "agrees": false,
+    "note": "route carries every word after the verb and returns the rewrite; the target's own command-line definition then judges them (FR-CMD-008 rev 3): legion pr checks declares no --interval, so the adapter denies naming `--interval`. DISAGREEMENT: hook deny, route rewrite; the agent sees a deny from both.",
+    "target": "legion pr checks --repo {repo}",
+    "adapter_denies": "'--interval'"
   },
   {
     "hook": "no-gh.sh",
@@ -2391,7 +2449,7 @@
     "route": "deny",
     "agrees": true,
     "instead_contains": "legion pr view",
-    "note": "every | sits inside single quotes, so route sees one simple gh pr view command, not a pipeline; it denies by the gh-pr-view-to-legion rule's fallback because --json/--jq do not translate, never by the compound-rewrite refusal. The hook denies it as a compound command."
+    "note": "every | sits inside single quotes, so route sees one simple gh pr view command, not a pipeline; it denies because --json is in the gh-pr-view-to-legion rule's deny_flags, naming it and the target, as the hook does."
   },
   {
     "hook": "no-git-push.sh",

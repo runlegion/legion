@@ -97,19 +97,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use clap::CommandFactory;
 use legion_cmd::{
-    AskDetails, CommandKey, Context, Deciding, Decision, Lookup, ManagedTarget, Policy,
-    RewriteSpec, Routed, Rule, RuleOutcome, ToolCall, ToolRules, parse_policy, required_lookups,
-    route,
+    AskDetails, CommandKey, Context, Deciding, Decision, Lookup, Policy, RewriteSpec, Routed, Rule,
+    RuleOutcome, ToolCall, ToolRules, parse_policy, required_lookups, route,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::cli::Cli;
 use crate::cmd::config::RouteSettings;
 use crate::cmd::confirm::{live_confirmations, use_confirmation, was_used};
 use crate::cmd::incident::{IncidentLog, Origin};
 use crate::cmd::prediction::{self, AppliedRewrite};
-use crate::cmd::replacement::{build_replacement, rewritable_field};
+use crate::cmd::replacement::{build_replacement, rewritable_field, shell_single_quote};
 use crate::db::Database;
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
@@ -588,16 +589,26 @@ fn respond_with(
         payload.cwd.clone(),
         Some(session),
     ) {
-        Ok((routed, policy)) => apply(&routed, &payload, &policy),
+        Ok(decided) => apply(&decided, &payload),
         Err(e) => deny_for_error(&e, Some(&payload)).into(),
     }
+}
+
+/// What [`route_call`] decided a call under: route's result, the policy it
+/// decided under (which [`replacement_for`] reads to find a rewrite's rule),
+/// and the repo derived for `Context` (which fills a rewrite target's
+/// `{repo}`).
+pub(crate) struct Decided {
+    pub(crate) routed: Routed,
+    pub(crate) policy: Arc<Policy>,
+    pub(crate) repo: Option<String>,
 }
 
 /// The decision core both modes run (FR-CMD-017). Parses the policy and its
 /// settings first (the text is a local file, read outside the deadline), then
 /// runs repo derivation, the lookup pre-pass, and route on a worker thread
 /// under `route.deadline_ms`. Returns route's result with the policy it
-/// decided under, which [`replacement_for`] reads to find a rewrite's rule.
+/// decided under and the repo it derived, as [`Decided`].
 /// Every failure is an [`AdapterError`], which each mode turns into a deny
 /// (FR-CMD-009, FR-CMD-016). `session` is the hook mode's [`SessionWork`],
 /// run inside the same deadline; the operator mode passes `None`.
@@ -608,7 +619,7 @@ pub(crate) fn route_call(
     legion_repo: Option<String>,
     cwd: Option<String>,
     session: Option<SessionWork>,
-) -> Result<(Routed, Arc<Policy>), AdapterError> {
+) -> Result<Decided, AdapterError> {
     // A policy file that cannot be read still leaves the built-in no-go list
     // in force (FR-CMD-025): route runs over an empty policy, so a no-go
     // match is refused (and, in the hook mode, recorded and notified), and
@@ -631,7 +642,7 @@ pub(crate) fn route_call(
             }
         };
     let worker_policy: Arc<Policy> = Arc::clone(&policy);
-    let routed: Routed = decide(settings.deadline, move || {
+    let (routed, repo): (Routed, Option<String>) = decide(settings.deadline, move || {
         let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
         let now: DateTime<Utc> = Utc::now();
         // The hook's confirmation and incident-record work (#1237). Pending
@@ -661,7 +672,7 @@ pub(crate) fn route_call(
         let routed: Routed = route(&worker_policy, &call, &ctx);
 
         if let (Some(work), Some((_, log)), Some(db)) = (session, &store, &db) {
-            let repo: String = repo.unwrap_or_default();
+            let repo: String = repo.clone().unwrap_or_default();
             let origin = Origin {
                 command: work.issued,
                 agent: work.store.agent_for(&repo),
@@ -673,27 +684,28 @@ pub(crate) fn route_call(
                 work.store.notify(record)
             })?;
         }
-        Ok(routed)
+        Ok((routed, repo))
     })?;
     match unread {
         Some(read_error) if !matches!(routed.deciding, Deciding::NoGo { .. }) => Err(read_error),
-        _ => Ok((routed, policy)),
+        _ => Ok(Decided {
+            routed,
+            policy,
+            repo,
+        }),
     }
 }
 
 /// The replacement `tool_input` for a rewrite, built from route's facts
 /// (FR-CMD-003); `None` for every other arm. A replacement that cannot be
-/// built -- including a rewrite whose rule declares translatable arguments
-/// (#1267) -- is a [`AdapterError::Replacement`], a deny in both modes.
+/// built -- including one the target's own command-line definition rejects
+/// (FR-CMD-008) -- is a [`AdapterError::Replacement`], a deny in both modes.
 pub(crate) fn replacement_for(
-    routed: &Routed,
-    policy: &Policy,
+    decided: &Decided,
     original: &Value,
 ) -> Result<Option<Value>, AdapterError> {
-    match &routed.decision {
-        Decision::Rewrite { target, .. } => {
-            rewritten_input(policy, routed, target, original).map(Some)
-        }
+    match &decided.routed.decision {
+        Decision::Rewrite { .. } => rewritten_input(decided, original).map(Some),
         _ => Ok(None),
     }
 }
@@ -716,20 +728,23 @@ impl From<Value> for Applied {
     }
 }
 
-/// Finds the rewrite rule that decided `routed` and builds the replacement
-/// under it. A rewrite whose deciding entry names no rewrite rule in `policy`
-/// is refused rather than built.
-fn rewritten_input(
-    policy: &Policy,
-    routed: &Routed,
-    target: &ManagedTarget,
-    original: &Value,
-) -> Result<Value, AdapterError> {
-    let (rule_id, spec) = rewrite_rule(policy, &routed.deciding).ok_or_else(|| {
-        AdapterError::Replacement("the rewrite names no rewrite rule in the policy".to_string())
-    })?;
-    build_replacement(target, rule_id, &spec.translatable, &routed.facts, original)
-        .map_err(|e| AdapterError::Replacement(e.to_string()))
+/// Finds the rewrite rule that decided the call and builds the replacement
+/// under it, judged by legion's own clap command tree (FR-CMD-008). A
+/// rewrite whose deciding entry names no rewrite rule in the policy is
+/// refused rather than built.
+fn rewritten_input(decided: &Decided, original: &Value) -> Result<Value, AdapterError> {
+    let spec: &RewriteSpec =
+        rewrite_rule(&decided.policy, &decided.routed.deciding).ok_or_else(|| {
+            AdapterError::Replacement("the rewrite names no rewrite rule in the policy".to_string())
+        })?;
+    build_replacement(
+        spec,
+        &decided.routed.facts,
+        decided.repo.as_deref(),
+        &Cli::command(),
+        original,
+    )
+    .map_err(|e| AdapterError::Replacement(e.to_string()))
 }
 
 /// Runs `work` on a worker thread and waits at most `deadline` for its
@@ -987,24 +1002,34 @@ fn record_outcome(
     Ok(())
 }
 
-/// Applies route's Decision to the hook response (FR-CMD-017). `policy` is
-/// the policy route decided under, read only to find a rewrite's rule. A
+/// Applies route's Decision to the hook response (FR-CMD-017). The policy and
+/// repo in `decided` are read only to build a rewrite's replacement. A
 /// rewrite whose replacement was built is also returned as the
 /// [`AppliedRewrite`] its prediction records (#1272); a refused rewrite is a
 /// deny and carries none.
-fn apply(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Applied {
+fn apply(decided: &Decided, payload: &HookPayload) -> Applied {
+    let routed: &Routed = &decided.routed;
     let response: Value = match &routed.decision {
         Decision::Allow { note } => match (&routed.deciding, note.as_deref()) {
             (Deciding::Default, None | Some("")) => pass_through(Some(DEFAULT_ALLOW_NOTE)),
             (_, note) => pass_through(note),
         },
         Decision::Proxy { .. } => pass_through(None),
-        Decision::Rewrite { target, reason } => {
-            return match rewritten_input(policy, routed, target, &payload.tool_input) {
-                Ok(updated) => Applied {
-                    response: rewrite_response(payload.rewritten_value(), target, reason, updated),
-                    rewrite: Some(applied_rewrite(payload, target)),
-                },
+        Decision::Rewrite { reason, .. } => {
+            return match rewritten_input(decided, &payload.tool_input) {
+                Ok(updated) => {
+                    let constructed: String =
+                        rewritten_value_in(&updated).unwrap_or_default().to_string();
+                    Applied {
+                        response: rewrite_response(
+                            payload.rewritten_value(),
+                            &constructed,
+                            reason,
+                            updated,
+                        ),
+                        rewrite: Some(applied_rewrite(payload, constructed)),
+                    }
+                }
                 Err(e) => deny_for_error(&e, Some(payload)).into(),
             };
         }
@@ -1021,16 +1046,24 @@ fn apply(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Applied {
     response.into()
 }
 
+/// The value a built replacement put in place of the call's -- the command,
+/// or the `subagent_type` -- read from the field `rewritable_field` names, so
+/// the message, the prediction and the patch cannot name different values.
+fn rewritten_value_in(updated: &Value) -> Option<&str> {
+    let field: &str = rewritable_field(updated)?;
+    updated.get(field).and_then(Value::as_str)
+}
+
 /// The rewrite as its prediction records it: the call's ids, the value as
 /// issued and as constructed, and whether the call runs in the background
 /// (whose transcript result records only that it started).
-fn applied_rewrite(payload: &HookPayload, target: &ManagedTarget) -> AppliedRewrite {
+fn applied_rewrite(payload: &HookPayload, constructed: String) -> AppliedRewrite {
     AppliedRewrite {
         tool_use_id: payload.tool_use_id.clone(),
         session_id: payload.session_id.clone(),
         tool_name: payload.tool_name.clone(),
         issued: payload.rewritten_value().map(str::to_string),
-        constructed: target.as_str().to_string(),
+        constructed,
         background: payload
             .tool_input
             .get("run_in_background")
@@ -1039,12 +1072,12 @@ fn applied_rewrite(payload: &HookPayload, target: &ManagedTarget) -> AppliedRewr
     }
 }
 
-/// The rewrite rule that decided a rewrite: its id and its [`RewriteSpec`].
-/// Rule ids are unique across the whole policy, so the id `Deciding` names
-/// finds exactly one rule, under a Bash family or a Fields tool. `None` when
-/// the deciding entry is not a rule, or names no rewrite rule in `policy`;
-/// the adapter then refuses rather than build a replacement it cannot judge.
-fn rewrite_rule<'p>(policy: &'p Policy, deciding: &Deciding) -> Option<(&'p str, &'p RewriteSpec)> {
+/// The [`RewriteSpec`] of the rewrite rule that decided a rewrite. Rule ids
+/// are unique across the whole policy, so the id `Deciding` names finds
+/// exactly one rule, under a Bash family or a Fields tool. `None` when the
+/// deciding entry is not a rule, or names no rewrite rule in `policy`; the
+/// adapter then refuses rather than build a replacement it cannot judge.
+fn rewrite_rule<'p>(policy: &'p Policy, deciding: &Deciding) -> Option<&'p RewriteSpec> {
     let Deciding::Rule { id, .. } = deciding else {
         return None;
     };
@@ -1057,7 +1090,7 @@ fn rewrite_rule<'p>(policy: &'p Policy, deciding: &Deciding) -> Option<(&'p str,
         ToolRules::Fields { rules } => rules.iter().find(named),
     })?;
     match &rule.outcome {
-        RuleOutcome::Rewrite { spec, .. } => Some((rule.id.as_str(), spec)),
+        RuleOutcome::Rewrite { spec, .. } => Some(spec),
         _ => None,
     }
 }
@@ -1082,14 +1115,13 @@ fn pass_through(note: Option<&str>) -> Value {
 /// original command ran (FR-CMD-009).
 fn rewrite_response(
     original: Option<&str>,
-    target: &ManagedTarget,
+    constructed: &str,
     reason: &str,
     updated: Value,
 ) -> Value {
     let message: String = format!(
-        "legion-cmd rewrote `{}` to `{}`: {reason}",
+        "legion-cmd rewrote `{}` to `{constructed}`: {reason}",
         original.unwrap_or("<command>"),
-        target.as_str()
     );
     let mut fields = decision_fields("allow", &message);
     fields.insert("updatedInput".to_string(), updated);
@@ -1175,17 +1207,10 @@ fn quoted_command(command: Option<&str>) -> String {
     }
 }
 
-/// Single-quotes `text` for a shell command line, closing and reopening the
-/// quote around every embedded single quote (`'\''`), so a command carrying
-/// quotes or metacharacters stays one word.
-fn shell_single_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use legion_cmd::{DenyDetails, Facts};
+    use legion_cmd::{DenyDetails, Facts, ManagedTarget};
     use std::sync::Mutex;
 
     /// Answers every lookup with the same result.
@@ -1306,8 +1331,8 @@ mod tests {
     const REPO_CWD: &str = "/repo/legion";
 
     /// A policy that exercises every arm: `rm -rf` denies, `gh issue list`
-    /// rewrites, `gh issue view` rewrites under a rule declaring translatable
-    /// arguments, `gh pr` asks (marked), `xxd` proxies, `ls` allows with a
+    /// rewrites, `gh issue view` rewrites with its operand carried as
+    /// `--number`, `gh pr` asks (marked), `xxd` proxies, `ls` allows with a
     /// note, `git push` needs recall and consult. The Agent and Edit rewrite
     /// rules back the hand-built `Routed` values that name them.
     const POLICY: &str = r#"{
@@ -1328,8 +1353,8 @@ mod tests {
           "Bash": {"families": {
             "gh issue view": {"rules": [
                 {"id": "gh-issue-view",
-                 "outcome": {"kind": "rewrite", "target": "legion issue view", "reason": "legion tracks issues",
-                             "translatable": {"flags": ["--web"], "operands": ["integer"]}}}
+                 "outcome": {"kind": "rewrite", "target": "legion issue view --repo {repo}",
+                             "reason": "legion tracks issues", "positional": ["--number"]}}
             ]},
             "rm": {"rules": [
                 {"id": "rm-rf", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
@@ -1337,8 +1362,8 @@ mod tests {
             ]},
             "gh issue list": {"rules": [
                 {"id": "gh-issue-list",
-                 "outcome": {"kind": "rewrite", "target": "legion issue list", "reason": "legion tracks issues",
-                             "translatable": {}}}
+                 "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
+                             "reason": "legion tracks issues"}}
             ]},
             "gh pr": {"rules": [
                 {"id": "gh-pr", "outcome": {"kind": "ask", "question": "touch the PR?",
@@ -1358,6 +1383,17 @@ mod tests {
     /// `Routed`.
     fn policy() -> Policy {
         parse_policy(POLICY).expect("the test policy parses")
+    }
+
+    /// [`apply`] over a hand-built `Routed`, decided under `policy` for the
+    /// repo `legion`.
+    fn apply_routed(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Applied {
+        let decided = Decided {
+            routed: routed.clone(),
+            policy: Arc::new(policy.clone()),
+            repo: Some("legion".to_string()),
+        };
+        apply(&decided, payload)
     }
 
     fn payload(command: &str) -> String {
@@ -1536,7 +1572,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply(&routed, &parsed_payload("ls"), &policy()).response;
+        let response = apply_routed(&routed, &parsed_payload("ls"), &policy()).response;
         assert!(output(&response).get("additionalContext").is_none());
     }
 
@@ -1563,7 +1599,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let response = apply(&routed, &payload, &policy()).response;
+        let response = apply_routed(&routed, &payload, &policy()).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
     }
@@ -1591,7 +1627,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let out = apply(&routed, &payload, &policy()).response["hookSpecificOutput"].clone();
+        let out = apply_routed(&routed, &payload, &policy()).response["hookSpecificOutput"].clone();
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
             out["updatedInput"],
@@ -1634,68 +1670,57 @@ mod tests {
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
             out["updatedInput"],
-            json!({"command": "legion issue list", "description": "list", "timeout": 9000,
-                   "run_in_background": true})
+            json!({"command": "legion issue list --repo legion", "description": "list",
+                   "timeout": 9000, "run_in_background": true})
         );
         let context = out["additionalContext"].as_str().expect("context");
         assert!(context.contains("`gh issue list`"));
-        assert!(context.contains("`legion issue list`"));
+        assert!(context.contains("`legion issue list --repo legion`"));
         assert!(context.contains("legion tracks issues"));
     }
 
     #[test]
-    fn a_rewrite_that_would_drop_an_operand_denies_instead() {
-        // A rewrite whose facts carry a path the target cannot express: the
-        // replacement refuses and the agent sees a deny, never a narrower
-        // command that ran. Built by hand, because route itself no longer
-        // rewrites `gh issue list src/` (#1228: `src/` is not translatable).
-        let routed = Routed {
-            decision: Decision::Rewrite {
-                target: ManagedTarget::new("legion issue list"),
-                reason: "legion tracks issues".to_string(),
-            },
-            facts: Facts {
-                paths: vec!["src/".to_string()],
-                ..Facts::default()
-            },
-            deciding: Deciding::Rule {
-                id: "gh-issue-list".to_string(),
-                needs_operator: false,
-            },
-            confirmed: false,
-        };
-        let response = apply(&routed, &parsed_payload("gh issue list src/"), &policy()).response;
-        assert_denied(&response);
-        assert!(reason(&response).contains("replacement:"));
-        assert!(reason(&response).contains("path operand"));
+    fn a_rewrite_carries_its_arguments_into_the_replacement() {
+        // #1278: route carries `7`; the rule's positional exception writes it
+        // as `--number`, and the target's own parse accepts the result.
+        let response = respond_stub(&payload("gh issue view 7"), POLICY);
+        let out = output(&response);
+        assert_eq!(out["permissionDecision"], "allow");
+        assert_eq!(
+            out["updatedInput"]["command"],
+            "legion issue view --repo legion --number 7"
+        );
     }
 
     #[test]
-    fn a_rewrite_under_a_rule_declaring_translatable_arguments_is_refused_naming_the_rule() {
-        // #1267: route judges `--web` and `7` translatable and returns
-        // Rewrite, but the replacement carries no argument forward, so the
-        // adapter denies naming the rule instead of running the bare target.
-        let command = "gh issue view 7 --web";
-        let routed = route(
-            &policy(),
-            &ToolCall {
-                tool: "Bash".to_string(),
-                input: json!({"command": command}),
-            },
-            &Context::default(),
-        );
-        assert!(
-            matches!(routed.decision, Decision::Rewrite { .. }),
-            "route must judge the covered arguments translatable: {:?}",
-            routed.decision
-        );
-
-        let response = respond_stub(&payload(command), POLICY);
-        assert_denied(&response);
-        let text = reason(&response);
-        assert!(text.contains("replacement:"), "got: {text}");
-        assert!(text.contains("rewrite rule 'gh-issue-view'"), "got: {text}");
-        assert!(!text.contains("instead: legion issue view"), "got: {text}");
+    fn a_rewrite_the_target_rejects_denies_naming_the_argument() {
+        // FR-CMD-008 rev 3: route carries every word and returns Rewrite; the
+        // target's clap definition rejects the one it does not take, and the
+        // adapter denies naming it rather than running without it.
+        for (command, named) in [
+            ("gh issue view 7 --web", "'--web'"),
+            ("gh issue list src/", "'src/'"),
+        ] {
+            let routed = route(
+                &policy(),
+                &ToolCall {
+                    tool: "Bash".to_string(),
+                    input: json!({"command": command}),
+                },
+                &Context::default(),
+            );
+            assert!(
+                matches!(routed.decision, Decision::Rewrite { .. }),
+                "`{command}`: route carries the words and leaves the judgment to the target: {:?}",
+                routed.decision
+            );
+            let applied = respond_applied(&payload(command), POLICY);
+            assert_denied(&applied.response);
+            let text = reason(&applied.response);
+            assert!(text.contains("replacement:"), "`{command}`: {text}");
+            assert!(text.contains(named), "`{command}`: {text}");
+            assert!(applied.rewrite.is_none(), "`{command}`");
+        }
     }
 
     #[test]
@@ -1712,7 +1737,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let applied = apply(&routed, &parsed_payload("gh issue list"), &policy());
+        let applied = apply_routed(&routed, &parsed_payload("gh issue list"), &policy());
         assert!(
             applied.rewrite.is_none(),
             "a refused rewrite yields no prediction"
@@ -1723,18 +1748,18 @@ mod tests {
     }
 
     #[test]
-    fn route_denies_a_rewrite_whose_argument_does_not_translate() {
-        // #1228: the rule declares no translatable operand, so route denies
-        // before the adapter builds anything, naming the argument and the
+    fn route_denies_a_rewrite_whose_word_is_not_a_plain_literal() {
+        // FR-CMD-008: a word the shell expands is never carried, so route
+        // denies before the adapter builds anything, naming the word and the
         // managed command to run instead.
-        let response = respond_stub(&payload("gh issue list src/"), POLICY);
+        let response = respond_stub(&payload("gh issue list \"$LABEL\""), POLICY);
         assert_denied(&response);
         assert!(
-            reason(&response).contains("`src/`"),
+            reason(&response).contains("`\"$LABEL\"`"),
             "got: {}",
             reason(&response)
         );
-        assert!(reason(&response).contains("instead: legion issue list"));
+        assert!(reason(&response).contains("instead: legion issue list --repo {repo}"));
     }
 
     #[test]
@@ -1779,7 +1804,7 @@ mod tests {
 
     #[test]
     fn an_unmarked_ask_never_prompts_the_operator() {
-        let response = apply(
+        let response = apply_routed(
             &ask_routed(false),
             &parsed_payload("gh pr merge 7"),
             &policy(),
@@ -1793,7 +1818,7 @@ mod tests {
     fn a_marked_ask_prompts_the_operator_through_the_harness_with_the_reason() {
         // The only path that prompts the operator: the harness's own
         // permission prompt, carrying the reason.
-        let response = apply(
+        let response = apply_routed(
             &ask_routed(true),
             &parsed_payload("gh pr merge 7"),
             &policy(),
@@ -1815,7 +1840,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply(&routed, &parsed_payload("forbidden"), &policy()).response;
+        let response = apply_routed(&routed, &parsed_payload("forbidden"), &policy()).response;
         assert_denied(&response);
         assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert!(reason(&response).ends_with(RECORDED_NOTE));
@@ -2453,7 +2478,7 @@ mod tests {
                 session_id: Some("s1".to_string()),
                 tool_name: "Bash".to_string(),
                 issued: Some("gh issue list".to_string()),
-                constructed: "legion issue list".to_string(),
+                constructed: "legion issue list --repo legion".to_string(),
                 background: false,
             })
         );
@@ -2474,10 +2499,10 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_refused_for_translatable_arguments_emits_no_prediction() {
-        // #1267/#1274: route returns Rewrite, but the rule declares
-        // translatable arguments the replacement cannot carry, so the adapter
-        // denies. Nothing was constructed, so nothing is predicted.
+    fn a_rewrite_the_target_rejects_emits_no_prediction() {
+        // #1278: route returns Rewrite, but the target's own parse rejects
+        // `--web`, so the adapter denies. Nothing was constructed, so nothing
+        // is predicted.
         let input = json!({
             "tool_name": "Bash",
             "tool_input": {"command": "gh issue view 7 --web"},
@@ -2488,7 +2513,7 @@ mod tests {
         .to_string();
         let applied = respond_applied(&input, POLICY);
         assert_denied(&applied.response);
-        assert!(reason(&applied.response).contains("rewrite rule 'gh-issue-view'"));
+        assert!(reason(&applied.response).contains("'--web'"));
         assert!(applied.rewrite.is_none());
     }
 
@@ -2500,7 +2525,7 @@ mod tests {
             "rm -rf build",
             "xxd file.bin",
             "gh pr merge 7",
-            "gh issue list src/",
+            "gh issue list \"$LABEL\"",
         ] {
             let applied = respond_applied(&payload(command), POLICY);
             assert!(applied.rewrite.is_none(), "{command} yielded a rewrite");
@@ -2515,7 +2540,7 @@ mod tests {
                 reason: "legion tracks issues".to_string(),
             },
             facts: Facts {
-                paths: vec!["src/".to_string()],
+                carried: vec!["src/".to_string()],
                 ..Facts::default()
             },
             deciding: Deciding::Rule {
@@ -2524,7 +2549,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let applied = apply(&routed, &parsed_payload("gh issue list src/"), &policy());
+        let applied = apply_routed(&routed, &parsed_payload("gh issue list src/"), &policy());
         assert_denied(&applied.response);
         assert!(applied.rewrite.is_none());
     }
@@ -2718,5 +2743,137 @@ mod tests {
         // Neither case opens the store: there is nothing to witness.
         assert!(witness_session("not json").is_ok());
         assert!(witness_session(&payload("ls")).is_ok());
+    }
+
+    // -- the shipped policy, end to end (#1278) --------------------------------
+
+    /// The shipped artifact, compiled in so these tests run the adapter over
+    /// exactly what ships, with legion's own clap tree judging each rewrite.
+    const SHIPPED_POLICY: &str = include_str!("../../plugin/legion-cmd/policy.json");
+
+    /// The FR-CMD-010 hook battery; its Bash rewrite rows say what the adapter
+    /// builds (`replacement`) or why it refuses (`adapter_denies`).
+    const HOOK_CASES: &str = include_str!("../../crates/legion-cmd/tests/fixtures/hook_cases.json");
+
+    /// The adapter's response to `command` under the shipped policy, for the
+    /// repo `legion`.
+    fn shipped(command: &str) -> Value {
+        respond_with(
+            &payload(command),
+            Ok(SHIPPED_POLICY.to_string()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            temp_store(),
+            Some("legion".to_string()),
+        )
+        .response
+    }
+
+    /// The command a rewrite response runs in place of the agent's.
+    fn rewritten_command(response: &Value) -> Option<&str> {
+        let out = output(response);
+        (out["permissionDecision"] == "allow")
+            .then(|| out["updatedInput"]["command"].as_str())
+            .flatten()
+    }
+
+    #[test]
+    fn the_shipped_rewrites_carry_the_agents_arguments() {
+        // The issue's acceptance: each managed command runs as the legion
+        // command carrying its arguments, shell-quoted, with the repo filled
+        // and a work-source slug reshaped.
+        for (command, replacement) in [
+            (
+                "git commit -m \"a b\"",
+                "legion commit --repo legion -m 'a b'",
+            ),
+            ("git push", "legion push --repo legion"),
+            ("gh pr view 42", "legion pr view --repo legion --number 42"),
+            (
+                "gh issue view 1278 --repo runlegion/legion",
+                "legion issue view --repo legion --number 1278",
+            ),
+            (
+                "gh issue list --repo runlegion/legion",
+                "legion issue list --repo legion",
+            ),
+        ] {
+            let response = shipped(command);
+            assert_eq!(
+                rewritten_command(&response),
+                Some(replacement),
+                "`{command}`: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shipped_rewrite_the_target_rejects_denies_naming_the_argument() {
+        for (command, named) in [
+            ("gh pr view 42 --web", "'--web'"),
+            ("git push origin", "'origin'"),
+            ("git commit --amend -m x", "'--amend'"),
+            ("git push -h", "help"),
+            ("git push --force", "`--force`"),
+            ("git push --repo origin", "`--repo`"),
+            ("gh issue view 7 --json title", "`--json`"),
+            ("git commit -m \"$MSG\"", "`\"$MSG\"`"),
+            ("git commit -m *.txt", "`*.txt`"),
+        ] {
+            let response = shipped(command);
+            assert_denied(&response);
+            assert!(
+                reason(&response).contains(named),
+                "`{command}`: {}",
+                reason(&response)
+            );
+        }
+    }
+
+    #[test]
+    fn every_hook_battery_bash_rewrite_row_states_what_the_adapter_does() {
+        // The battery pins route's arm; a Bash rewrite is only half decided
+        // there, because the target's own parse runs in the adapter. Each
+        // such row names the command the adapter builds, or what it refuses.
+        let rows: Vec<Value> = serde_json::from_str(HOOK_CASES).expect("the battery parses");
+        let mut failures: Vec<String> = Vec::new();
+        for row in rows
+            .iter()
+            .filter(|row| row["tool"] == "Bash" && row["route"] == "rewrite")
+        {
+            let id = format!("{}/{}", row["hook"], row["case"]);
+            let Some(command) = row["input"]["command"].as_str() else {
+                failures.push(format!("{id}: no command"));
+                continue;
+            };
+            let response = shipped(command);
+            match (row["replacement"].as_str(), row["adapter_denies"].as_str()) {
+                (Some(want), None) => {
+                    if rewritten_command(&response) != Some(want) {
+                        failures.push(format!("{id}: expected `{want}`, got {response}"));
+                    }
+                }
+                (None, Some(want)) => {
+                    let out = output(&response);
+                    let denied = out["permissionDecision"] == "deny";
+                    let text = out["permissionDecisionReason"].as_str().unwrap_or("");
+                    if !denied || !text.contains(want) {
+                        failures.push(format!(
+                            "{id}: expected a deny naming {want:?}, got {response}"
+                        ));
+                    }
+                }
+                _ => failures.push(format!(
+                    "{id}: a Bash rewrite row carries exactly one of replacement / adapter_denies"
+                )),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn the_command_tree_is_well_formed_with_the_git_short_spellings() {
+        // `-m` and `-F` on `legion commit` (#1278) must not collide with any
+        // other short on the path, the global `-v` included.
+        Cli::command().debug_assert();
     }
 }
