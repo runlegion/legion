@@ -53,7 +53,7 @@ A requirement is a block. Distill it at the block, as you write it, before the n
 not as a pass over the finished set (the checks are the `legion-distill` skill; the writer
 runs them here, a reader checks after). The block's one reader is a rule-follower who
 executes it without having done the thinking, so the test is: can that reader act on this
-requirement from its own text and its `traces_to`, with no hole to fall into? Run four
+requirement from its own text and its `traces_to`, with no hole to fall into? Run five
 checks per requirement:
 
 - **One SHALL.** The requirement states exactly one thing to build. Two things are two
@@ -63,6 +63,13 @@ checks per requirement:
   intention.
 - **Traced.** `traces_to` names what earned it (invariant 1). A SHALL with no earner is a
   stop.
+- **Falsifier named.** Ask what would prove the SHALL false. If only the operator changing
+  their mind would, it is a decision, and a settled proposal or ruling earns it. If the
+  world would -- the code, a library, a CLI, a harness contract behaving otherwise -- it is
+  an empirical claim, and a settled proposal does not earn it: it routes to RESEARCH, and
+  its SHALL is accepted only once that RESEARCH prediction is witnessed as held.
+  (FR-CMD-008 was "a settled, non-pressure-tested proposal" about arguments crossing three
+  components; the gap surfaced after release.)
 - **No invention is a stop.** If finishing the block needs a fact the inputs do not give --
   a metric with no measurement, a resolution to a contradiction, a mechanism the intent only
   proposes -- HALT that block. Do not fill the hole. Escalate it (invariant 2) or route it to
