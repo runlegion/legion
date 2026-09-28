@@ -7,6 +7,7 @@ pub(crate) mod cmd_confirm;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
+pub(crate) mod git;
 pub(crate) mod grep;
 pub(crate) mod inbox;
 pub(crate) mod index_cmd;
@@ -992,6 +993,21 @@ pub(crate) enum Commands {
         /// this command makes, and every relative path it reads, resolves against <DIR>.
         #[arg(short = 'C', value_name = "DIR")]
         dir: Option<std::path::PathBuf>,
+    },
+
+    /// Run git with its own arguments; push and commit go through the audited paths.
+    ///
+    /// Every argument after `git` is git's: no legion flag is parsed from it,
+    /// including `-v`, `-h`, `--help`, `--version`, `--repo`, and `--` (#1335).
+    /// A push or commit the audited path can express runs through `legion
+    /// push` / `legion commit`; a force push, or a push that would update
+    /// `main`/`master` on the remote, is refused; any other push or commit
+    /// runs as real git with an audit row; every other subcommand runs as
+    /// real git.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<std::ffi::OsString>,
     },
 
     /// View the audit log of work source actions
