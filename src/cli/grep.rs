@@ -195,8 +195,14 @@ fn render(
     hits: &[etc::ContentHit],
     lines: &mut Vec<String>,
 ) -> Option<()> {
-    let shown =
-        |rel: &str| -> Option<String> { Path::new(operand).join(rel).to_str().map(str::to_string) };
+    // `rel` is `/`-separated; the tools print the platform separator at
+    // every level (rg's walk on Windows yields `src\sub\b.rs`), so each
+    // component is pushed rather than the whole string joined.
+    let shown = |rel: &str| -> Option<String> {
+        let mut path: PathBuf = PathBuf::from(operand);
+        path.extend(rel.split('/'));
+        path.to_str().map(str::to_string)
+    };
     match search.shape {
         Shape::Lines { numbered } => {
             for hit in hits {
@@ -1205,6 +1211,33 @@ mod tests {
             lines_of(Tool::Grep, Shape::Counts),
             vec![format!("{a}:2"), format!("{b}:0")]
         );
+    }
+
+    #[test]
+    fn render_uses_the_platform_separator_at_every_level() {
+        let hits: Vec<etc::ContentHit> = vec![etc::ContentHit {
+            repo: "sub/deep/b.rs".to_string(),
+            path: String::new(),
+            line: 2,
+            text: "x".to_string(),
+        }];
+        let files: Vec<String> = vec!["sub/deep/b.rs".to_string()];
+        let sep: char = std::path::MAIN_SEPARATOR;
+        let nested: String = format!("src{sep}sub{sep}deep{sep}b.rs");
+        for (tool, shape, want) in [
+            (
+                Tool::Rg,
+                Shape::Lines { numbered: true },
+                format!("{nested}:2:x"),
+            ),
+            (Tool::Rg, Shape::Files, nested.clone()),
+            (Tool::Grep, Shape::Counts, format!("{nested}:1")),
+        ] {
+            let s = with_shape(search("x", false, &["src"]), shape);
+            let mut lines: Vec<String> = Vec::new();
+            render(tool, &s, "src", &files, &hits, &mut lines).expect("render");
+            assert_eq!(lines, vec![want], "{tool:?} {shape:?}");
+        }
     }
 
     #[cfg(unix)]
