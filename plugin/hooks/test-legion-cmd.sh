@@ -84,6 +84,23 @@ assert_contains "a broken binary (non-zero exit) denies" "$OUT" '"permissionDeci
 OUT=$(FAKE_CMD_CHECK_EMPTY=1 run_hook_with_bin "$FAKE_LEGION")
 assert_contains "a silent binary (empty stdout) denies" "$OUT" '"permissionDecision":"deny"'
 
+# -- a Grep, Glob or Read call is never refused over a legion failure (#1338) --
+
+for tool in Grep Glob Read; do
+  OUT=$(printf '{"tool_name": "%s","tool_input":{"pattern":"x","file_path":"/tmp/a.rs"}}' "$tool" \
+    | LEGION_BIN="$WORK/no-such-binary" bash "$HOOK_SRC")
+  assert_not_contains "$tool: a missing binary does not deny" "$OUT" '"permissionDecision"'
+  assert_contains "$tool: a missing binary still answers" "$OUT" '"hookEventName":"PreToolUse"'
+  OUT=$(printf '{"tool_name":"%s","tool_input":{}}' "$tool" \
+    | FAKE_CMD_CHECK_EMPTY=1 LEGION_BIN="$FAKE_LEGION" bash "$HOOK_SRC")
+  assert_not_contains "$tool: a silent binary does not deny" "$OUT" '"permissionDecision"'
+done
+
+# A Bash command that spells the tool name inside its input is still denied.
+OUT=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"echo \"tool_name\":\"Read\""}}' \
+  | LEGION_BIN="$WORK/no-such-binary" bash "$HOOK_SRC")
+assert_contains "a Bash payload naming Read in its command still denies" "$OUT" '"permissionDecision":"deny"'
+
 # within_seconds DESC MAX_SECS ELAPSED -- ELAPSED (whole seconds) is at
 # most MAX_SECS.
 within_seconds() {
@@ -237,10 +254,22 @@ for kind in "${KINDS[@]}"; do
 
   OUT=$(run_registered "$WORK/absent-root" "$WORK/absent-data" "$kind")
   DECISION=$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null)
-  assert_eq "$kind: with the binary absent the registered command line still denies" \
-    "$DECISION" "deny"
-  assert_contains "$kind: the absent-binary deny names the failure" \
-    "$OUT" "could not run the legion binary"
+  case "$kind" in
+    Grep | Glob | Read)
+      # A legion failure never refuses these three (#1338).
+      EVENT=$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.hookEventName' 2>/dev/null)
+      assert_eq "$kind: with the binary absent the registered command line runs the call as sent" \
+        "$DECISION" "null"
+      assert_eq "$kind: the absent-binary pass-through is still a hook response" \
+        "$EVENT" "PreToolUse"
+      ;;
+    *)
+      assert_eq "$kind: with the binary absent the registered command line still denies" \
+        "$DECISION" "deny"
+      assert_contains "$kind: the absent-binary deny names the failure" \
+        "$OUT" "could not run the legion binary"
+      ;;
+  esac
 done
 
 finish_tests

@@ -11,7 +11,8 @@
 //! ([`ROUTE_DEADLINE`]) on a worker thread and turns an
 //! overrun, a lookup failure, a replacement failure, an unreadable payload or
 //! policy, and a panic anywhere into a deny with a reason. Nothing here
-//! falls through to running the raw command.
+//! falls through to running the raw command, except a harness Grep, Glob or
+//! Read call, which changes nothing on disk and runs as sent (#1338).
 //!
 //! The operator mode (`legion cmd-check -- <command>`, #1230,
 //! `crate::cli::cmd_check`) runs the same core: [`read_policy_text`] and
@@ -41,6 +42,15 @@
 //! - a non-Bash rewrite (Agent, Task): `allow` plus `updatedInput` built by
 //!   `crate::cmd::replacement`, with what the call became and why in
 //!   `additionalContext` (FR-CMD-003).
+//! - an answered search (#1338): a harness Grep or Glob call the router
+//!   let run, and legion can answer fully (`crate::cmd::answer`), runs with
+//!   no `permissionDecision`, legion's answer as `additionalContext`, and,
+//!   for Grep, `updatedInput` with `head_limit: 1` so the tool's own result
+//!   is next to nothing. Anything legion cannot answer, or an answer that
+//!   fails or runs out of time, runs the tool as sent.
+//! - a harness Grep, Glob or Read call is never refused over an adapter
+//!   failure (#1338): an unreadable policy, a store that cannot be opened,
+//!   the deadline, or a panic lets it run as sent, with nothing added.
 //! - deny: `deny` with the reason (FR-CMD-005). A Bash refusal names no
 //!   command to run instead.
 //! - ask without the operator mark: `deny` carrying route's question and
@@ -110,6 +120,7 @@ use legion_cmd::{
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::cmd::answer::{self, Answer, Answerer, LocalAnswers, SearchCall};
 use crate::cmd::confirm::{live_confirmations, use_confirmation, was_used};
 use crate::cmd::incident::{IncidentLog, Origin};
 use crate::cmd::prediction::{self, AppliedRewrite};
@@ -134,6 +145,13 @@ const PLUGIN_ROOT_ENV: &str = "CLAUDE_PLUGIN_ROOT";
 pub(crate) const LEGION_REPO_ENV: &str = "LEGION_REPO";
 
 const HOOK_EVENT: &str = "PreToolUse";
+
+/// The harness tools a legion failure never refuses (#1338): a failure
+/// lets the call run as sent. Read, Grep and Glob change nothing on disk.
+const RUNS_ON_FAILURE: [&str; 3] = ["Grep", "Glob", "Read"];
+
+/// The harness search tools legion answers in the same response (#1338).
+const ANSWERED_TOOLS: [&str; 2] = ["Grep", "Glob"];
 
 /// How many reflections a required recall or consult lookup fetches into
 /// `Context`. Small on purpose: the lookup runs inside the decision deadline.
@@ -243,7 +261,7 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     let mut input = String::new();
     let mut after: AfterResponse = AfterResponse::default();
     let response: Value = match stdin.read_to_string(&mut input) {
-        Ok(_) => guarded(|| respond(&input, &mut after)),
+        Ok(_) => guarded(&input, || respond(&input, &mut after)),
         Err(e) => deny_for_error(&AdapterError::Payload(e.to_string())),
     };
     let body: String =
@@ -292,12 +310,38 @@ impl AfterResponse {
 }
 
 /// Runs `build` and turns a panic anywhere inside it into a deny, so the
-/// process never exits without a response over an adapter bug.
-fn guarded(build: impl FnOnce() -> Value) -> Value {
+/// process never exits without a response over an adapter bug -- or, for a
+/// Grep, Glob or Read payload, into running the call as sent (#1338).
+fn guarded(input: &str, build: impl FnOnce() -> Value) -> Value {
     match panic::catch_unwind(AssertUnwindSafe(build)) {
         Ok(response) => response,
-        Err(payload) => deny_for_error(&AdapterError::Panic(panic_message(&payload))),
+        Err(payload) => failure_response(
+            tool_named_in(input).as_deref(),
+            &AdapterError::Panic(panic_message(&payload)),
+        ),
     }
+}
+
+/// The `tool_name` of a payload, when it parses that far.
+fn tool_named_in(input: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ToolName {
+        tool_name: String,
+    }
+    serde_json::from_str::<ToolName>(input)
+        .ok()
+        .map(|payload| payload.tool_name)
+}
+
+/// The response to an adapter failure: a deny naming it (FR-CMD-009), or,
+/// for a Grep, Glob or Read call, the call as sent with nothing added --
+/// a legion failure never refuses those (#1338).
+fn failure_response(tool: Option<&str>, err: &AdapterError) -> Value {
+    if tool.is_some_and(|tool| RUNS_ON_FAILURE.contains(&tool)) {
+        eprintln!("[legion cmd-check] {err}; the call runs as sent");
+        return pass_through(None);
+    }
+    deny_for_error(err)
 }
 
 pub(crate) fn panic_message(payload: &Box<dyn Any + Send>) -> String {
@@ -337,15 +381,21 @@ fn respond(input: &str, after: &mut AfterResponse) -> Value {
         open_store_within(deadline, crate::cli::util::open_db).map(|db| Arc::new(Mutex::new(db)));
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
     let session_input: Option<String> = store.is_ok().then(|| input.to_string());
+    let decision_store: Arc<dyn CmdStore> = Arc::new(LocalCmdStore {
+        store: store.clone(),
+    });
     let (applied, pending) = respond_beside_witness(
-        input,
         deadline,
-        policy_text,
-        Arc::new(StoreLookups),
-        Arc::new(LocalCmdStore {
-            store: store.clone(),
-        }),
-        legion_repo,
+        || {
+            respond_with(
+                input,
+                policy_text,
+                Arc::new(StoreLookups),
+                decision_store,
+                legion_repo,
+                Arc::new(LocalAnswers),
+            )
+        },
         move || match session_input {
             Some(session_input) => witness_session(&session_input),
             None => Ok(()),
@@ -399,21 +449,18 @@ fn open_store_within(
 }
 
 /// Starts the witness pass on its own worker thread, then runs the decision
-/// as it always runs, under its own deadline. The decision never waits on the
-/// pass. The pass's budget is one `deadline` from its start, so from here
-/// the call stays within one deadline plus the decision's overhead (the
-/// store open before it waits at most one more).
+/// (`respond`, the adapter over its sources) as it always runs, under its own
+/// deadline. The decision never waits on the pass. The pass's budget is one
+/// `deadline` from its start, so from here the call stays within one
+/// deadline plus the decision's overhead (the store open before it waits at
+/// most one more).
 fn respond_beside_witness(
-    input: &str,
     deadline: Duration,
-    policy_text: Result<String, AdapterError>,
-    lookups: Arc<dyn LookupRunner>,
-    store: Arc<dyn CmdStore>,
-    legion_repo: Option<String>,
+    respond: impl FnOnce() -> Applied,
     witness: impl FnOnce() -> Result<(), Box<dyn std::error::Error>> + Send + 'static,
 ) -> (Applied, Option<PendingWitness>) {
     let pending: Option<PendingWitness> = PendingWitness::start(deadline, witness);
-    let applied: Applied = respond_with(input, policy_text, lookups, store, legion_repo);
+    let applied: Applied = respond();
     (applied, pending)
 }
 
@@ -548,13 +595,16 @@ pub(crate) struct SessionWork {
 }
 
 /// The adapter over injected sources, so a test drives every branch without
-/// touching the environment or the store.
+/// touching the environment or the store. A Grep or Glob call the router
+/// lets run with nothing added is offered to `answers` after the decision
+/// (#1338).
 fn respond_with(
     input: &str,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
     store: Arc<dyn CmdStore>,
     legion_repo: Option<String>,
+    answers: Arc<dyn Answerer>,
 ) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(payload) => payload,
@@ -576,13 +626,52 @@ fn respond_with(
         policy_text,
         call,
         lookups,
-        legion_repo,
+        legion_repo.clone(),
         payload.cwd.clone(),
         Some(session),
     ) {
-        Ok(routed) => apply(&routed, &payload),
-        Err(e) => deny_for_error(&e).into(),
+        Ok(routed) => match answered(&routed, &payload, legion_repo, answers) {
+            Some(answer) => answer_response(answer).into(),
+            None => apply(&routed, &payload),
+        },
+        Err(e) => failure_response(Some(&payload.tool_name), &e).into(),
     }
+}
+
+/// Legion's answer to a harness Grep or Glob call the router let run with
+/// nothing added, within [`answer::ANSWER_DEADLINE`]. `None` -- declined,
+/// failed, too slow, or any other call -- leaves the decision as it was.
+fn answered(
+    routed: &Routed,
+    payload: &HookPayload,
+    legion_repo: Option<String>,
+    answers: Arc<dyn Answerer>,
+) -> Option<Answer> {
+    if !ANSWERED_TOOLS.contains(&payload.tool_name.as_str())
+        || routed.decision != (Decision::Allow { note: None })
+    {
+        return None;
+    }
+    let call = SearchCall {
+        tool: payload.tool_name.clone(),
+        input: payload.tool_input.clone(),
+        cwd: payload.cwd.clone(),
+        legion_repo,
+    };
+    answer::answer_within(answers, call, answer::ANSWER_DEADLINE)
+}
+
+/// An answered search (#1338): no `permissionDecision`, so the harness's
+/// own rules decide and nothing is granted; the answer as
+/// `additionalContext`, which reaches the agent in the same response; and
+/// the input that keeps the tool's own result small, when there is one.
+fn answer_response(answer: Answer) -> Value {
+    let mut fields = Map::new();
+    fields.insert("additionalContext".to_string(), Value::String(answer.text));
+    if let Some(updated) = answer.updated_input {
+        fields.insert("updatedInput".to_string(), updated);
+    }
+    hook_output(fields)
 }
 
 /// The decision core both modes run (FR-CMD-017). Parses the policy first
@@ -1181,6 +1270,31 @@ mod tests {
         }
     }
 
+    /// Answers every search with the same result, and records the calls.
+    struct StubAnswers {
+        answer: Option<Answer>,
+        calls: Mutex<Vec<SearchCall>>,
+    }
+
+    impl Answerer for StubAnswers {
+        fn answer(&self, call: &SearchCall) -> Option<Answer> {
+            self.calls.lock().expect("calls lock").push(call.clone());
+            self.answer.clone()
+        }
+    }
+
+    fn stub_answers(answer: Option<Answer>) -> Arc<StubAnswers> {
+        Arc::new(StubAnswers {
+            answer,
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Declines every search: the tool runs as sent.
+    fn no_answers() -> Arc<dyn Answerer> {
+        stub_answers(None)
+    }
+
     /// Fails every lookup.
     struct FailingLookups;
 
@@ -1360,6 +1474,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             temp_store(),
             None,
+            no_answers(),
         )
     }
 
@@ -1422,7 +1537,7 @@ mod tests {
 
     #[test]
     fn a_panic_anywhere_in_the_adapter_is_a_deny_naming_the_panic() {
-        let response = guarded(|| panic!("simulated adapter bug"));
+        let response = guarded(&payload("ls"), || panic!("simulated adapter bug"));
         assert_denied(&response);
         assert!(reason(&response).contains("panic: simulated adapter bug"));
     }
@@ -1447,6 +1562,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             temp_store(),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -1754,6 +1870,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             store.clone(),
             None,
+            no_answers(),
         )
         .response
     }
@@ -1853,6 +1970,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             store.clone(),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -1873,6 +1991,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             store.clone(),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -1900,6 +2019,7 @@ mod tests {
                 Arc::new(StubLookups(Lookup::Empty)),
                 store.clone(),
                 None,
+                no_answers(),
             )
             .response;
             assert_denied(&response);
@@ -2071,6 +2191,7 @@ mod tests {
                 notice_failure: None,
             })),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -2116,6 +2237,7 @@ mod tests {
             Arc::new(FailingLookups),
             temp_store(),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -2155,6 +2277,7 @@ mod tests {
             lookups.clone(),
             temp_store(),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -2179,6 +2302,7 @@ mod tests {
             lookups.clone(),
             temp_store(),
             Some("other-repo".to_string()),
+            no_answers(),
         )
         .response;
         assert_eq!(lookups.calls()[0].0, "recall:other-repo");
@@ -2265,6 +2389,7 @@ mod tests {
             lookups.clone(),
             temp_store(),
             None,
+            no_answers(),
         )
         .response;
         assert_denied(&response);
@@ -2446,12 +2571,17 @@ mod tests {
         drop(store.db());
         let started = Instant::now();
         let (applied, pending) = respond_beside_witness(
-            &payload("git status"),
             deadline,
-            Ok(POLICY.to_string()),
-            Arc::new(StubLookups(Lookup::Empty)),
-            store,
-            None,
+            || {
+                respond_with(
+                    &payload("git status"),
+                    Ok(POLICY.to_string()),
+                    Arc::new(StubLookups(Lookup::Empty)),
+                    store,
+                    None,
+                    no_answers(),
+                )
+            },
             move || {
                 prediction::witness_pending(&db, "s1", &transcript)?;
                 Ok(())
@@ -2503,14 +2633,19 @@ mod tests {
     fn an_extreme_witness_deadline_yields_the_routing_decision() {
         // #1288: the largest deadline reaches the decision, not a panic deny.
         let deadline = Duration::from_millis(u64::MAX);
-        let response: Value = guarded(|| {
+        let response: Value = guarded(&payload("git status"), || {
             respond_beside_witness(
-                &payload("git status"),
                 deadline,
-                Ok(POLICY.to_string()),
-                Arc::new(StubLookups(Lookup::Empty)),
-                temp_store(),
-                None,
+                || {
+                    respond_with(
+                        &payload("git status"),
+                        Ok(POLICY.to_string()),
+                        Arc::new(StubLookups(Lookup::Empty)),
+                        temp_store(),
+                        None,
+                        no_answers(),
+                    )
+                },
                 || Ok(()),
             )
             .0
@@ -2599,6 +2734,7 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             temp_store(),
             Some("legion".to_string()),
+            no_answers(),
         )
         .response
     }
@@ -2660,5 +2796,184 @@ mod tests {
         // other short on the path, the global `-v` included.
         use clap::CommandFactory;
         crate::cli::Cli::command().debug_assert();
+    }
+
+    // -- harness Grep, Glob and Read (#1338) --------------------------------
+
+    fn tool_payload(tool: &str, input: Value) -> String {
+        json!({
+            "tool_name": tool,
+            "tool_input": input,
+            "session_id": "s1",
+            "tool_use_id": "t1",
+            "cwd": REPO_CWD
+        })
+        .to_string()
+    }
+
+    fn respond_answering(input: &str, policy: &str, answers: Arc<dyn Answerer>) -> Value {
+        respond_with(
+            input,
+            Ok(policy.to_string()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            temp_store(),
+            None,
+            answers,
+        )
+        .response
+    }
+
+    fn grep_answer_stub() -> Answer {
+        Answer {
+            text: "legion answered this search in full: /repo/legion/src/a.rs:1:fn main() {}"
+                .to_string(),
+            updated_input: Some(json!({"pattern": "fn main", "head_limit": 1})),
+        }
+    }
+
+    #[test]
+    fn an_answered_grep_carries_the_answer_and_the_limited_input_and_no_decision() {
+        let answers = stub_answers(Some(grep_answer_stub()));
+        let response = respond_answering(
+            &tool_payload("Grep", json!({"pattern": "fn main"})),
+            POLICY,
+            answers.clone(),
+        );
+        let out = output(&response);
+        assert!(out.get("permissionDecision").is_none());
+        assert!(out.get("permissionDecisionReason").is_none());
+        assert_eq!(
+            out["additionalContext"],
+            "legion answered this search in full: /repo/legion/src/a.rs:1:fn main() {}"
+        );
+        assert_eq!(out["updatedInput"]["head_limit"], 1);
+        assert_eq!(out["updatedInput"]["pattern"], "fn main");
+        let calls = answers.calls.lock().expect("calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "Grep");
+        assert_eq!(calls[0].cwd.as_deref(), Some(REPO_CWD));
+    }
+
+    #[test]
+    fn an_answered_glob_carries_the_answer_and_leaves_the_input_alone() {
+        let answers = stub_answers(Some(Answer {
+            text: "legion answered this search in full from its file inventory".to_string(),
+            updated_input: None,
+        }));
+        let response = respond_answering(
+            &tool_payload("Glob", json!({"pattern": "src/**/*.rs"})),
+            POLICY,
+            answers,
+        );
+        let out = output(&response);
+        assert!(out.get("permissionDecision").is_none());
+        assert!(out.get("updatedInput").is_none());
+        assert!(
+            out["additionalContext"]
+                .as_str()
+                .expect("context")
+                .starts_with("legion answered this search")
+        );
+    }
+
+    #[test]
+    fn a_declined_search_runs_the_tool_as_sent_with_nothing_added() {
+        for tool in ["Grep", "Glob"] {
+            let response = respond_answering(
+                &tool_payload(tool, json!({"pattern": "x", "glob": "*.rs"})),
+                POLICY,
+                no_answers(),
+            );
+            assert_eq!(
+                response,
+                json!({"hookSpecificOutput": {"hookEventName": "PreToolUse"}}),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_grep_and_glob_are_offered_to_the_answerer() {
+        let answers = stub_answers(Some(grep_answer_stub()));
+        for payload in [
+            payload("grep -rn x src"),
+            tool_payload("Read", json!({"file_path": "/repo/legion/src/a.rs"})),
+            tool_payload("WebSearch", json!({"query": "x"})),
+        ] {
+            let response = respond_answering(&payload, POLICY, answers.clone());
+            assert_ne!(
+                output(&response)["additionalContext"],
+                grep_answer_stub().text,
+                "{payload}"
+            );
+        }
+        assert!(answers.calls.lock().expect("calls lock").is_empty());
+    }
+
+    #[test]
+    fn an_unbounded_read_and_a_read_over_500_lines_of_a_source_file_both_run() {
+        let policy: String =
+            std::fs::read_to_string("plugin/legion-cmd/policy.json").expect("shipped policy");
+        for input in [
+            json!({"file_path": "/repo/legion/src/cmd/hook.rs"}),
+            json!({"file_path": "/repo/legion/src/cmd/hook.rs", "limit": 600}),
+        ] {
+            let response =
+                respond_answering(&tool_payload("Read", input.clone()), &policy, no_answers());
+            let out = output(&response);
+            assert!(out.get("permissionDecision").is_none(), "{input}");
+            assert!(out.get("updatedInput").is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn a_legion_failure_never_refuses_a_grep_glob_or_read() {
+        struct Unopenable;
+        impl CmdStore for Unopenable {
+            fn open(&self) -> Result<StoreHandle, AdapterError> {
+                Err(AdapterError::Confirmations("store locked".to_string()))
+            }
+            fn log(&self) -> IncidentLog {
+                IncidentLog::at(std::env::temp_dir().join("legion-unused-incidents.jsonl"))
+            }
+            fn agent_for(&self, repo: &str) -> String {
+                repo.to_string()
+            }
+            fn notify(&self, _record: &CmdIncidentRecord) -> error::Result<()> {
+                Ok(())
+            }
+        }
+        for tool in ["Grep", "Glob", "Read"] {
+            let input = json!({"pattern": "x", "file_path": "/repo/legion/src/a.rs"});
+            let from_policy = respond_with(
+                &tool_payload(tool, input.clone()),
+                Err(AdapterError::PolicyRead("no such file".to_string())),
+                Arc::new(StubLookups(Lookup::Empty)),
+                temp_store(),
+                None,
+                no_answers(),
+            )
+            .response;
+            let from_store = respond_with(
+                &tool_payload(tool, input.clone()),
+                Ok(POLICY.to_string()),
+                Arc::new(StubLookups(Lookup::Empty)),
+                Arc::new(Unopenable),
+                None,
+                no_answers(),
+            )
+            .response;
+            let from_panic = guarded(&tool_payload(tool, input), || panic!("adapter bug"));
+            for response in [from_policy, from_store, from_panic] {
+                assert_eq!(
+                    response,
+                    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse"}}),
+                    "{tool}"
+                );
+            }
+        }
+        // Every other tool still fails closed.
+        let bash = guarded(&payload("ls"), || panic!("adapter bug"));
+        assert_denied(&bash);
     }
 }

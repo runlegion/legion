@@ -6,6 +6,7 @@
 //! (FR-CMD-017). No routing decision lives here (FR-CMD-011): nothing in this
 //! module branches on a binary name or a verb.
 
+pub(crate) mod answer;
 pub(crate) mod confirm;
 pub(crate) mod hook;
 pub(crate) mod incident;

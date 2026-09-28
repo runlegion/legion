@@ -19,10 +19,9 @@
       "file_path": "/repo/src/small.rs"
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "instead_contains": "legion sym hover",
-    "note": "the hook counts the file's lines on disk (100 here, under the 500 threshold) and passes; route has no file size in its context and denies every unbounded Read of a source file, naming sym hover and a bounded Read. DISAGREEMENT: hook allow, route deny. The operator may prefer route to allow small files; route cannot tell them apart without a size lookup the issue says not to add."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -71,10 +70,9 @@
       "file_path": "/repo/src/big.rs"
     },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "instead_contains": "legion sym hover",
-    "note": "the case the hook exists for: an 800-line source file read whole. Both deny naming sym hover / sym def and a bounded Read."
+    "route": "allow",
+    "agrees": false,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size. DISAGREEMENT: the retired hook denied this case; route allows it."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -85,9 +83,9 @@
       "limit": 600
     },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "a limit above the 500 threshold is unbounded for the cost argument; both deny."
+    "route": "allow",
+    "agrees": false,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size. DISAGREEMENT: the retired hook denied this case; route allows it."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -98,9 +96,9 @@
       "offset": 100
     },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "an offset alone leaves the read unbounded from that line; the hook reads only `limit`, and so does route's absent-limit rule."
+    "route": "allow",
+    "agrees": false,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size. DISAGREEMENT: the retired hook denied this case; route allows it."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -110,9 +108,9 @@
       "file_path": "src/components/App.tsx"
     },
     "hook_behavior": "deny",
-    "route": "deny",
-    "agrees": true,
-    "note": "the extension set is the SCIP indexer's dispatch list, not just Rust; a relative path is matched by suffix the same as an absolute one."
+    "route": "allow",
+    "agrees": false,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size. DISAGREEMENT: the retired hook denied this case; route allows it."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -134,9 +132,9 @@
       "file_path": "/repo/src/big.rs"
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "LEGION_BYPASS_READ=1 always allows and writes one bypass row; route sees no environment. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -146,9 +144,9 @@
       "file_path": "/repo/src/big.rs"
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "LEGION_SKIP_PRE_READ_SYM=1 disables the hook. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -158,9 +156,9 @@
       "file_path": "/does/not/exist.rs"
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "the hook cannot count lines of a file that is not on disk and lets Read surface its own error; route does not touch the filesystem and denies the unbounded source Read. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -170,9 +168,9 @@
       "file_path": "/repo/src/big.rs"
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "the hook's block tier needs an index to redirect to; route's rules carry no index gate. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -182,9 +180,9 @@
       "file_path": "/repo/src/big.rs"
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "coverage gate, as for every hook. DISAGREEMENT: hook allow, route deny."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "pre-read-sym.sh",
@@ -194,9 +192,9 @@
       "limit": 50
     },
     "hook_behavior": "allow",
-    "route": "deny",
-    "agrees": false,
-    "note": "the hook exits silently when file_path is empty (pre-read-sym.sh:49); route's first Read rule reads file_path and cannot resolve, which is the FR-CMD-016 deny for an unresolvable managed rule. DISAGREEMENT: hook allow, route deny (the harness rejects a Read without file_path before either runs)."
+    "route": "allow",
+    "agrees": true,
+    "note": "the Read size refusal is gone (#1338): route has no Read rule and the Read runs, whatever its size; the retired hook allowed this case too."
   },
   {
     "hook": "no-local-memory.sh",

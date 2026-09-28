@@ -5,8 +5,9 @@
 //! (`hook_behavior`) beside what route does against the SHIPPED
 //! `plugin/legion-cmd/policy.json` (`route`), and whether the agent sees the
 //! same thing from both (`agrees`). #1337 left these rules unchanged; the
-//! harness Grep and Glob rows left with their rules, which a separate issue
-//! takes up. The Bash router is tested in `router.rs`.
+//! harness Grep and Glob rows left with their rules, and #1338 removed the
+//! Read size refusal, so every Read row now runs. The Bash router is tested
+//! in `router.rs`.
 //!
 //! Row shape: `hook`, `case` (unique), `tool`, `input`, `hook_behavior`
 //! (`deny` | `rewrite` | `allow` | `inject`), `route` (the expected Decision
@@ -24,9 +25,9 @@ use serde_json::Value;
 const POLICY_JSON: &str = include_str!("../../../plugin/legion-cmd/policy.json");
 const CASES_JSON: &str = include_str!("fixtures/tool_cases.json");
 
-/// The tools the shipped policy carries rules for (#1337's Interface).
-const RULED_TOOLS: [ToolKind; 8] = [
-    ToolKind::Read,
+/// The tools the shipped policy carries rules for (#1337's Interface, less
+/// Read: #1338 removed its size refusal).
+const RULED_TOOLS: [ToolKind; 7] = [
     ToolKind::Write,
     ToolKind::Edit,
     ToolKind::MultiEdit,
@@ -182,9 +183,28 @@ fn every_ruled_tool_has_rules_and_a_row() {
             kind.as_str()
         );
     }
-    // The harness Grep and Glob rules left with the sym jobs (#1337).
+    // The harness Grep and Glob rules left with the sym jobs (#1337), and
+    // the Read size refusal with #1338.
     assert!(!policy.tools.contains_key(&ToolKind::Grep));
     assert!(!policy.tools.contains_key(&ToolKind::Glob));
+    assert!(!policy.tools.contains_key(&ToolKind::Read));
+}
+
+#[test]
+fn a_read_of_a_source_file_runs_whatever_its_size() {
+    let policy = shipped_policy();
+    for input in [
+        serde_json::json!({ "file_path": "/repo/src/big.rs" }),
+        serde_json::json!({ "file_path": "/repo/src/big.rs", "limit": 600 }),
+        serde_json::json!({ "file_path": "/repo/src/big.rs", "offset": 100 }),
+    ] {
+        let call = ToolCall {
+            tool: "Read".to_string(),
+            input: input.clone(),
+        };
+        let routed = route(&policy, &call, &Context::default());
+        assert_eq!(routed.decision, Decision::Allow { note: None }, "{input}");
+    }
 }
 
 #[test]
@@ -243,7 +263,6 @@ fn every_tool_case_matches_routes_actual_decision() {
 fn a_call_missing_a_field_its_rule_reads_is_denied_not_a_panic() {
     let policy = shipped_policy();
     for (tool, input) in [
-        ("Read", serde_json::json!({})),
         ("Write", serde_json::json!({ "content": "x" })),
         (
             "Edit",

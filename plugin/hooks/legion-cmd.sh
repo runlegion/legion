@@ -26,6 +26,22 @@
 
 STATIC_DENY='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd could not run the legion binary (missing, failed, or silent) -- failing closed rather than running an unrouted command"}}'
 
+# A harness Grep, Glob or Read call is never refused over a legion failure
+# (#1338): it changes nothing on disk, so the broken-binary answer for it is
+# the call as sent, with nothing added. The match reads the payload's own
+# top-level `"tool_name"` key; inside a JSON string value every quote is
+# escaped, so no tool input can spell it.
+STATIC_PASS='{"hookSpecificOutput":{"hookEventName":"PreToolUse"}}'
+
+# static_response PAYLOAD -- the response when the binary gives none.
+static_response() {
+  if [[ "$1" =~ \"tool_name\"[[:space:]]*:[[:space:]]*\"(Grep|Glob|Read)\" ]]; then
+    printf '%s\n' "$STATIC_PASS"
+  else
+    printf '%s\n' "$STATIC_DENY"
+  fi
+}
+
 # Seconds to wait for `legion cmd-check --hook` before killing it and
 # printing the static deny. Three numbers stay ordered: the adapter's own
 # deadline (ROUTE_DEADLINE in src/cmd/hook.rs, 7000 ms) < this timeout (a buffer for
@@ -48,7 +64,7 @@ INPUT=$(cat)
 LEGION_BIN_PATH=$(resolve_legion_bin)
 
 if [ -z "$LEGION_BIN_PATH" ] || [ ! -x "$LEGION_BIN_PATH" ]; then
-  printf '%s\n' "$STATIC_DENY"
+  static_response "$INPUT"
   exit 0
 fi
 
@@ -88,7 +104,7 @@ wait "$WATCHER" 2>/dev/null
 OUTPUT=$(cat "$OUTPUT_FILE")
 
 if [ "$STATUS" -ne 0 ] || [ -z "$OUTPUT" ]; then
-  printf '%s\n' "$STATIC_DENY"
+  static_response "$INPUT"
   exit 0
 fi
 
