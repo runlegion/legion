@@ -1,725 +1,108 @@
-//! Three concerns, kept apart so NFR-CMD-001 holds:
-//!
-//! 1. The shipped artifact (`plugin/legion-cmd/policy.json`) parses, is
-//!    non-empty, and declares the names the splitter refuses to hold. These
-//!    tests read the file at run time but never call `route` -- NFR-CMD-001's "no test of route
-//!    requires a filesystem" is about route, and this validates only the
-//!    artifact.
-//! 2. route reaches every arm over a policy that mirrors the shipped rules,
-//!    built from an inline JSON literal (the Behavior section's "tests build
-//!    policies from inline JSON strings"), so no test of route touches disk.
-//! 3. The shipped git global-option declaration routes a git command by its
-//!    subcommand's family (#1294). That issue asks for these tests "with the
-//!    shipped policy", so this one section routes over the artifact, compiled
-//!    in with `include_str!` as `hook_parity.rs` does, so no test of route
-//!    opens a file at run time (NFR-CMD-001).
+//! The shipped artifact (`plugin/legion-cmd/policy.json`, #1337): exactly
+//! the four Bash lists and the rules for tools other than Bash, with today's
+//! never-run and ask coverage and the three power switches.
 
-use std::fs;
+use legion_cmd::{PolicyError, builtin_no_go, parse_policy};
+use serde_json::Value;
 
-use legion_cmd::{
-    AliasReading, Context, Deciding, Decision, Policy, ProxyReason, Routed, ToolCall, parse_policy,
-    route, scan,
-};
-
-/// The shipped artifact, embedded at compile time so the route tests over it
-/// need no filesystem (NFR-CMD-001).
 const SHIPPED_POLICY_JSON: &str = include_str!("../../../plugin/legion-cmd/policy.json");
 
-/// Reads the shipped artifact at run time. Only the artifact-validation tests
-/// use it; none of them calls route.
-fn shipped_policy_text() -> String {
-    let path = format!(
-        "{}/../../plugin/legion-cmd/policy.json",
-        env!("CARGO_MANIFEST_DIR")
+fn shipped() -> legion_cmd::Policy {
+    parse_policy(SHIPPED_POLICY_JSON).expect("the shipped policy parses")
+}
+
+#[test]
+fn the_shipped_file_has_exactly_the_four_lists_and_tools() {
+    let root: Value = serde_json::from_str(SHIPPED_POLICY_JSON).expect("valid JSON");
+    let mut keys: Vec<&str> = root
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["ask", "never_run", "power_switches", "proxy", "tools"]
     );
-    fs::read_to_string(&path).expect("shipped policy is readable")
-}
-
-/// Mirrors the shipped rules, inline, so the route assertions below never touch
-/// the filesystem. Kept structurally in step with `plugin/legion-cmd/policy.json`.
-fn mirror_policy() -> Policy {
-    parse_policy(
-        r#"{
-        "sym_jobs": [
-            {"id": "find-content", "sym_command": "legion sym etc find-content",
-             "interpreter_patterns": ["rglob", "read_text"], "pipe_filter": true}
-        ],
-        "wrappers": [
-            {"binary": "env",
-             "flags": ["-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug"],
-             "value_options": ["-u", "--unset", "-C", "--chdir", "-P"]},
-            {"binary": "npx",
-             "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
-             "value_options": ["-p", "--package", "-w", "--workspace"]},
-            {"binary": "pnpm", "required_subcommand": "exec",
-             "flags": ["-r", "--recursive", "--parallel", "--report-summary", "-w", "--workspace-root"],
-             "value_options": ["--resume-from", "-C", "--dir", "-F", "--filter"]},
-            {"binary": "npm", "required_subcommand": "x",
-             "flags": ["-y", "--yes", "--workspaces", "--include-workspace-root"],
-             "value_options": ["-p", "--package", "-w", "--workspace", "--prefix"]},
-            {"binary": "bun", "required_subcommand": "x",
-             "flags": ["--bun", "--silent", "--verbose", "--no-install"],
-             "value_options": ["-p", "--package"]},
-            {"binary": "yarn", "required_subcommand": "exec",
-             "flags": ["--silent", "--verbose"],
-             "value_options": ["--cwd"],
-             "selectors": ["workspace", "workspaces"]}
-        ],
-        "interpreters": [
-            {"binary": "sh", "flag": "-c", "body": "shell"},
-            {"binary": "python3", "flag": "-c", "body": "foreign"}
-        ],
-        "script_carriers": [{"binary": "bash"}],
-        "global_options": [
-            {"binary": "git",
-             "flags": ["-p", "--paginate", "-P", "--no-pager", "--bare"],
-             "value_options": ["-C", "-c", "--config-env", "--git-dir", "--work-tree"],
-             "inline_alias": {"options": ["-c"], "prefix": "alias."}}
-        ],
-        "tools": {"Bash": {"families": {
-            "git push": {"rules": [
-                {"id": "git-push-to-legion", "outcome": {"kind": "rewrite",
-                 "target": "legion push --repo {repo}", "reason": "the audited push path",
-                 "deny_flags": ["--repo", "--force"]}}
-            ]},
-            "git commit": {"rules": [
-                {"id": "git-commit-without-message", "predicates": [
-                    {"kind": "arg-absent", "arg": "-m"}, {"kind": "arg-absent", "arg": "--message"},
-                    {"kind": "arg-absent", "arg": "-F"}, {"kind": "arg-absent", "arg": "--file"}],
-                 "outcome": {"kind": "deny", "reason": "opens an editor", "instead": "legion commit"}},
-                {"id": "git-commit-to-legion", "outcome": {"kind": "rewrite",
-                 "target": "legion commit --repo {repo}", "reason": "the audited commit path"}}
-            ]},
-            "grep": {"rules": [{"id": "grep-to-sym", "outcome": {"kind": "sym", "job": "find-content"}}]},
-            "rm": {"rules": [
-                {"id": "rm-recursive-force", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
-                 "outcome": {"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}},
-                {"id": "rm-other", "outcome": {"kind": "allow"}}
-            ]},
-            "curl": {"rules": [{"id": "curl-network", "outcome": {"kind": "ask", "question": "fetch?", "reason": "network", "needs_operator": true}}]},
-            "xxd": {"rules": [{"id": "xxd-verbatim", "outcome": {"kind": "proxy", "reason": "binary"}}]}
-        }}}
-    }"#,
-    )
-    .expect("mirror policy parses")
-}
-
-fn bash(command: &str) -> ToolCall {
-    ToolCall {
-        tool: "Bash".to_string(),
-        input: serde_json::json!({ "command": command }),
+    let tools = root["tools"].as_object().expect("tools is an object");
+    for bash_only in ["Bash", "Grep", "Glob"] {
+        assert!(!tools.contains_key(bash_only), "tools carries {bash_only}");
     }
 }
 
-fn decide(policy: &Policy, command: &str) -> Decision {
-    route(policy, &bash(command), &Context::default()).decision
+#[test]
+fn the_proxy_list_is_git_gh_grep_and_rg() {
+    assert_eq!(shipped().proxy, vec!["git", "gh", "grep", "rg"]);
 }
 
-// -- artifact validation (touches disk, never calls route) --------------------
-
 #[test]
-fn shipped_policy_parses_is_non_empty_and_declares_its_names() {
-    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
-    assert!(!policy.is_empty());
-    // The names the splitter refuses to hold live here as data.
-    assert!(policy.matching_wrapper("env", &[]).is_some());
-    assert!(
-        policy
-            .matching_wrapper("pnpm", &["exec".to_string(), "eslint".to_string()])
-            .is_some()
-    );
-    assert!(policy.matching_interpreter("sh").is_some());
-    assert!(policy.matching_interpreter("python3").is_some());
-    assert!(policy.matching_script_carrier("bash").is_some());
-    assert!(policy.sym_job("find-content").is_some());
-    // The shipped file declares sudo as a wrapper for every routing
-    // decision; the no-go check also resolves every wrapper and interpreter
-    // declared here from this file embedded in the binary, so wrapper
-    // variants of a no-go entry hold without the file (FR-CMD-025).
-    assert!(policy.matching_wrapper("sudo", &[]).is_some());
-    // The shipped file adds no no-go entries; the built-ins apply on top.
-    assert!(policy.no_go.is_empty());
-    assert_eq!(
-        policy.no_go_entries().len(),
-        legion_cmd::builtin_no_go().len()
-    );
-}
-
-/// The shipped wrapper declarations consume each wrapper's own words up to
-/// the wrapped command (#1286). Checked against the artifact itself, so a
-/// declaration with the wrong arity -- a value option listed as a flag, a
-/// missing operand -- fails here rather than shipping green. This reads the
-/// file but never calls route.
-#[test]
-fn shipped_wrapper_declarations_reach_the_wrapped_command() {
-    let policy = parse_policy(&shipped_policy_text()).expect("shipped policy parses");
-    for (command, wrapped) in [
-        ("timeout 5 chmod -R 777 /", "chmod"),
-        ("timeout -s KILL 5 mkfs.ext4 /dev/sda1", "mkfs.ext4"),
-        ("stdbuf -oL mkfs.ext4 /dev/sda1", "mkfs.ext4"),
-        ("xargs -I{} mkfs.ext4 {}", "mkfs.ext4"),
-        ("sudo -u root mkfs.ext4 /dev/sda1", "mkfs.ext4"),
-        ("sudo -u root git push", "git"),
-        ("nice -n 10 make", "make"),
-        ("nohup make", "make"),
-        ("env -i FOO=1 make", "FOO=1"),
-        ("npx -y eslint .", "eslint"),
-        ("pnpm -r exec grep foo .", "grep"),
-        ("pnpm -C web --filter app exec eslint .", "eslint"),
-        ("pnpm dlx -s cowsay hi", "cowsay"),
-        ("pnpx -s cowsay hi", "cowsay"),
-        ("pnpm dlx --reporter silent cowsay hi", "cowsay"),
-        ("pnpx --reporter=silent cowsay hi", "cowsay"),
-        ("npm --prefix x exec --package=eslint -- eslint .", "eslint"),
-        ("yarn --cwd web exec eslint .", "eslint"),
-        ("yarn dlx -q cowsay hi", "cowsay"),
-        ("bunx --silent --no-install cowsay hi", "cowsay"),
-        // A subcommand alias is its own entry (#1293).
-        ("npm x grep foo .", "grep"),
-        ("npm x -w web -- grep foo .", "grep"),
-        ("bun x grep foo .", "grep"),
-        ("bun --bun x grep foo .", "grep"),
-        // A workspace selector is the runner's own words (#1293).
-        ("yarn workspace web exec grep foo .", "grep"),
-        ("yarn workspaces foreach exec grep foo .", "grep"),
-        ("yarn --cwd packages workspace web exec grep foo .", "grep"),
-        ("yarn workspace web dlx -q cowsay hi", "cowsay"),
+fn todays_never_run_and_ask_coverage_is_kept() {
+    let policy = shipped();
+    let never_run: Vec<String> = policy
+        .never_run_entries()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    for id in [
+        "rm-recursive-force-root",
+        "mkfs-device",
+        "dd-to-disk",
+        "fork-bomb",
+        "chmod-chown-recursive-root",
+        "git-force-push-main",
+        "git-force-refspec-main",
+        "sqlite3-legion-db",
+        "rm-recursive-force",
     ] {
-        let (args, start) = shipped_payload_start(&policy, command);
-        let start =
-            start.unwrap_or_else(|| panic!("`{command}`: the declaration consumes its own words"));
+        assert!(never_run.contains(&id.to_string()), "never-run lost {id}");
+    }
+    assert_eq!(builtin_no_go().len(), 7);
+    let ask: Vec<&str> = policy.ask.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ask, vec!["curl-network"]);
+    let switches: Vec<&str> = policy
+        .power_switches
+        .iter()
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        switches,
+        vec![
+            "push-force",
+            "push-force-refspec",
+            "merge-despite-failures",
+            "issue-close-force"
+        ]
+    );
+    for entry in policy
+        .never_run
+        .iter()
+        .chain(&policy.ask)
+        .chain(&policy.power_switches)
+    {
+        assert!(!entry.reason.is_empty(), "{} carries no reason", entry.id);
+    }
+}
+
+#[test]
+fn a_file_with_any_other_top_level_key_fails_to_parse() {
+    let mut root: Value = serde_json::from_str(SHIPPED_POLICY_JSON).expect("valid JSON");
+    for extra in ["route", "sym_jobs", "wrappers", "no_go", "anything"] {
+        let mut with_extra = root.clone();
+        with_extra
+            .as_object_mut()
+            .expect("an object")
+            .insert(extra.to_string(), serde_json::json!({}));
+        let err = parse_policy(&with_extra.to_string()).expect_err("an extra key fails");
         assert_eq!(
-            args.get(start).map(String::as_str),
-            Some(wrapped),
-            "`{command}` must reach `{wrapped}`"
-        );
-    }
-
-    // Shapes the declarations do not model are claimed by the wrapper and
-    // refused, so route proxies them opaque -- never the allow default.
-    // npm's `--no` is deliberately undeclared: its arity differs across npm
-    // versions and reports, and leaving it out is safe either way. A `--`
-    // before a runner's subcommand is refused the same way.
-    for command in [
-        "npx --no cowsay hi",
-        "npm exec --no cowsay hi",
-        "env -S 'make'",
-        "pnpm -- exec grep foo .",
-        "pnpm -r -- exec grep foo .",
-        "npm -- exec grep foo .",
-        "yarn -- exec grep foo .",
-        // `workspaces foreach`'s own options are undeclared (#1293).
-        "yarn workspaces foreach -A exec grep foo .",
-    ] {
-        assert_eq!(
-            shipped_payload_start(&policy, command).1,
-            None,
-            "`{command}`"
-        );
-    }
-
-    // A script run through a selector names no runner subcommand, so no
-    // wrapper claims it: an ordinary invocation, like bare `yarn <script>`.
-    for command in ["yarn workspace web grep", "yarn workspace web build"] {
-        let args: Vec<String> = command
-            .split_whitespace()
-            .skip(1)
-            .map(str::to_string)
-            .collect();
-        assert!(
-            policy.matching_wrapper("yarn", &args).is_none(),
-            "`{command}` stays ordinary"
-        );
-    }
-}
-
-/// Splits `command` on whitespace, finds the shipped wrapper its first word
-/// names, and returns its arguments with where that wrapper's payload starts.
-fn shipped_payload_start(policy: &Policy, command: &str) -> (Vec<String>, Option<usize>) {
-    let mut words = command.split_whitespace().map(str::to_string);
-    let binary = words.next().expect("a wrapper word");
-    let args: Vec<String> = words.collect();
-    let wrapper = policy
-        .matching_wrapper(&binary, &args)
-        .unwrap_or_else(|| panic!("`{command}`: `{binary}` is a shipped wrapper"));
-    let start = wrapper.payload_start(&args);
-    (args, start)
-}
-
-// -- route behavior (inline policy, never touches disk) -----------------------
-
-#[test]
-fn mirror_policy_routes_every_arm() {
-    let policy = mirror_policy();
-
-    // allow default: no managed binary.
-    assert_eq!(
-        decide(&policy, "echo hello"),
-        Decision::Allow { note: None }
-    );
-    // allow within a family: rm without the -rf form.
-    assert_eq!(
-        decide(&policy, "rm notes.txt"),
-        Decision::Allow { note: None }
-    );
-
-    // sym: grep routes to the find-content sym command.
-    match decide(&policy, "grep -rn foo src") {
-        Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
-        other => panic!("grep should route to sym, got {other:?}"),
-    }
-
-    // deny: a combined recursive force delete.
-    assert!(matches!(decide(&policy, "rm -rf build"), Decision::Deny(_)));
-    // ask: a network fetch.
-    assert!(matches!(
-        decide(&policy, "curl example.com"),
-        Decision::Ask(_)
-    ));
-    // proxy: binary output stays verbatim.
-    assert_eq!(
-        decide(&policy, "xxd payload.bin"),
-        Decision::Proxy {
-            reason: ProxyReason::Binary
-        }
-    );
-}
-
-#[test]
-fn mirror_policy_re_enters_a_js_runner_and_a_shell_interpreter() {
-    let policy = mirror_policy();
-    for command in ["npx grep -rn foo .", "sh -c 'grep -rn foo src'"] {
-        match decide(&policy, command) {
-            Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
-            other => panic!("`{command}` should route to sym, got {other:?}"),
-        }
-    }
-}
-
-/// A runner reached through a subcommand alias or a workspace selector routes
-/// like its declared form (#1293); an undeclared shape proxies opaque, and a
-/// script run through a selector stays ordinary.
-#[test]
-fn mirror_policy_routes_runner_aliases_and_workspace_selectors() {
-    let policy = mirror_policy();
-    for command in [
-        "npm x grep foo .",
-        "bun x grep foo .",
-        "yarn workspace web exec grep foo .",
-        "yarn workspaces foreach exec grep foo .",
-    ] {
-        match decide(&policy, command) {
-            Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
-            other => panic!("`{command}` should route as grep, got {other:?}"),
-        }
-    }
-    assert_eq!(
-        decide(&policy, "yarn workspaces foreach -A exec grep foo ."),
-        Decision::Proxy {
-            reason: ProxyReason::Opaque
-        }
-    );
-    assert_eq!(
-        decide(&policy, "yarn workspace web grep"),
-        Decision::Allow { note: None }
-    );
-}
-
-#[test]
-fn mirror_policy_routes_a_python_search_one_liner_to_sym() {
-    let policy = mirror_policy();
-    let command = "python3 -c \"import pathlib; [print(f) for f in pathlib.Path('.').rglob('*.rs') if 'foo' in f.read_text()]\"";
-    match decide(&policy, command) {
-        Decision::Deny(d) => assert_eq!(d.instead(), "legion sym etc find-content"),
-        other => panic!("python search should route to sym, got {other:?}"),
-    }
-}
-
-// -- git global options over the compiled-in shipped artifact (#1294) --------
-
-fn shipped_route(policy: &Policy, command: &str) -> Routed {
-    route(policy, &bash(command), &Context::default())
-}
-
-// -- a sym-job binary reading a pipe, over the shipped artifact (#1319) -------
-
-/// The sym command a shipped-policy deny names, or `None` for any other
-/// Decision.
-fn shipped_sym_instead(policy: &Policy, command: &str) -> Option<String> {
-    match shipped_route(policy, command).decision {
-        Decision::Deny(details) if details.instead().starts_with("legion sym ") => {
-            Some(details.instead().to_string())
-        }
-        _ => None,
-    }
-}
-
-#[test]
-fn shipped_grep_reading_a_pipe_is_not_denied_as_a_content_search() {
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    for command in [
-        "ls ~/Library/Application\\ Support/ | grep -i legion",
-        "ls | grep -i legion",
-        "legion sym etc find-content foo | grep bar",
-        "ls | FOO=1 grep x",
-        "cat src/main.rs | rg fn_main",
-    ] {
-        let routed = shipped_route(&policy, command);
-        assert!(
-            matches!(routed.decision, Decision::Allow { .. }),
-            "`{command}` filters a pipe and must be allowed, got {:?}",
-            routed.decision
-        );
-    }
-}
-
-#[test]
-fn shipped_sym_job_binary_outside_a_pipe_stage_is_still_sent_to_sym() {
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    for command in [
-        "grep -rn foo . | head",
-        "cd src && grep -rn foo .",
-        "ls; grep -rn foo .",
-        "false || grep -rn foo .",
-        // A wrapper payload and a shell-interpreter body are split as their
-        // own text, so the re-entered grep reads no pipe there.
-        "ls | xargs grep foo",
-        "ls | sh -c 'grep foo'",
-    ] {
-        assert_eq!(
-            shipped_sym_instead(&policy, command).as_deref(),
-            Some("legion sym etc find-content"),
-            "`{command}` must be routed to find-content"
-        );
-    }
-    // `find` is itself a find-file sym job here, first in the pipeline.
-    assert!(
-        shipped_sym_instead(&policy, "find . | xargs grep foo").is_some(),
-        "`find . | xargs grep foo` must be routed to sym"
-    );
-}
-
-#[test]
-fn shipped_find_file_jobs_are_not_pipe_filters() {
-    // find, fd and git ls-files do not filter stdin: after a pipe they are
-    // still the find-file job.
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    assert!(!policy.sym_job("find-file").expect("find-file").pipe_filter);
-    assert!(
-        policy
-            .sym_job("find-content")
-            .expect("find-content")
-            .pipe_filter
-    );
-    for command in ["ls | find . -name x", "ls | fd x", "ls | git ls-files"] {
-        assert_eq!(
-            shipped_sym_instead(&policy, command).as_deref(),
-            Some("legion sym etc find-file"),
-            "`{command}`"
-        );
-    }
-}
-
-#[test]
-fn shipped_git_global_options_route_by_the_subcommand_family() {
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    for (command, rule, verb, carried) in [
-        (
-            "git -C /tmp push",
-            "git-push-to-legion",
-            "push",
-            vec!["-C", "/tmp"],
-        ),
-        (
-            "git -c user.name=x commit -m y",
-            "git-commit-to-legion",
-            "commit",
-            vec!["-c", "user.name=x", "-m", "y"],
-        ),
-        (
-            "git --git-dir=.git push",
-            "git-push-to-legion",
-            "push",
-            vec!["--git-dir=.git"],
-        ),
-    ] {
-        let routed = shipped_route(&policy, command);
-        // The family's own rule decides, as it does for the bare subcommand.
-        assert_eq!(
-            routed.deciding,
-            Deciding::Rule {
-                id: rule.to_string(),
-                needs_operator: false
-            },
-            "`{command}`"
-        );
-        assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
-        // That rule carries the declared global options ahead of the words
-        // after its verb (#1301). Whether the target accepts them is its own
-        // parse, in the adapter: legion push and commit take `-C`, and refuse
-        // `-c` and `--git-dir` by name (src/cmd/hook.rs).
-        assert!(
-            matches!(routed.decision, Decision::Rewrite { .. }),
-            "`{command}`: {:?}",
-            routed.decision
-        );
-        let expected: Vec<String> = carried.iter().map(|w| w.to_string()).collect();
-        assert_eq!(routed.facts.carried, expected, "`{command}`");
-    }
-}
-
-#[test]
-fn git_dash_c_push_and_commit_rewrite_carrying_dash_c() {
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    for (command, target, carried) in [
-        (
-            "git -C /tmp/x push",
-            "legion push --repo {repo}",
-            vec!["-C", "/tmp/x"],
-        ),
-        (
-            "git -C /tmp/x commit -m \"fix: y\"",
-            "legion commit --repo {repo}",
-            vec!["-C", "/tmp/x", "-m", "fix: y"],
-        ),
-    ] {
-        let routed = shipped_route(&policy, command);
-        match &routed.decision {
-            Decision::Rewrite { target: got, .. } => {
-                assert_eq!(got.as_str(), target, "`{command}`")
+            err,
+            PolicyError::UnknownField {
+                pointer: format!("/{extra}"),
+                field: extra.to_string(),
             }
-            other => panic!("`{command}` should rewrite, got {other:?}"),
-        }
-        let expected: Vec<String> = carried.iter().map(|w| w.to_string()).collect();
-        assert_eq!(routed.facts.carried, expected, "`{command}`");
-    }
-    // After the verb, git commit's `-C` reuses a message; legion commit's
-    // names a directory, so the rule refuses to carry it (deny_flags).
-    let reuse = shipped_route(&policy, "git commit -C HEAD -m fix");
-    match &reuse.decision {
-        Decision::Deny(details) => assert!(
-            details.reason().contains("`-C`") && details.reason().contains("different meaning"),
-            "{}",
-            details.reason()
-        ),
-        other => panic!("post-verb -C should be denied, got {other:?}"),
-    }
-}
-
-#[test]
-fn shipped_git_undeclared_global_option_is_proxied_opaque() {
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    for command in [
-        "git --bogus push",
-        "git --bogus status",
-        "git -C /tmp -Z commit -m y",
-    ] {
-        let routed = shipped_route(&policy, command);
-        assert_eq!(
-            routed.decision,
-            Decision::Proxy {
-                reason: ProxyReason::Opaque
-            },
-            "`{command}`"
-        );
-        assert_eq!(routed.deciding, Deciding::Default, "`{command}`");
-    }
-    // Declared global options before an unmanaged subcommand still reach the
-    // allow default: the declaration changes which word is the subcommand,
-    // not what an unmanaged one earns.
-    for command in [
-        "git -C /tmp status",
-        "git --no-pager log --oneline",
-        "git -C push status",
-        "git --version",
-    ] {
-        assert_eq!(
-            shipped_route(&policy, command).decision,
-            Decision::Allow { note: None },
-            "`{command}`"
         );
     }
-}
-
-// -- inline git aliases (#1298) ------------------------------------------------
-
-/// The shipped policy's reading of the subcommand word of the first command
-/// in `command`, parsed by the splitter so quoting is kept as route sees it.
-/// Reads the compiled-in artifact and never calls route (NFR-CMD-001).
-fn shipped_alias_reading(command: &str) -> AliasReading {
-    let policy = parse_policy(SHIPPED_POLICY_JSON).expect("shipped policy parses");
-    let parsed = scan(command).expect("command parses");
-    let invocation = &parsed.invocations[0];
-    let start = policy
-        .subcommand_start(&invocation.binary, &invocation.args)
-        .unwrap_or_else(|| panic!("`{command}`: the global options are declared"));
-    policy.inline_alias_reading(&invocation.binary, &invocation.args, start)
-}
-
-fn words(text: &str) -> Vec<String> {
-    text.split_whitespace().map(str::to_string).collect()
-}
-
-#[test]
-fn shipped_git_inline_alias_reads_the_alias_value_in_place_of_the_subcommand() {
-    for (command, args, start) in [
-        (
-            "git -c alias.p=push p origin main",
-            "-c alias.p=push push origin main",
-            2,
-        ),
-        (
-            "git -c alias.c=commit c -m x",
-            "-c alias.c=commit commit -m x",
-            2,
-        ),
-        ("git -c alias.s=status s", "-c alias.s=status status", 2),
-        // The last definition of a name wins, as in git.
-        (
-            "git -c alias.p=status -c alias.p=push p",
-            "-c alias.p=status -c alias.p=push push",
-            4,
-        ),
-        // Git compares config keys and alias names without regard to case.
-        ("git -c ALIAS.P=push p", "-c ALIAS.P=push push", 2),
-    ] {
-        assert_eq!(
-            shipped_alias_reading(command),
-            AliasReading::Expanded {
-                args: words(args),
-                start
-            },
-            "`{command}`"
-        );
-    }
-    // An alias value of several words, including a global option it brings
-    // in: the subcommand is read after that option.
-    let mut args: Vec<String> = vec!["-c".to_string(), "'alias.p=-p push -u'".to_string()];
-    args.extend(words("-p push -u origin"));
-    assert_eq!(
-        shipped_alias_reading("git -c 'alias.p=-p push -u' p origin"),
-        AliasReading::Expanded { args, start: 3 }
-    );
-}
-
-#[test]
-fn shipped_git_inline_alias_route_cannot_read_is_opaque() {
-    for command in [
-        // A shell alias.
-        "git -c 'alias.p=!git push' p",
-        // A value set from the environment, which route cannot see; last wins.
-        "git --config-env=alias.p=X p",
-        "git -c alias.p=push --config-env=alias.p=X p",
-        // An empty value, or none at all.
-        "git -c alias.p= p",
-        "git -c alias.p p",
-        // An alias naming another inline alias.
-        "git -c alias.p=q -c alias.q=push p",
-        // A value the shell or git would still transform.
-        "git -c alias.p=$X p",
-        "git -c 'alias.p=pu\"sh\"' p",
-        // An option the alias brings in that the declaration does not name.
-        "git -c 'alias.p=--bogus push' p",
-    ] {
-        assert_eq!(
-            shipped_alias_reading(command),
-            AliasReading::Opaque,
-            "`{command}`"
-        );
-    }
-    for command in [
-        "git -c alias.p=push status",
-        "git -c user.name=x p",
-        "git status",
-    ] {
-        assert_eq!(
-            shipped_alias_reading(command),
-            AliasReading::NotAlias,
-            "`{command}`"
-        );
-    }
-}
-
-#[test]
-fn mirror_policy_routes_an_inline_git_alias_by_what_it_runs() {
-    let policy = mirror_policy();
-    for (command, rule, verb) in [
-        (
-            "git -c alias.p=push p origin main",
-            "git-push-to-legion",
-            "push",
-        ),
-        (
-            "git -c alias.c=commit c -m x",
-            "git-commit-to-legion",
-            "commit",
-        ),
-        (
-            "git -c alias.p=status -c alias.p=push p",
-            "git-push-to-legion",
-            "push",
-        ),
-        // Git runs a builtin, never an alias of the same name, and route
-        // cannot tell which names are builtins: the stricter reading holds.
-        (
-            "git -c alias.push=status push",
-            "git-push-to-legion",
-            "push",
-        ),
-    ] {
-        let routed = route(&policy, &bash(command), &Context::default());
-        assert_eq!(
-            routed.deciding,
-            Deciding::Rule {
-                id: rule.to_string(),
-                needs_operator: false
-            },
-            "`{command}`"
-        );
-        assert_eq!(routed.facts.verb.as_deref(), Some(verb), "`{command}`");
-        // The rule carries the declared global options ahead of the words
-        // after its verb (#1301), so `-c` is carried, never dropped; the
-        // target's own parse in the adapter refuses it by name (FR-CMD-008).
-        assert!(
-            matches!(routed.decision, Decision::Rewrite { .. }),
-            "`{command}`: {:?}",
-            routed.decision
-        );
-        assert_eq!(
-            routed.facts.carried.first().map(String::as_str),
-            Some("-c"),
-            "`{command}`"
-        );
-    }
-    for command in ["git -c alias.s=status s", "git -c alias.p=push status"] {
-        assert_eq!(
-            decide(&policy, command),
-            Decision::Allow { note: None },
-            "`{command}`"
-        );
-    }
-    for command in [
-        "git -c 'alias.p=!git push' p",
-        "git --config-env=alias.p=X p",
-    ] {
-        let routed = route(&policy, &bash(command), &Context::default());
-        assert_eq!(
-            routed.decision,
-            Decision::Proxy {
-                reason: ProxyReason::Opaque
-            },
-            "`{command}`"
-        );
-        assert_eq!(routed.deciding, Deciding::Default, "`{command}`");
-    }
-}
-
-#[test]
-fn mirror_policy_proxies_an_opaque_script_file() {
-    assert_eq!(
-        decide(&mirror_policy(), "bash deploy.sh"),
-        Decision::Proxy {
-            reason: ProxyReason::Opaque
-        }
-    );
+    // Removing a list is fine: each is optional.
+    root.as_object_mut().expect("an object").remove("ask");
+    parse_policy(&root.to_string()).expect("a missing list parses");
 }

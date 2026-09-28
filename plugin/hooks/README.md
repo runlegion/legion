@@ -126,7 +126,8 @@ class of command, not to the script: each row now names the policy rules in
 `plugin/legion-cmd/policy.json` that decide that class, through the one
 PreToolUse hook `legion-cmd.sh` (`legion cmd-check --hook`, registered for
 every tool kind the policy governs). Where route and a retired hook disagreed,
-the case is a row in `crates/legion-cmd/tests/fixtures/hook_cases.json`, and
+the case is a row in `crates/legion-cmd/tests/fixtures/tool_cases.json` (tools
+other than Bash; the Bash router is tested in `crates/legion-cmd/tests/router.rs`, #1337), and
 route's Decision stands (FR-CMD-010). The adapter is Claude-layer like the
 hooks it replaced, so the boundary above applies to it unchanged.
 

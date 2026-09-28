@@ -186,13 +186,10 @@ mod tests {
     fn policy() -> Policy {
         parse_policy(
             r#"{
-            "wrappers": [{"binary": "sudo"}],
-            "no_go": [{"id": "shred-disk", "binaries": ["shred"],
+            "never_run": [{"id": "shred-disk", "names": ["shred"], "reason": "erases a disk",
                 "predicates": [{"kind": "operand", "prefixes": ["/dev/"]}]}],
-            "tools": {"Bash": {"families": {
-                "curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
-                    "question": "fetch?", "reason": "network"}}]}
-            }}}}"#,
+            "ask": [{"id": "curl-ask", "names": ["curl"], "reason": "network"}]
+            }"#,
         )
         .expect("policy")
     }

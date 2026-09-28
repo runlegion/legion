@@ -17,8 +17,8 @@
 //! `git stash push` (does the subcommand word matter -- a rule about the git
 //! family) and `pnpm grep` (is a bare `pnpm <name>` a runner or an ordinary
 //! invocation -- a naming decision, FR-CMD-011) both moved out of this
-//! battery to `tests/fixtures/router-candidate-false-positives.json` for
-//! #1227's evaluator to pick up; they are not splitter defects, so they do
+//! battery to the router's own tests (`tests/router.rs`, #1337); they are
+//! not splitter defects, so they do
 //! not belong in a splitter-only battery, but the cases themselves are real
 //! and kept, not deleted. `git log --grep-reflog=x`, `git log -- -Sfoo`, `gh`
 //! as a for-loop word, and `gh` inside a quoted argument stay here: each
@@ -56,8 +56,6 @@ fn parse_position(raw: &str) -> Position {
 
 fn parse_reason(raw: &str) -> UnreducedReason {
     match raw {
-        "wrapper-payload" => UnreducedReason::WrapperPayload,
-        "script-file" => UnreducedReason::ScriptFile,
         "interpreter-body" => UnreducedReason::InterpreterBody,
         "dynamic-name" => UnreducedReason::DynamicName,
         "too-deep" => UnreducedReason::TooDeep,
@@ -236,9 +234,8 @@ fn battery_rows_run_and_report_parse_errors() {
             result.unwrap_or_else(|err| panic!("{id}: expected a Scan, got ScanError: {err}"));
 
         // A row that names no `unreduced` key means none: this is the
-        // mechanical check that no `Unreduced` region -- in particular no
-        // `WrapperPayload` or `ScriptFile`, which would mean a name crept
-        // into the walk -- appears unless the row declares it.
+        // mechanical check that no `Unreduced` region appears unless the row
+        // declares it.
         let unreduced = row
             .get("unreduced")
             .and_then(Value::as_array)

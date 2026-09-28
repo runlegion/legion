@@ -90,7 +90,7 @@ fn the_shipped_policy_rewrites_an_explore_spawn_to_the_legion_explorer() {
 }
 
 #[test]
-fn the_shipped_policy_denies_a_managed_command_and_passes_an_unmanaged_one() {
+fn the_shipped_policy_denies_inserts_and_passes_through_the_real_binary() {
     let dir = tempfile::tempdir().expect("tempdir");
     let policy = shipped_policy_path();
 
@@ -99,14 +99,22 @@ fn the_shipped_policy_denies_a_managed_command_and_passes_an_unmanaged_one() {
     assert_eq!(denied["permissionDecision"], "deny");
     let reason = denied["permissionDecisionReason"].as_str().expect("reason");
     assert!(reason.contains("unrecoverable"), "got: {reason}");
-    assert!(reason.contains("instead:"), "got: {reason}");
+    assert!(!reason.contains("instead"), "got: {reason}");
 
+    // #1337: `legion ` goes before each proxied name, and the response
+    // carries no decision, so the harness's own rules judge what runs.
+    let inserted = hook_output(dir.path(), &policy, &payload("cd x && git status | grep y"));
+    assert_eq!(
+        inserted,
+        serde_json::json!({
+            "hookEventName": "PreToolUse",
+            "updatedInput": {"command": "cd x && legion git status | legion grep y"}
+        })
+    );
+
+    // A command matching no rule runs byte for byte, with nothing added.
     let passed = hook_output(dir.path(), &policy, &payload("echo hi"));
-    assert_eq!(passed["hookEventName"], "PreToolUse");
-    assert!(passed.get("permissionDecision").is_none());
-    // FR-CMD-016: the default allow reaches the agent through the real binary.
-    let context = passed["additionalContext"].as_str().expect("default note");
-    assert!(context.contains("default allow"), "got: {context}");
+    assert_eq!(passed, serde_json::json!({"hookEventName": "PreToolUse"}));
 }
 
 #[test]
@@ -117,10 +125,7 @@ fn a_missing_policy_file_denies_instead_of_running_the_command() {
     assert_eq!(out["permissionDecision"], "deny");
     let reason = out["permissionDecisionReason"].as_str().expect("reason");
     assert!(reason.contains("policy:"), "got: {reason}");
-    assert!(
-        reason.contains("legion cmd-check -- 'echo hi'"),
-        "got: {reason}"
-    );
+    assert!(!reason.contains("instead"), "got: {reason}");
 }
 
 #[test]
@@ -132,7 +137,7 @@ fn a_missing_policy_file_still_refuses_and_records_a_no_go_command() {
     assert_eq!(out["permissionDecision"], "deny");
     let reason = out["permissionDecisionReason"].as_str().expect("reason");
     assert!(
-        reason.contains("none: this command never runs"),
+        reason.contains("This attempt was recorded."),
         "got: {reason}"
     );
     let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
@@ -166,7 +171,7 @@ fn an_ask_without_a_confirmation_is_refused_with_the_question() {
     assert_eq!(out["permissionDecision"], "deny");
     let reason = out["permissionDecisionReason"].as_str().expect("reason");
     assert!(
-        reason.contains("make this network request?"),
+        reason.contains("needs the operator's approval"),
         "got: {reason}"
     );
     assert!(
@@ -239,8 +244,6 @@ fn cmd_check_reports_a_deny_with_its_reason_facts_and_elapsed_time() {
     let text = operator_output(dir.path(), &["--", "rm -rf build"]);
     assert!(text.contains("decision: deny"), "{text}");
     assert!(text.contains("unrecoverable"), "{text}");
-    assert!(text.contains("instead:"), "{text}");
-    assert!(text.contains("facts:"), "{text}");
     assert!(text.contains("elapsed:"), "{text}");
 }
 
@@ -549,17 +552,6 @@ fn explore_rewrite_payload(tool_use_id: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The shipped policy with `route.deadline_ms` set to `deadline_ms`, written
-/// into `dir`; returns its path.
-fn shipped_policy_with_deadline(dir: &std::path::Path, deadline_ms: u64) -> PathBuf {
-    let text = std::fs::read_to_string(shipped_policy_path()).expect("shipped policy");
-    let mut policy: Value = serde_json::from_str(&text).expect("shipped policy is JSON");
-    policy["route"]["deadline_ms"] = Value::from(deadline_ms);
-    let path = dir.join("policy.json");
-    std::fs::write(&path, policy.to_string()).expect("policy written");
-    path
-}
-
 /// The store file under a data dir.
 fn store_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("legion.db")
@@ -698,16 +690,15 @@ fn a_held_store_write_lock_never_delays_the_flushed_response() {
 }
 
 #[test]
-fn a_store_open_that_cannot_finish_by_the_deadline_denies_naming_it_within_the_deadline() {
+fn a_store_open_that_cannot_finish_denies_naming_it_within_the_deadline() {
     // #1288, FR-CMD-009: a fresh, unmigrated store whose write lock another
     // connection holds; opening it waits on the lock for the store's 2 s
-    // busy timeout. The adapter waits at most the route deadline for its one
-    // open, then denies naming it: the decision cannot read confirmations
-    // without the store, and it never waits on the lock a second time. No
-    // prediction, no witness pass.
+    // busy timeout, then fails. The adapter waits at most the route deadline
+    // (7000 ms) for its one open, then denies naming it: the decision cannot
+    // read confirmations without the store, and it never waits on the lock a
+    // second time. No prediction, no witness pass.
     let dir = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("state tempdir");
-    let policy = shipped_policy_with_deadline(dir.path(), 300);
     warm_binary();
     let lock = rusqlite::Connection::open(store_path(dir.path())).expect("create the store");
     lock.execute_batch("BEGIN IMMEDIATE")
@@ -716,66 +707,28 @@ fn a_store_open_that_cannot_finish_by_the_deadline_denies_naming_it_within_the_d
     let run = timed_hook(
         dir.path(),
         state.path(),
-        &policy,
+        &shipped_policy_path(),
         &explore_rewrite_payload("toolu_unopened"),
     );
     assert_eq!(run.response["permissionDecision"], "deny", "{}", run.stderr);
     let reason: &str = run.response["permissionDecisionReason"]
         .as_str()
         .expect("a deny reason");
-    assert!(
-        reason.contains("confirmations: the store could not be opened within 300ms"),
-        "{reason}"
-    );
+    assert!(reason.contains("confirmations:"), "{reason}");
     assert!(run.response.get("updatedInput").is_none());
-    // One deadline for the open, then the deny: never the 2 s busy timeout
-    // a second open would wait out, and never a hang.
     assert!(
-        run.first_line >= Duration::from_millis(300),
-        "the response came after {:?}, before the open's deadline",
-        run.first_line
-    );
-    assert!(
-        run.first_line < Duration::from_millis(1000),
+        run.first_line < Duration::from_millis(7000),
         "the response took {:?}; the store open held the decision past its deadline\nstderr:\n{}",
         run.first_line,
         run.stderr
-    );
-    assert!(
-        run.exited < Duration::from_millis(1500),
-        "the process ran {:?} after a deny",
-        run.exited
     );
 
     lock.execute_batch("ROLLBACK").expect("release the lock");
     drop(lock);
     assert!(
         cmd_predictions(dir.path(), state.path()).is_empty(),
-        "a call whose store open timed out recorded a prediction"
+        "a call whose store open failed recorded a prediction"
     );
-}
-
-#[test]
-fn the_largest_configured_deadline_yields_the_routing_decision() {
-    // #1288: the store open, the witness budget and the decision all run
-    // under `route.deadline_ms`; the largest value the policy accepts is the
-    // rewrite, not a panic deny.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let state = tempfile::tempdir().expect("state tempdir");
-    let policy = shipped_policy_with_deadline(dir.path(), u64::MAX);
-    let run = timed_hook(
-        dir.path(),
-        state.path(),
-        &policy,
-        &explore_rewrite_payload("toolu_extreme"),
-    );
-    assert_eq!(
-        run.response["permissionDecision"], "allow",
-        "{}",
-        run.stderr
-    );
-    assert!(run.response.get("updatedInput").is_some());
-    assert!(!run.stderr.contains("panic"), "stderr: {}", run.stderr);
 }
 
 #[test]
@@ -802,7 +755,7 @@ fn an_unopenable_store_denies_naming_the_store_error_and_records_no_prediction()
         .expect("a deny reason");
     assert!(reason.contains("confirmations: IO error"), "{reason}");
     assert!(run.response.get("updatedInput").is_none());
-    // The shipped deadline is 7000 ms; a store that fails to open costs
+    // The route deadline is 7000 ms; a store that fails to open costs
     // none of it.
     assert!(
         run.first_line < Duration::from_millis(1000),
@@ -912,10 +865,7 @@ fn a_no_go_command_is_refused_and_recorded_through_the_real_binary() {
         let out = hook_output(dir.path(), &shipped_policy_path(), &payload(command));
         assert_eq!(out["permissionDecision"], "deny", "{command}");
         let reason = out["permissionDecisionReason"].as_str().expect("reason");
-        assert!(
-            reason.contains("none: this command never runs"),
-            "{command}: {reason}"
-        );
+        assert!(!reason.contains("instead"), "{command}: {reason}");
         assert!(reason.contains("This attempt was recorded."), "{reason}");
     }
     let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
@@ -987,13 +937,10 @@ fn legion_cmd_entries() -> Vec<(String, String, String, Option<u64>)> {
 #[test]
 fn every_registered_legion_cmd_timeout_is_strictly_above_the_route_deadline() {
     // FR-CMD-009: the adapter's own deadline fires first, so the harness never
-    // times the hook out (a timed-out hook fails open). The shipped policy
-    // states its deadline explicitly, so this compares against the value the
-    // adapter reads, not against a default restated here.
-    let policy = read_source_json("plugin/legion-cmd/policy.json");
-    let deadline_ms: u64 = policy["route"]["deadline_ms"]
-        .as_u64()
-        .expect("the shipped policy sets route.deadline_ms");
+    // times the hook out (a timed-out hook fails open). The deadline is the
+    // adapter's `ROUTE_DEADLINE` (src/cmd/hook.rs); it no longer lives in the
+    // policy file (#1337).
+    let deadline_ms: u64 = 7000;
     let entries = legion_cmd_entries();
     assert!(!entries.is_empty(), "legion-cmd.sh is registered");
     for (event, matcher, _, timeout) in entries {
@@ -1002,15 +949,17 @@ fn every_registered_legion_cmd_timeout_is_strictly_above_the_route_deadline() {
         assert!(
             timeout_s * 1000 > deadline_ms,
             "{event}/{matcher}: timeout {timeout_s}s must be strictly above \
-             route.deadline_ms {deadline_ms}"
+             the route deadline {deadline_ms} ms"
         );
     }
 }
 
 #[test]
 fn legion_cmd_is_the_pre_tool_use_hook_for_every_tool_kind_the_policy_governs() {
-    // FR-CMD-017 / FR-CMD-010: every governed tool kind shells to the adapter,
-    // and none of the retired command hooks is registered beside it.
+    // FR-CMD-017 / FR-CMD-010: Bash and every tool kind the policy governs
+    // shell to the adapter, and none of the retired command hooks is
+    // registered beside it. Grep and Glob stay registered with no rules of
+    // their own (#1337); a separate issue answers them in the response.
     let policy = read_source_json("plugin/legion-cmd/policy.json");
     let governed: std::collections::BTreeSet<String> = policy["tools"]
         .as_object()
@@ -1028,7 +977,11 @@ fn legion_cmd_is_the_pre_tool_use_hook_for_every_tool_kind_the_policy_governs() 
                 .collect::<Vec<String>>()
         })
         .collect();
-    assert_eq!(registered, governed);
+    assert!(registered.contains("Bash"), "{registered:?}");
+    assert!(
+        governed.is_subset(&registered),
+        "{governed:?} vs {registered:?}"
+    );
 
     let hooks = registered_hooks();
     for retired in RETIRED_HOOKS {

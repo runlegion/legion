@@ -1,39 +1,28 @@
-//! The routing policy as one declarative data structure (FR-CMD-011).
+//! The routing policy as one declarative data structure (FR-CMD-011, #1337).
 //!
-//! Every name the splitter refuses to hold -- a managed binary, a wrapper, an
-//! interpreter, a shell, a JS package runner -- lives here as data, never as a
-//! branch in Rust code. [`parse_policy`] reads the JSON the adapter loads and
-//! builds a [`Policy`]; the evaluator ([`crate::evaluate`]) walks it, and
-//! [`crate::route`] drives the whole thing. No routing decision turns on a
-//! `match` over a binary name anywhere outside the policy data.
-//!
-//! # sh -c is an interpreter whose body is shell
-//!
-//! FR-CMD-007 groups `sh -c` and `python3 -c` together as names that "carry an
-//! interpreter body", yet it also requires that "a managed binary reached
-//! through an inline wrapper (e.g. env, sh -c '<inline>') is routed
-//! identically" to first position. Those two statements are only jointly
-//! satisfiable if `sh -c`'s body -- which is shell -- is re-entered through
-//! [`crate::splitter::scan_at`], while `python3 -c`'s body -- which is not
-//! shell -- stays opaque. So an [`Interpreter`] carries a [`BodyLanguage`]:
-//! `Shell` bodies are re-entered (a managed binary inside is routed alike),
-//! `Foreign` bodies are recorded opaque and matched against the sym-job
-//! patterns. The field shape is the builder's to choose (per the issue), and
-//! this is the shape that makes both of FR-CMD-007's statements literally true.
+//! For Bash the policy holds exactly four lists: the names that go to a
+//! legion proxy (`proxy`), the commands that never run (`never_run`), the
+//! commands the operator is asked about (`ask`), and the three power
+//! switches that also need the operator (`power_switches`). Every entry in
+//! the last three is data -- a name set and argument predicates -- never a
+//! branch in Rust code. The `tools` section holds the rules for tools other
+//! than Bash, matched on the call's own input fields. [`parse_policy`] reads
+//! the JSON the adapter loads and builds a [`Policy`]; any other top-level
+//! key is an error.
 
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use crate::decision::{ManagedTarget, ProxyReason};
+use crate::decision::ManagedTarget;
 use crate::nogo::{self, NoGoEntry, NoGoPredicate};
 use crate::splitter::Position;
 
-/// The tool a set of rules governs. The policy is organized by tool kind first
-/// (FR-CMD-011), then, within Bash, by managed-binary family.
+/// A tool other than Bash whose calls the `tools` section governs. Bash is
+/// not a member: a Bash command is routed by the four lists alone, so a
+/// `Bash` key under `tools` is a policy error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ToolKind {
-    Bash,
     Edit,
     Write,
     Read,
@@ -47,10 +36,8 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    /// Every member, so the parser rejects a wire name outside the set the
-    /// same way [`ProxyReason`] does.
-    pub const ALL: [ToolKind; 11] = [
-        ToolKind::Bash,
+    /// Every member, so the parser rejects a wire name outside the set.
+    pub const ALL: [ToolKind; 10] = [
         ToolKind::Edit,
         ToolKind::Write,
         ToolKind::Read,
@@ -66,7 +53,6 @@ impl ToolKind {
     /// The tool kind's wire name, as it appears as a key under `tools`.
     pub fn as_str(self) -> &'static str {
         match self {
-            ToolKind::Bash => "Bash",
             ToolKind::Edit => "Edit",
             ToolKind::Write => "Write",
             ToolKind::Read => "Read",
@@ -80,33 +66,15 @@ impl ToolKind {
         }
     }
 
-    fn parse(raw: &str) -> Option<ToolKind> {
+    /// The kind whose wire name is `raw`, if any.
+    pub fn parse(raw: &str) -> Option<ToolKind> {
         ToolKind::ALL.into_iter().find(|k| k.as_str() == raw)
     }
 }
 
-/// The rules for one tool kind. Bash routes by managed-binary family; every
-/// other tool routes on its own input fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolRules {
-    /// Bash: keyed by managed binary, e.g. `"gh"`, `"git push"`. The key's
-    /// first whitespace-separated token is the binary; any further tokens are
-    /// leading operands (subcommand words) the invocation must carry.
-    Bash { families: BTreeMap<String, Family> },
-    /// Every other tool kind: an ordered rule list matched against the tool
-    /// call's own input fields (`file_path`, `pattern`, `subagent_type`, ...).
-    Fields { rules: Vec<Rule> },
-}
-
-/// One managed-binary family and its argument-level rules (FR-CMD-011).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Family {
-    pub rules: Vec<Rule>,
-}
-
-/// One argument-level rule: predicates that must all hold, the lookups it
-/// requires, and the action it yields when matched. Data only -- no closures,
-/// no per-family code (FR-CMD-011).
+/// One rule for a tool other than Bash: predicates over the call's input
+/// fields that must all hold, the lookups it requires, and the action it
+/// yields when matched. Data only (FR-CMD-011).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     /// Unique across the whole policy: the incident records name it (#1237).
@@ -120,26 +88,15 @@ pub struct Rule {
     pub outcome: RuleOutcome,
 }
 
-/// A rule predicate. The `Arg*` arms read a Bash invocation's arguments; the
-/// `Field*` arms read one top-level key of a Fields tool's `tool_input`. The
-/// parser scopes them: an arg predicate under a Fields tool, or a field
-/// predicate under Bash, is a policy error rather than a rule that silently
-/// never fires -- the same fail-closed posture as an unknown field.
+/// A rule predicate over one top-level key of a tool call's `tool_input`.
 ///
-/// A field predicate that READS a value (`FieldEquals`, `FieldContains`,
+/// A predicate that READS a value (`FieldEquals`, `FieldContains`,
 /// `FieldEndsWith`, `FieldGreaterThan`) is unresolvable when the call carries
 /// no such field, or carries it with the wrong JSON type; the evaluator turns
 /// that into the FR-CMD-016 deny. `FieldPresent`/`FieldAbsent` only test
-/// presence and are always resolvable, so a rule that must fire when a field
-/// is legitimately missing (a Read with no `limit`, an Agent with no
-/// `subagent_type`) is written with those and ordered before the reading
-/// rules.
+/// presence and are always resolvable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
-    /// Some argument equals this word.
-    ArgPresent(String),
-    /// No argument equals this word.
-    ArgAbsent(String),
     /// The field exists and is not null.
     FieldPresent { field: String },
     /// The field is missing or null.
@@ -158,37 +115,17 @@ pub enum Predicate {
     FieldGreaterThan { field: String, value: i64 },
 }
 
-impl Predicate {
-    /// Whether this predicate reads a Bash invocation's arguments (true) or a
-    /// Fields tool's input (false). The parser uses it to scope predicates to
-    /// the tool kind they can resolve against.
-    pub fn reads_args(&self) -> bool {
-        matches!(self, Predicate::ArgPresent(_) | Predicate::ArgAbsent(_))
-    }
-}
-
-/// What a matched rule yields.
-///
-/// The first five variants are exactly the five Decision arms (FR-CMD-001).
-/// A rewrite carries its [`RewriteSpec`], so whether it fires is judged from
-/// the invocation's arguments, never from the verb alone (FR-CMD-008).
-/// [`RuleOutcome::Sym`] is not a sixth Decision: it is a routing action that
-/// resolves to a Decision via the referenced [`SymJob`] -- a deny naming the
-/// sym command (a lossless rewrite to it, per operator decision 01a0ab48, is
-/// not built by any issue yet). It is carried here, rather than as a plain
-/// deny, so the evaluator can give a sym job precedence over the
-/// strictest-order fold (FR-CMD-007).
+/// What a matched rule yields: one of the four Decision arms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleOutcome {
     Allow {
         note: Option<String>,
     },
+    /// Put `target` in place of the call's rewritable field and keep every
+    /// other field.
     Rewrite {
-        spec: RewriteSpec,
+        target: ManagedTarget,
         reason: String,
-    },
-    Proxy {
-        reason: ProxyReason,
     },
     Deny {
         reason: String,
@@ -197,620 +134,45 @@ pub enum RuleOutcome {
     Ask {
         question: String,
         reason: String,
-        /// Whether the command needs the operator after the agent confirms
-        /// (FR-CMD-006). route acts on it only once a confirmation answers the
-        /// ask (#1237).
+        /// Whether the call needs the operator after the agent confirms
+        /// (FR-CMD-006).
         needs_operator: bool,
     },
-    /// Route this command to the named sym job.
-    Sym {
-        job: String,
-    },
 }
 
-/// A rewrite rule's target prefix and the exceptions where a source word
-/// changes form or meaning in the target (FR-CMD-008 rev 3).
-///
-/// Losslessness is a property of the arguments, not the verb, and the target
-/// judges it: the adapter builds the candidate command from `target` (the
-/// prefix, which may carry the `{repo}` fill-in) and the source's carried
-/// argument words, and parses it with the target's own command-line
-/// definition. So the policy lists no per-flag argument set. It records only
-/// the exceptions a parse of the words as typed would get wrong, each keyed
-/// by the source flag it concerns.
-///
-/// Only a Bash rewrite declares exceptions. A Fields rewrite (Agent, Task,
-/// ...) replaces the one `tool_input` field the adapter patches and keeps
-/// every other field, so it is lossless by construction and carries none.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RewriteSpec {
-    pub target: ManagedTarget,
-    /// The named flag each source positional becomes, by position: the
-    /// source's i-th positional is written as `positional[i] <value>`
-    /// (`gh issue view <n>` -> `--number <n>`).
-    pub positional: Vec<String>,
-    /// Source flags whose value the target spells differently, each with the
-    /// transform that reshapes it (`--repo owner/name` -> `--repo name`).
-    pub reshape: BTreeMap<String, Reshape>,
-    /// Source flags whose name collides with a target flag of different
-    /// meaning; present, they deny rather than pass through.
-    pub deny_flags: Vec<String>,
-}
-
-/// The closed set of value transforms a rewrite's `reshape` exception names
-/// (FR-CMD-008). A transform is code, not data, so the set is fixed here and
-/// a policy names one by its wire name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reshape {
-    /// `owner/name` -> `name`: a work-source repo slug to legion's repo name.
-    /// A value with no `/` is already a name and is kept.
-    RepoName,
-}
-
-impl Reshape {
-    /// Every member, so the parser rejects a wire name outside the set.
-    pub const ALL: [Reshape; 1] = [Reshape::RepoName];
-
-    /// The transform's wire name, as a `reshape` value spells it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Reshape::RepoName => "repo_name",
-        }
-    }
-
-    /// The reshaped `value`, or `None` when the value does not have the shape
-    /// the transform reads -- the rewrite is then refused rather than run
-    /// with a value the target would misread.
-    pub fn apply(self, value: &str) -> Option<String> {
-        match self {
-            Reshape::RepoName => {
-                let name: &str = match value.split_once('/') {
-                    Some((owner, name)) if !owner.is_empty() => name,
-                    Some(_) => return None,
-                    None => value,
-                };
-                (!name.is_empty() && !name.contains('/')).then(|| name.to_string())
-            }
-        }
-    }
-}
-
-/// A job legion sym serves (searching files for content, finding a definition)
-/// (FR-CMD-007): the sym command it maps to, and the search-shaped patterns
-/// that mark an interpreter one-liner as this job. The patterns are a
-/// conjunction -- every pattern must be a substring of the interpreter body
-/// for the job to match -- so a job that needs both a traversal and a read is
-/// not tripped by a body that only reads. The disjunction across shapes comes
-/// from listing several [`SymJob`] entries, most specific first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SymJob {
-    pub id: String,
-    pub sym_command: String,
-    pub interpreter_patterns: Vec<String>,
-    /// True when the job's binaries also filter standard input, so one that
-    /// reads a pipe (`ls | grep x`) is filtering the previous command's
-    /// output, which sym cannot serve, rather than searching files
-    /// (FR-CMD-007 rev 13). Declared per job so the evaluator names no
-    /// binary; policy key `"pipe_filter"`, default false.
-    pub pipe_filter: bool,
-}
-
-/// A name the policy says wraps a shell command (FR-CMD-007). route re-enters
-/// the wrapped command through [`crate::splitter::scan_at`], so a managed
-/// binary inside is routed like the same binary in first position.
-///
-/// The wrapper's own words before the payload are declared here as data
-/// (#1286): its valueless options, its options that take a value, and how
-/// many leading operands it takes. [`Wrapper::payload_start`] consumes them by
-/// that declaration; an option the declaration does not name is a word route
-/// cannot account for, so the invocation is proxied opaque rather than read.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Wrapper {
-    pub binary: String,
-    /// A word that must follow the binary for it to wrap a command, e.g.
-    /// `exec`/`dlx` for `pnpm`/`npm`/`yarn`. A bare `pnpm <name>` carries no
-    /// required word and is an ordinary invocation, not a runner.
-    pub required_subcommand: Option<String>,
-    /// The wrapper's own options that take no value, e.g. `--foreground` for
-    /// `timeout`. A single-dash one-letter entry also matches inside a
-    /// clustered word (`-0r`).
-    pub flags: Vec<String>,
-    /// The wrapper's own options that take a value, e.g. `-s`/`--signal` for
-    /// `timeout`. The value is the next word, or attached (`-oL`,
-    /// `--signal=KILL`).
-    pub value_options: Vec<String>,
-    /// How many operands the wrapper takes after its options and before the
-    /// payload, e.g. 1 for `timeout DURATION`.
-    pub operands: usize,
-    /// Words that each take exactly one following word and are the wrapper's
-    /// own, accepted only before the required subcommand (#1293): a workspace
-    /// selector such as `workspace <name>` or `workspaces foreach` for `yarn`.
-    /// A selector is not an option, so without this declaration `yarn
-    /// workspace web exec` would never be claimed and would reach its payload
-    /// unrouted.
-    pub selectors: Vec<String>,
-}
-
-impl Wrapper {
-    /// Whether this wrapper claims an invocation of its binary with `args`.
-    /// A wrapper with no required subcommand claims every one.
-    ///
-    /// A runner's options precede its subcommand (`pnpm -r exec`), so a
-    /// wrapper with a required subcommand claims the invocation when that
-    /// word appears and every word before it could be an option: a word
-    /// starting with `-`, or a single word right after an option, which may
-    /// be that option's value. This test is deliberately looser than the
-    /// declaration: a shape the declaration does not model (`pnpm -- exec`,
-    /// an undeclared option) is still claimed, and [`Wrapper::payload_start`]
-    /// then refuses it, so it is proxied opaque rather than read as an
-    /// ordinary invocation -- an unexpected shape only gets stricter (#1286).
-    /// A word before the subcommand that cannot be an option or its value
-    /// (`pnpm run exec`) means the subcommand word is someone else's operand,
-    /// and the invocation stays ordinary.
-    pub fn wraps(&self, args: &[String]) -> bool {
-        let Some(subcommand) = &self.required_subcommand else {
-            return true;
-        };
-        let Some(position) = args
-            .iter()
-            .position(|a| crate::evaluate::dequote_outer(a) == subcommand)
-        else {
-            return false;
-        };
-        let mut after_option = false;
-        for raw in &args[..position] {
-            let word = crate::evaluate::dequote_outer(raw);
-            let is_option = word.starts_with('-');
-            // A declared selector reads like a value option: the word after it
-            // is its own (#1293).
-            let is_selector = self.declares_selector(word);
-            if !is_option && !is_selector && !after_option {
-                return false;
-            }
-            // A value follows an option or a selector, never `--` and never
-            // another value.
-            after_option = (is_option && word != "--") || is_selector;
-        }
-        true
-    }
-
-    /// The index in `args` where the wrapped command begins, or `None` when
-    /// the wrapper's own words cannot be consumed by its declaration: an
-    /// option it does not declare, a value option with no value, a selector
-    /// with no following word, a missing required subcommand, or fewer
-    /// operands than it takes (#1286, #1293).
-    ///
-    /// Declared options are read before and after the required subcommand,
-    /// with any `<selector> <word>` pairs (each followed by options) between
-    /// the leading options and the subcommand, then one `--`, then the
-    /// declared operands. An index equal to `args.len()` means the wrapper
-    /// wraps no command.
-    pub fn payload_start(&self, args: &[String]) -> Option<usize> {
-        let mut index = self.options_end(args, 0)?;
-        if let Some(subcommand) = &self.required_subcommand {
-            while word_at(args, index).is_some_and(|word| self.declares_selector(word)) {
-                if index + 2 > args.len() {
-                    return None;
-                }
-                index = self.options_end(args, index + 2)?;
-            }
-            if word_at(args, index) != Some(subcommand.as_str()) {
-                return None;
-            }
-            index = self.options_end(args, index + 1)?;
-        }
-        if word_at(args, index) == Some("--") {
-            index += 1;
-        }
-        let start = index + self.operands;
-        (start <= args.len()).then_some(start)
-    }
-
-    /// The index of the first word from `index` on that is not one of the
-    /// wrapper's options, or `None` when an option there is one it does not
-    /// declare or lacks its value (see [`declared_options_end`]).
-    fn options_end(&self, args: &[String], index: usize) -> Option<usize> {
-        declared_options_end(&self.flags, &self.value_options, args, index)
-    }
-
-    fn declares_selector(&self, word: &str) -> bool {
-        self.selectors.iter().any(|s| s == word)
-    }
-}
-
-/// A binary's global options: the options it reads before its subcommand
-/// word (#1294), e.g. git's `-C <path>`, `-c <name>=<value>` and
-/// `--no-pager`. A family keyed by subcommand words (`git push`) is matched
-/// only after these are consumed, so an option's separate value is never
-/// read as the subcommand. An option before the subcommand that the
-/// declaration does not name leaves route unable to say which word is the
-/// subcommand, so the invocation is proxied opaque rather than read.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GlobalOptions {
-    pub binary: String,
-    /// Global options that take no value, e.g. `--no-pager`.
-    pub flags: Vec<String>,
-    /// Global options that take a value, as the next word (`-C /tmp`) or
-    /// attached (`--git-dir=.git`).
-    pub value_options: Vec<String>,
-    /// How an alias is defined on the command line itself (#1298), e.g. git's
-    /// `-c alias.p=push`. `None` means the binary has no inline alias.
-    pub inline_alias: Option<InlineAlias>,
-}
-
-/// The value options whose value can define an alias, and the key prefix that
-/// marks one (#1298): `-c alias.p=push` defines `p` as `push`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct InlineAlias {
-    pub options: Vec<String>,
-    pub prefix: String,
-}
-
-/// How route reads the subcommand word of an invocation whose binary declares
-/// an inline alias (#1298).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AliasReading {
-    /// The word names no alias defined on the command line.
-    NotAlias,
-    /// The word names an alias route cannot read: a shell alias (`!`), an
-    /// empty value, a value the shell or git would still transform, a value
-    /// set through an option route cannot see (`--config-env`), or an alias
-    /// whose value names another inline alias.
-    Opaque,
-    /// The alias value's words in place of the subcommand word, then the
-    /// command's remaining words, with the index where the subcommand begins
-    /// among them.
-    Expanded { args: Vec<String>, start: usize },
-}
-
-/// Characters that make an alias value unreadable as plain words: the shell
-/// has not expanded them yet (`$`, backtick) or git splits the value by its
-/// own quoting rules (quotes, backslash), so whitespace splitting would read
-/// a different command than the one that runs.
-const ALIAS_UNREADABLE: [char; 5] = ['\'', '"', '\\', '$', '`'];
-
-impl GlobalOptions {
-    /// The index in `args` of the first word that is not one of the declared
-    /// global options, or `None` when a word before it is an option the
-    /// declaration does not name, or a value option with no value left.
-    pub fn subcommand_start(&self, args: &[String]) -> Option<usize> {
-        declared_options_end(&self.flags, &self.value_options, args, 0)
-    }
-
-    /// How route reads the subcommand word at `start` (#1298). The word names
-    /// an alias when a global option before it defines one: a value beginning
-    /// with the declared prefix, compared without regard to ASCII case as git
-    /// compares config keys. The last definition of a name wins, across every
-    /// option. Only a declared inline-alias option carries a value route can
-    /// read; a definition through any other option is opaque.
-    ///
-    /// The expansion's global options are read again by the declaration, so
-    /// an option the alias brings in that the declaration does not name is
-    /// opaque, and an expanded subcommand word that is itself an inline alias
-    /// is opaque rather than expanded a second time.
-    pub fn inline_alias_reading(&self, args: &[String], start: usize) -> AliasReading {
-        let Some(alias) = &self.inline_alias else {
-            return AliasReading::NotAlias;
-        };
-        let Some(word) = word_at(args, start) else {
-            return AliasReading::NotAlias;
-        };
-        let Some(value) = self.alias_definition(alias, args, start, word) else {
-            return AliasReading::NotAlias;
-        };
-        let Some(words) = value.and_then(alias_words) else {
-            return AliasReading::Opaque;
-        };
-        let mut expanded: Vec<String> = args[..start].to_vec();
-        expanded.extend(words);
-        expanded.extend(args[start + 1..].iter().cloned());
-        let Some(expanded_start) = self.subcommand_start(&expanded) else {
-            return AliasReading::Opaque;
-        };
-        let names_alias = word_at(&expanded, expanded_start).is_some_and(|next| {
-            self.alias_definition(alias, &expanded, expanded_start, next)
-                .is_some()
-        });
-        if names_alias {
-            return AliasReading::Opaque;
-        }
-        AliasReading::Expanded {
-            args: expanded,
-            start: expanded_start,
-        }
-    }
-
-    /// The last definition of alias `name` among the global options before
-    /// `end`: `None` when no option defines it, `Some(None)` when the last
-    /// definition carries a value route cannot see, `Some(Some(value))`
-    /// otherwise.
-    fn alias_definition<'a>(
-        &self,
-        alias: &InlineAlias,
-        args: &'a [String],
-        end: usize,
-        name: &str,
-    ) -> Option<Option<&'a str>> {
-        let mut found: Option<Option<&'a str>> = None;
-        let mut index = 0;
-        while index < end {
-            let Some(word) = word_at(args, index) else {
-                break;
-            };
-            let consumed = option_words(&self.flags, &self.value_options, word).unwrap_or(1);
-            let (option, value) = if consumed == 2 {
-                (word, word_at(args, index + 1))
-            } else {
-                match word
-                    .strip_prefix("--")
-                    .and_then(|long| long.split_once('='))
-                {
-                    Some((long, value)) => (&word[..long.len() + 2], Some(value)),
-                    None => (word, None),
-                }
-            };
-            index += consumed;
-            let Some(key) = value.and_then(|v| strip_prefix_ignore_case(v, &alias.prefix)) else {
-                continue;
-            };
-            let (defined, alias_value) = match key.split_once('=') {
-                Some((defined, alias_value)) => (defined, Some(alias_value)),
-                None => (key, None),
-            };
-            if defined.eq_ignore_ascii_case(name) {
-                let readable = declares(&alias.options, option);
-                found = Some(alias_value.filter(|_| readable));
-            }
-        }
-        found
-    }
-}
-
-/// `text` without `prefix`, compared without regard to ASCII case.
-fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    let head = text.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| &text[prefix.len()..])
-}
-
-/// An alias value's words, or `None` when route cannot read them: an empty
-/// value, a shell alias (`!`), or a value carrying a character in
-/// [`ALIAS_UNREADABLE`].
-fn alias_words(value: &str) -> Option<Vec<String>> {
-    if value.trim_start().starts_with('!') || value.contains(ALIAS_UNREADABLE) {
-        return None;
-    }
-    let words: Vec<String> = value.split_whitespace().map(str::to_string).collect();
-    (!words.is_empty()).then_some(words)
-}
-
-/// The index of the first word from `index` on that is not one of the
-/// declared options, or `None` when an option there is one the declaration
-/// does not name or lacks its value. Shared by [`Wrapper`] (#1286) and
-/// [`GlobalOptions`] (#1294). Options are read getopt-style; a `--` stops the
-/// read and is left for the caller. Each word is compared as the shell sees
-/// it (one outer quote pair removed), so a quoted `"-u"` is still an option.
-fn declared_options_end(
-    flags: &[String],
-    value_options: &[String],
-    args: &[String],
-    mut index: usize,
-) -> Option<usize> {
-    while let Some(word) = word_at(args, index) {
-        // A lone `-` is an operand (stdin) unless it is declared an option,
-        // as `env` does.
-        let is_option =
-            word != "--" && word.starts_with('-') && (word != "-" || declares(flags, word));
-        if !is_option {
-            break;
-        }
-        let consumed = option_words(flags, value_options, word)?;
-        if index + consumed > args.len() {
-            return None;
-        }
-        index += consumed;
-    }
-    Some(index)
-}
-
-/// How many words the option `word` spans (1, or 2 when its value is the
-/// next word), or `None` when the declaration does not name it.
-fn option_words(flags: &[String], value_options: &[String], word: &str) -> Option<usize> {
-    if declares(flags, word) {
-        return Some(1);
-    }
-    if declares(value_options, word) {
-        return Some(2);
-    }
-    if let Some(long) = word.strip_prefix("--") {
-        // `--name=value` is one word when `--name` takes a value.
-        let (name, _) = long.split_once('=')?;
-        return declares(value_options, &format!("--{name}")).then_some(1);
-    }
-    // A short cluster (`-0r`, `-oL`, `-uroot`): every letter is a declared
-    // flag until one takes a value, which is the rest of the word when
-    // anything follows it and the next word otherwise.
-    let cluster = word.strip_prefix('-')?;
-    for (pos, letter) in cluster.char_indices() {
-        let option = format!("-{letter}");
-        if declares(flags, &option) {
-            continue;
-        }
-        if !declares(value_options, &option) {
-            return None;
-        }
-        let attached = pos + letter.len_utf8() < cluster.len();
-        return Some(if attached { 1 } else { 2 });
-    }
-    Some(1)
-}
-
-fn declares(list: &[String], word: &str) -> bool {
-    list.iter().any(|entry| entry == word)
-}
-
-/// The word at `index` as the shell sees it, one outer quote pair removed.
-fn word_at(args: &[String], index: usize) -> Option<&str> {
-    args.get(index).map(|a| crate::evaluate::dequote_outer(a))
-}
-
-/// Whether an interpreter body is shell (re-entered) or a foreign language
-/// (recorded opaque). See the module docs for why `sh -c` and `python3 -c`
-/// differ here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BodyLanguage {
-    Shell,
-    Foreign,
-}
-
-/// A name that carries an interpreter body in one of its arguments
-/// (FR-CMD-007), e.g. `sh -c '<body>'`, `python3 -c '<body>'`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Interpreter {
-    pub binary: String,
-    /// The flag whose following argument carries the body, e.g. `-c`.
-    pub flag: String,
-    pub body: BodyLanguage,
-}
-
-/// A name that takes a script file rather than an inline payload (FR-CMD-007),
-/// e.g. `bash script.sh`. The named file's body is opaque.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScriptCarrier {
-    pub binary: String,
-}
-
-/// The parsed policy (FR-CMD-011).
+/// The parsed policy (FR-CMD-011, #1337).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Policy {
-    pub tools: BTreeMap<ToolKind, ToolRules>,
-    pub sym_jobs: Vec<SymJob>,
-    pub wrappers: Vec<Wrapper>,
-    pub interpreters: Vec<Interpreter>,
-    pub script_carriers: Vec<ScriptCarrier>,
-    pub global_options: Vec<GlobalOptions>,
-    /// No-go entries the policy file adds (FR-CMD-025). They extend the
+    /// Command names that get `legion ` inserted before them.
+    pub proxy: Vec<String>,
+    /// Never-run entries the policy file adds (FR-CMD-025). They extend the
     /// built-in list and can never remove or weaken it: see
-    /// [`Policy::no_go_entries`].
-    pub no_go: Vec<NoGoEntry>,
+    /// [`Policy::never_run_entries`].
+    pub never_run: Vec<NoGoEntry>,
+    /// Commands the operator is asked about.
+    pub ask: Vec<NoGoEntry>,
+    /// The power switches, matched on the command after proxy insertion and
+    /// asked the same way.
+    pub power_switches: Vec<NoGoEntry>,
+    /// Rules for tools other than Bash.
+    pub tools: BTreeMap<ToolKind, Vec<Rule>>,
 }
 
 impl Policy {
-    /// A policy is non-empty only when at least one rule exists under some
-    /// tool kind (FR-CMD-016). Sym jobs, wrappers, interpreters and script
-    /// carriers on their own do not make a policy non-empty: they route
-    /// nothing by themselves.
-    pub fn is_empty(&self) -> bool {
-        !self.tools.values().any(|rules| match rules {
-            ToolRules::Bash { families } => families.values().any(|f| !f.rules.is_empty()),
-            ToolRules::Fields { rules } => !rules.is_empty(),
-        })
-    }
-
-    /// The wrapper matching `binary` given its arguments, if the policy names
-    /// one. A wrapper with a required subcommand matches only when
-    /// [`Wrapper::wraps`] finds that word.
-    pub fn matching_wrapper(&self, binary: &str, args: &[String]) -> Option<&Wrapper> {
-        self.wrappers
-            .iter()
-            .find(|w| w.binary == binary && w.wraps(args))
-    }
-
-    /// The interpreter matching `binary`, if the policy names one.
-    pub fn matching_interpreter(&self, binary: &str) -> Option<&Interpreter> {
-        self.interpreters.iter().find(|i| i.binary == binary)
-    }
-
-    /// The script carrier matching `binary`, if the policy names one.
-    pub fn matching_script_carrier(&self, binary: &str) -> Option<&ScriptCarrier> {
-        self.script_carriers.iter().find(|s| s.binary == binary)
-    }
-
-    /// The index in `args` where `binary`'s subcommand words begin: after its
-    /// declared global options (#1294), or 0 when the policy declares none
-    /// for it. `None` when a word before the subcommand is an option the
-    /// declaration does not name, so route cannot say which word is the
-    /// subcommand.
-    pub fn subcommand_start(&self, binary: &str, args: &[String]) -> Option<usize> {
-        match self.global_options.iter().find(|g| g.binary == binary) {
-            Some(declared) => declared.subcommand_start(args),
-            None => Some(0),
-        }
-    }
-
-    /// How route reads `binary`'s subcommand word at `start` (#1298): see
-    /// [`GlobalOptions::inline_alias_reading`]. A binary with no global-option
-    /// declaration has no inline alias.
-    pub fn inline_alias_reading(
-        &self,
-        binary: &str,
-        args: &[String],
-        start: usize,
-    ) -> AliasReading {
-        match self.global_options.iter().find(|g| g.binary == binary) {
-            Some(declared) => declared.inline_alias_reading(args, start),
-            None => AliasReading::NotAlias,
-        }
-    }
-
-    /// The sym job with this id, if any.
-    pub fn sym_job(&self, id: &str) -> Option<&SymJob> {
-        self.sym_jobs.iter().find(|j| j.id == id)
-    }
-
-    /// The resolver the no-go check expands a command with (FR-CMD-025): the
-    /// built-in wrappers and interpreters first, then this policy's own, so a
-    /// wrapped no-go command is resolved whether or not the policy file
-    /// declares its wrapper, and a policy declaration of the same binary can
-    /// never narrow the built-in one. It carries no rules: only the no-go
-    /// check expands with it.
-    ///
-    /// `None` when this policy's own declarations already begin with every
-    /// built-in one, as the shipped file's do: the resolver would then pick
-    /// the same declaration for every name, so its expansion is the policy's
-    /// own and a second scan would find nothing new. Also `None` when the
-    /// built-in resolver is unavailable; route refuses every Bash command
-    /// before it gets here in that case.
-    pub(crate) fn no_go_resolver(&self) -> Option<Policy> {
-        let builtin: &Policy = nogo::builtin_no_go_resolver()?;
-        if self.wrappers.starts_with(&builtin.wrappers)
-            && self.interpreters.starts_with(&builtin.interpreters)
-        {
-            return None;
-        }
-        Some(Policy {
-            wrappers: builtin
-                .wrappers
-                .iter()
-                .chain(&self.wrappers)
-                .cloned()
-                .collect(),
-            interpreters: builtin
-                .interpreters
-                .iter()
-                .chain(&self.interpreters)
-                .cloned()
-                .collect(),
-            script_carriers: self.script_carriers.clone(),
-            ..Policy::default()
-        })
-    }
-
-    /// Every no-go entry route checks (FR-CMD-025): the built-in entries
+    /// Every never-run entry route checks (FR-CMD-025): the built-in entries
     /// first, then the entries this policy adds. The built-ins are not
     /// policy data, so no policy file can remove one; listing them first
     /// means an added entry that reuses a built-in id never takes its place.
-    pub fn no_go_entries(&self) -> Vec<NoGoEntry> {
+    pub fn never_run_entries(&self) -> Vec<NoGoEntry> {
         let mut entries = nogo::builtin_no_go();
-        entries.extend(self.no_go.iter().cloned());
+        entries.extend(self.never_run.iter().cloned());
         entries
     }
 }
 
 /// Every failure `parse_policy` can raise (FR-CMD-011 Error Handling). Each
-/// carries the JSON pointer of the entry that failed -- not just the first,
-/// and not a bare message -- so an operator editing the policy is told exactly
-/// where the error is.
+/// carries the JSON pointer of the entry that failed, so an operator editing
+/// the policy is told exactly where the error is.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PolicyError {
     #[error("policy is not valid JSON: {detail}")]
@@ -834,19 +196,6 @@ pub enum PolicyError {
     #[error("{pointer}: unknown predicate kind '{kind}'")]
     UnknownPredicateKind { pointer: String, kind: String },
 
-    #[error("{pointer}: predicate kind '{kind}' does not apply to tool kind '{tool}'")]
-    PredicateNotApplicable {
-        pointer: String,
-        kind: String,
-        tool: String,
-    },
-
-    #[error("{pointer}: unknown proxy reason '{reason}'")]
-    UnknownProxyReason { pointer: String, reason: String },
-
-    #[error("{pointer}: unknown body language '{language}'")]
-    UnknownBodyLanguage { pointer: String, language: String },
-
     #[error("{pointer}: ask rule must carry a non-empty question and reason")]
     IncompleteAsk { pointer: String },
 
@@ -856,25 +205,19 @@ pub enum PolicyError {
     #[error("{pointer}: rewrite rule must carry a non-empty target and reason")]
     IncompleteRewrite { pointer: String },
 
-    #[error("{pointer}: sym job must carry a non-empty sym command")]
-    SymJobMissingCommand { pointer: String },
-
-    #[error("{pointer}: sym action references unknown sym job '{job}'")]
-    UnknownSymJobRef { pointer: String, job: String },
-
-    #[error("{pointer}: rule id '{id}' is empty")]
+    #[error("{pointer}: id '{id}' is empty")]
     EmptyRuleId { pointer: String, id: String },
-
-    #[error("{pointer}: sym job id is empty")]
-    EmptySymJobId { pointer: String },
 
     #[error("{pointer}: unknown command position '{position}'")]
     UnknownPosition { pointer: String, position: String },
 
-    #[error("{pointer}: no-go entry must name at least one binary or binary prefix")]
-    NoGoWithoutBinary { pointer: String },
+    #[error("{pointer}: entry must name at least one command name or name prefix")]
+    EntryWithoutName { pointer: String },
 
-    #[error("{pointer}: duplicate rule id '{id}', first defined at {first}")]
+    #[error("{pointer}: entry must carry a non-empty reason")]
+    EntryWithoutReason { pointer: String },
+
+    #[error("{pointer}: duplicate id '{id}', first defined at {first}")]
     DuplicateRuleId {
         pointer: String,
         id: String,
@@ -882,84 +225,51 @@ pub enum PolicyError {
     },
 }
 
+/// The top-level keys a policy file may carry: the four Bash lists and the
+/// rules for other tools. Anything else fails to parse.
+const TOP_LEVEL_KEYS: [&str; 5] = ["proxy", "never_run", "ask", "power_switches", "tools"];
+
 /// Parses policy text into a [`Policy`] (FR-CMD-011). Pure: the caller reads
 /// the file and passes its contents; route never opens it.
 ///
-/// Every entry is validated. An unknown field anywhere is an error rather than
-/// silently ignored, because a typo that drops a rule's lookup requirement
-/// would otherwise fail open. Rule ids are unique across the whole policy.
+/// Every entry is validated. An unknown field anywhere -- including a
+/// top-level key other than the four lists and `tools` -- is an error rather
+/// than silently ignored. Ids are unique across the whole policy.
 pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
     let root: Value = serde_json::from_str(text).map_err(|e| PolicyError::Json {
         detail: e.to_string(),
     })?;
     let root = as_object(&root, "")?;
-    // `route` holds the adapter's own settings (FR-CMD-009's decision
-    // deadline, read from the same file so the policy stays one document).
-    // It is not routing data: this crate accepts the key and never reads it.
-    // The adapter (`src/cmd/config.rs`) parses and validates it, strictly, so
-    // a typo inside it is still an error and never a silent default.
-    check_known_keys(
-        root,
-        "",
-        &[
-            "tools",
-            "sym_jobs",
-            "wrappers",
-            "interpreters",
-            "script_carriers",
-            "global_options",
-            "route",
-            "no_go",
-        ],
-    )?;
+    check_known_keys(root, "", &TOP_LEVEL_KEYS)?;
 
-    // Ids are unique across the whole policy -- rule ids and sym-job ids share
-    // one namespace, because an incident record names the id (#1237) and
-    // `Deciding::Rule.id` carries either kind.
+    // Ids are unique across the whole policy: an incident record names the
+    // id (#1237), whether an entry or a rule produced it.
     let mut seen_ids: HashMap<String, String> = HashMap::new();
 
-    // Sym jobs first, so an action's sym-job reference can be validated.
-    let sym_jobs = match root.get("sym_jobs") {
-        Some(value) => parse_sym_jobs(value, "/sym_jobs", &mut seen_ids)?,
+    let proxy: Vec<String> = match root.get("proxy") {
+        Some(value) => parse_names(value, "/proxy")?,
         None => Vec::new(),
     };
-    let sym_job_ids: Vec<&str> = sym_jobs.iter().map(|j| j.id.as_str()).collect();
-
-    let wrappers = match root.get("wrappers") {
-        Some(value) => parse_wrappers(value, "/wrappers")?,
-        None => Vec::new(),
+    let mut entries = |key: &str| -> Result<Vec<NoGoEntry>, PolicyError> {
+        match root.get(key) {
+            Some(value) => parse_entries(value, &format!("/{key}"), &mut seen_ids),
+            None => Ok(Vec::new()),
+        }
     };
-    let interpreters = match root.get("interpreters") {
-        Some(value) => parse_interpreters(value, "/interpreters")?,
-        None => Vec::new(),
-    };
-    let script_carriers = match root.get("script_carriers") {
-        Some(value) => parse_script_carriers(value, "/script_carriers")?,
-        None => Vec::new(),
-    };
-    let global_options = match root.get("global_options") {
-        Some(value) => parse_global_options(value, "/global_options")?,
-        None => Vec::new(),
-    };
-
+    let never_run: Vec<NoGoEntry> = entries("never_run")?;
+    let ask: Vec<NoGoEntry> = entries("ask")?;
+    let power_switches: Vec<NoGoEntry> = entries("power_switches")?;
     let tools = match root.get("tools") {
-        Some(value) => parse_tools(value, "/tools", &sym_job_ids, &mut seen_ids)?,
+        Some(value) => parse_tools(value, "/tools", &mut seen_ids)?,
         None => BTreeMap::new(),
     };
 
-    let no_go = match root.get("no_go") {
-        Some(value) => parse_no_go(value, "/no_go")?,
-        None => Vec::new(),
-    };
-
     Ok(Policy {
+        proxy,
+        never_run,
+        ask,
+        power_switches,
         tools,
-        sym_jobs,
-        wrappers,
-        interpreters,
-        script_carriers,
-        global_options,
-        no_go,
     })
 }
 
@@ -1063,169 +373,44 @@ fn check_known_keys(
     Ok(())
 }
 
-// -- tools --------------------------------------------------------------------
-
-fn parse_tools(
-    value: &Value,
-    pointer: &str,
-    sym_job_ids: &[&str],
-    seen_ids: &mut HashMap<String, String>,
-) -> Result<BTreeMap<ToolKind, ToolRules>, PolicyError> {
-    let map = as_object(value, pointer)?;
-    let mut tools = BTreeMap::new();
-    for (key, tool_value) in map {
-        let tool_pointer = child_pointer(pointer, key);
-        let kind = ToolKind::parse(key).ok_or_else(|| PolicyError::UnknownToolKind {
-            pointer: tool_pointer.clone(),
-            kind: key.clone(),
-        })?;
-        let rules = parse_tool_rules(kind, tool_value, &tool_pointer, sym_job_ids, seen_ids)?;
-        tools.insert(kind, rules);
-    }
-    Ok(tools)
-}
-
-fn parse_tool_rules(
-    kind: ToolKind,
-    value: &Value,
-    pointer: &str,
-    sym_job_ids: &[&str],
-    seen_ids: &mut HashMap<String, String>,
-) -> Result<ToolRules, PolicyError> {
-    let map = as_object(value, pointer)?;
-    match kind {
-        ToolKind::Bash => {
-            check_known_keys(map, pointer, &["families"])?;
-            let families = match map.get("families") {
-                Some(families_value) => parse_families(
-                    families_value,
-                    &child_pointer(pointer, "families"),
-                    sym_job_ids,
-                    seen_ids,
-                )?,
-                None => BTreeMap::new(),
-            };
-            Ok(ToolRules::Bash { families })
-        }
-        _ => {
-            check_known_keys(map, pointer, &["rules"])?;
-            let rules = match map.get("rules") {
-                Some(rules_value) => parse_rules(
-                    rules_value,
-                    &child_pointer(pointer, "rules"),
-                    kind,
-                    sym_job_ids,
-                    seen_ids,
-                )?,
-                None => Vec::new(),
-            };
-            Ok(ToolRules::Fields { rules })
-        }
-    }
-}
-
-fn parse_families(
-    value: &Value,
-    pointer: &str,
-    sym_job_ids: &[&str],
-    seen_ids: &mut HashMap<String, String>,
-) -> Result<BTreeMap<String, Family>, PolicyError> {
-    let map = as_object(value, pointer)?;
-    let mut families = BTreeMap::new();
-    for (key, family_value) in map {
-        let family_pointer = child_pointer(pointer, key);
-        let family_map = as_object(family_value, &family_pointer)?;
-        check_known_keys(family_map, &family_pointer, &["rules"])?;
-        let rules = match family_map.get("rules") {
-            Some(rules_value) => parse_rules(
-                rules_value,
-                &child_pointer(&family_pointer, "rules"),
-                ToolKind::Bash,
-                sym_job_ids,
-                seen_ids,
-            )?,
-            None => Vec::new(),
-        };
-        families.insert(key.clone(), Family { rules });
-    }
-    Ok(families)
-}
-
-fn parse_rules(
-    value: &Value,
-    pointer: &str,
-    kind: ToolKind,
-    sym_job_ids: &[&str],
-    seen_ids: &mut HashMap<String, String>,
-) -> Result<Vec<Rule>, PolicyError> {
+fn parse_string_array(value: &Value, pointer: &str) -> Result<Vec<String>, PolicyError> {
     let array = as_array(value, pointer)?;
-    let mut rules = Vec::with_capacity(array.len());
-    for (index, rule_value) in array.iter().enumerate() {
-        let rule_pointer = child_pointer(pointer, &index.to_string());
-        rules.push(parse_rule(
-            rule_value,
-            &rule_pointer,
-            kind,
-            sym_job_ids,
-            seen_ids,
+    let mut out = Vec::with_capacity(array.len());
+    for (index, item) in array.iter().enumerate() {
+        out.push(as_string(
+            item,
+            &child_pointer(pointer, &index.to_string()),
         )?);
     }
-    Ok(rules)
+    Ok(out)
 }
 
-fn parse_rule(
-    value: &Value,
+fn optional_string_array(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
     pointer: &str,
-    kind: ToolKind,
-    sym_job_ids: &[&str],
-    seen_ids: &mut HashMap<String, String>,
-) -> Result<Rule, PolicyError> {
-    let map = as_object(value, pointer)?;
-    check_known_keys(
-        map,
-        pointer,
-        &[
-            "id",
-            "predicates",
-            "requires_recall",
-            "requires_consult",
-            "outcome",
-        ],
-    )?;
+) -> Result<Vec<String>, PolicyError> {
+    match map.get(key) {
+        Some(value) => parse_string_array(value, &child_pointer(pointer, key)),
+        None => Ok(Vec::new()),
+    }
+}
 
-    let id = require_string(map, "id", pointer)?;
-    if id.is_empty() {
-        return Err(PolicyError::EmptyRuleId {
-            pointer: child_pointer(pointer, "id"),
-            id,
+/// A list of command names: every entry a non-empty string. An empty name
+/// would match no command word, so it is a policy error rather than a name
+/// that silently never fires.
+fn parse_names(value: &Value, pointer: &str) -> Result<Vec<String>, PolicyError> {
+    let names = parse_string_array(value, pointer)?;
+    if let Some(index) = names.iter().position(String::is_empty) {
+        return Err(PolicyError::WrongType {
+            pointer: child_pointer(pointer, &index.to_string()),
+            expected: "a non-empty command name".to_string(),
         });
     }
-    register_id(seen_ids, &id, &child_pointer(pointer, "id"))?;
-
-    let predicates = match map.get("predicates") {
-        Some(preds) => parse_predicates(preds, &child_pointer(pointer, "predicates"), kind)?,
-        None => Vec::new(),
-    };
-    let requires_recall = optional_bool(map, "requires_recall", pointer)?;
-    let requires_consult = optional_bool(map, "requires_consult", pointer)?;
-    let outcome = parse_outcome(
-        require(map, "outcome", pointer)?,
-        &child_pointer(pointer, "outcome"),
-        kind,
-        sym_job_ids,
-    )?;
-
-    Ok(Rule {
-        id,
-        predicates,
-        requires_recall,
-        requires_consult,
-        outcome,
-    })
+    Ok(names)
 }
 
-/// Registers an id in the policy-wide id set, rejecting a duplicate. Rule ids
-/// and sym-job ids share this one namespace.
+/// Registers an id in the policy-wide id set, rejecting a duplicate.
 fn register_id(
     seen_ids: &mut HashMap<String, String>,
     id: &str,
@@ -1242,356 +427,35 @@ fn register_id(
     Ok(())
 }
 
-fn parse_predicates(
-    value: &Value,
+/// A non-empty id at `map`'s `id` key, registered as unique.
+fn parse_id(
+    map: &serde_json::Map<String, Value>,
     pointer: &str,
-    tool: ToolKind,
-) -> Result<Vec<Predicate>, PolicyError> {
-    let array = as_array(value, pointer)?;
-    let mut predicates = Vec::with_capacity(array.len());
-    for (index, predicate_value) in array.iter().enumerate() {
-        let predicate_pointer = child_pointer(pointer, &index.to_string());
-        predicates.push(parse_predicate(predicate_value, &predicate_pointer, tool)?);
-    }
-    Ok(predicates)
-}
-
-fn parse_predicate(value: &Value, pointer: &str, tool: ToolKind) -> Result<Predicate, PolicyError> {
-    let map = as_object(value, pointer)?;
-    let kind = require_string(map, "kind", pointer)?;
-    let predicate = match kind.as_str() {
-        "arg-present" | "arg-absent" => {
-            check_known_keys(map, pointer, &["kind", "arg"])?;
-            let arg = require_string(map, "arg", pointer)?;
-            if kind == "arg-present" {
-                Predicate::ArgPresent(arg)
-            } else {
-                Predicate::ArgAbsent(arg)
-            }
-        }
-        "field-present" | "field-absent" => {
-            check_known_keys(map, pointer, &["kind", "field"])?;
-            let field = require_string(map, "field", pointer)?;
-            if kind == "field-present" {
-                Predicate::FieldPresent { field }
-            } else {
-                Predicate::FieldAbsent { field }
-            }
-        }
-        "field-equals" => {
-            check_known_keys(map, pointer, &["kind", "field", "any_of", "ignore_case"])?;
-            Predicate::FieldEquals {
-                field: require_string(map, "field", pointer)?,
-                any_of: parse_any_of(map, pointer)?,
-                ignore_case: optional_bool(map, "ignore_case", pointer)?,
-            }
-        }
-        "field-contains" => {
-            check_known_keys(map, pointer, &["kind", "field", "any_of"])?;
-            Predicate::FieldContains {
-                field: require_string(map, "field", pointer)?,
-                any_of: parse_any_of(map, pointer)?,
-            }
-        }
-        "field-ends-with" => {
-            check_known_keys(map, pointer, &["kind", "field", "any_of"])?;
-            Predicate::FieldEndsWith {
-                field: require_string(map, "field", pointer)?,
-                any_of: parse_any_of(map, pointer)?,
-            }
-        }
-        "field-greater-than" => {
-            check_known_keys(map, pointer, &["kind", "field", "value"])?;
-            let value_pointer = child_pointer(pointer, "value");
-            let value =
-                require(map, "value", pointer)?
-                    .as_i64()
-                    .ok_or_else(|| PolicyError::WrongType {
-                        pointer: value_pointer,
-                        expected: "an integer".to_string(),
-                    })?;
-            Predicate::FieldGreaterThan {
-                field: require_string(map, "field", pointer)?,
-                value,
-            }
-        }
-        other => {
-            return Err(PolicyError::UnknownPredicateKind {
-                pointer: child_pointer(pointer, "kind"),
-                kind: other.to_string(),
-            });
-        }
-    };
-
-    // An arg predicate can only resolve against a Bash invocation's arguments
-    // and a field predicate only against a Fields tool's input; a predicate
-    // in the wrong place would never hold, so its rule would silently never
-    // fire -- fail closed at parse time instead.
-    let applies = if tool == ToolKind::Bash {
-        predicate.reads_args()
-    } else {
-        !predicate.reads_args()
-    };
-    if !applies {
-        return Err(PolicyError::PredicateNotApplicable {
-            pointer: child_pointer(pointer, "kind"),
-            kind,
-            tool: tool.as_str().to_string(),
+    seen_ids: &mut HashMap<String, String>,
+) -> Result<String, PolicyError> {
+    let id = require_string(map, "id", pointer)?;
+    let id_pointer = child_pointer(pointer, "id");
+    if id.is_empty() {
+        return Err(PolicyError::EmptyRuleId {
+            pointer: id_pointer,
+            id,
         });
     }
-    Ok(predicate)
+    register_id(seen_ids, &id, &id_pointer)?;
+    Ok(id)
 }
 
-/// A predicate's `any_of` list: one or more non-empty strings. An empty list
-/// would never match and an empty string would match everything (every
-/// string contains and ends with `""`), so both are rejected as the policy
-/// errors they are rather than shipped as a rule that fails open or closed by
-/// accident.
-fn parse_any_of(
-    map: &serde_json::Map<String, Value>,
-    pointer: &str,
-) -> Result<Vec<String>, PolicyError> {
-    let any_of_pointer = child_pointer(pointer, "any_of");
-    let values = parse_string_array(require(map, "any_of", pointer)?, &any_of_pointer)?;
-    if values.is_empty() || values.iter().any(String::is_empty) {
-        return Err(PolicyError::WrongType {
-            pointer: any_of_pointer,
-            expected: "a non-empty array of non-empty strings".to_string(),
-        });
-    }
-    Ok(values)
-}
+// -- the never-run, ask and power-switch lists --------------------------------
 
-fn parse_outcome(
-    value: &Value,
-    pointer: &str,
-    tool: ToolKind,
-    sym_job_ids: &[&str],
-) -> Result<RuleOutcome, PolicyError> {
-    let map = as_object(value, pointer)?;
-    let kind = require_string(map, "kind", pointer)?;
-    match kind.as_str() {
-        "allow" => {
-            check_known_keys(map, pointer, &["kind", "note"])?;
-            let note = match map.get("note") {
-                Some(note_value) => Some(as_string(note_value, &child_pointer(pointer, "note"))?),
-                None => None,
-            };
-            Ok(RuleOutcome::Allow { note })
-        }
-        "rewrite" => {
-            // Only a Bash call carries argument words, so only a Bash rewrite
-            // declares exceptions for them. A Fields rewrite patches one
-            // field and keeps the rest -- lossless by construction -- and an
-            // exception there would be a key that never takes effect, so it
-            // is rejected like any unknown field. No per-flag argument list
-            // is a key anywhere: the target's own definition judges the
-            // words (FR-CMD-008 rev 3).
-            let is_bash = tool == ToolKind::Bash;
-            let known: &[&str] = if is_bash {
-                &[
-                    "kind",
-                    "target",
-                    "reason",
-                    "positional",
-                    "reshape",
-                    "deny_flags",
-                ]
-            } else {
-                &["kind", "target", "reason"]
-            };
-            check_known_keys(map, pointer, known)?;
-            let target = require_string(map, "target", pointer)?;
-            let reason = require_string(map, "reason", pointer)?;
-            if target.is_empty() || reason.is_empty() {
-                return Err(PolicyError::IncompleteRewrite {
-                    pointer: root_pointer(pointer),
-                });
-            }
-            Ok(RuleOutcome::Rewrite {
-                spec: RewriteSpec {
-                    target: ManagedTarget::new(target),
-                    positional: option_word_list(map, "positional", pointer)?,
-                    reshape: parse_reshape(map, pointer)?,
-                    deny_flags: option_word_list(map, "deny_flags", pointer)?,
-                },
-                reason,
-            })
-        }
-        "proxy" => {
-            check_known_keys(map, pointer, &["kind", "reason"])?;
-            let reason_str = require_string(map, "reason", pointer)?;
-            let reason = ProxyReason::try_from(reason_str.as_str()).map_err(|_| {
-                PolicyError::UnknownProxyReason {
-                    pointer: child_pointer(pointer, "reason"),
-                    reason: reason_str,
-                }
-            })?;
-            Ok(RuleOutcome::Proxy { reason })
-        }
-        "deny" => {
-            check_known_keys(map, pointer, &["kind", "reason", "instead"])?;
-            let reason = require_string(map, "reason", pointer)?;
-            let instead = require_string(map, "instead", pointer)?;
-            if reason.is_empty() || instead.is_empty() {
-                return Err(PolicyError::IncompleteDeny {
-                    pointer: root_pointer(pointer),
-                });
-            }
-            Ok(RuleOutcome::Deny { reason, instead })
-        }
-        "ask" => {
-            check_known_keys(
-                map,
-                pointer,
-                &["kind", "question", "reason", "needs_operator"],
-            )?;
-            let question = require_string(map, "question", pointer)?;
-            let reason = require_string(map, "reason", pointer)?;
-            if question.is_empty() || reason.is_empty() {
-                return Err(PolicyError::IncompleteAsk {
-                    pointer: root_pointer(pointer),
-                });
-            }
-            let needs_operator = optional_bool(map, "needs_operator", pointer)?;
-            Ok(RuleOutcome::Ask {
-                question,
-                reason,
-                needs_operator,
-            })
-        }
-        "sym" => {
-            check_known_keys(map, pointer, &["kind", "job"])?;
-            let job = require_string(map, "job", pointer)?;
-            if !sym_job_ids.contains(&job.as_str()) {
-                return Err(PolicyError::UnknownSymJobRef {
-                    pointer: child_pointer(pointer, "job"),
-                    job,
-                });
-            }
-            Ok(RuleOutcome::Sym { job })
-        }
-        other => Err(PolicyError::UnknownDecision {
-            pointer: child_pointer(pointer, "kind"),
-            arm: other.to_string(),
-        }),
-    }
-}
-
-/// A rewrite exception's list of source flags (`positional`, `deny_flags`),
-/// empty when absent. Every entry must be an option word (it starts with `-`
-/// and names something): the evaluator and the adapter only ever compare
-/// option words against these lists, so any other entry would be a
-/// declaration that never takes effect.
-fn option_word_list(
-    map: &serde_json::Map<String, Value>,
-    key: &str,
-    pointer: &str,
-) -> Result<Vec<String>, PolicyError> {
-    let key_pointer = child_pointer(pointer, key);
-    let words = optional_string_array(map, key, pointer)?;
-    if let Some(index) = words.iter().position(|w| !is_option_word(w)) {
-        return Err(not_an_option_word(child_pointer(
-            &key_pointer,
-            &index.to_string(),
-        )));
-    }
-    Ok(words)
-}
-
-/// A rewrite's `reshape` exception: an object from source flag to the name of
-/// a [`Reshape`] transform, empty when absent.
-fn parse_reshape(
-    map: &serde_json::Map<String, Value>,
-    pointer: &str,
-) -> Result<BTreeMap<String, Reshape>, PolicyError> {
-    let Some(value) = map.get("reshape") else {
-        return Ok(BTreeMap::new());
-    };
-    let reshape_pointer = child_pointer(pointer, "reshape");
-    let mut reshape = BTreeMap::new();
-    for (flag, name_value) in as_object(value, &reshape_pointer)? {
-        let flag_pointer = child_pointer(&reshape_pointer, flag);
-        if !is_option_word(flag) {
-            return Err(not_an_option_word(flag_pointer));
-        }
-        let name = as_string(name_value, &flag_pointer)?;
-        let transform = Reshape::ALL
-            .into_iter()
-            .find(|t| t.as_str() == name)
-            .ok_or_else(|| PolicyError::WrongType {
-                pointer: flag_pointer,
-                expected: "a reshape transform: 'repo_name'".to_string(),
-            })?;
-        reshape.insert(flag.clone(), transform);
-    }
-    Ok(reshape)
-}
-
-fn is_option_word(word: &str) -> bool {
-    word.len() >= 2 && word.starts_with('-') && word != "--"
-}
-
-fn not_an_option_word(pointer: String) -> PolicyError {
-    PolicyError::WrongType {
-        pointer,
-        expected: "an option word starting with '-'".to_string(),
-    }
-}
-
-// -- sym jobs, wrappers, interpreters, script carriers ------------------------
-
-fn parse_sym_jobs(
+/// Parses one of the three entry lists: the same predicate shape as the
+/// built-in never-run entries (FR-CMD-025). Each entry is validated like
+/// every other policy entry -- an unknown field is an error, never a
+/// silently weaker entry.
+fn parse_entries(
     value: &Value,
     pointer: &str,
     seen_ids: &mut HashMap<String, String>,
-) -> Result<Vec<SymJob>, PolicyError> {
-    let array = as_array(value, pointer)?;
-    let mut jobs = Vec::with_capacity(array.len());
-    for (index, job_value) in array.iter().enumerate() {
-        let job_pointer = child_pointer(pointer, &index.to_string());
-        let map = as_object(job_value, &job_pointer)?;
-        check_known_keys(
-            map,
-            &job_pointer,
-            &["id", "sym_command", "interpreter_patterns", "pipe_filter"],
-        )?;
-        let id = require_string(map, "id", &job_pointer)?;
-        if id.is_empty() {
-            return Err(PolicyError::EmptySymJobId {
-                pointer: child_pointer(&job_pointer, "id"),
-            });
-        }
-        register_id(seen_ids, &id, &child_pointer(&job_pointer, "id"))?;
-        let sym_command = require_string(map, "sym_command", &job_pointer)?;
-        if sym_command.is_empty() {
-            return Err(PolicyError::SymJobMissingCommand {
-                pointer: job_pointer.clone(),
-            });
-        }
-        let interpreter_patterns = match map.get("interpreter_patterns") {
-            Some(patterns) => parse_string_array(
-                patterns,
-                &child_pointer(&job_pointer, "interpreter_patterns"),
-            )?,
-            None => Vec::new(),
-        };
-        let pipe_filter = optional_bool(map, "pipe_filter", &job_pointer)?;
-        jobs.push(SymJob {
-            id,
-            sym_command,
-            interpreter_patterns,
-            pipe_filter,
-        });
-    }
-    Ok(jobs)
-}
-
-/// Parses the policy file's `no_go` entries (FR-CMD-025): the same predicate
-/// shape as the built-in entries. Each entry is validated like every other
-/// policy entry -- an unknown field is an error, never a silently weaker
-/// entry.
-fn parse_no_go(value: &Value, pointer: &str) -> Result<Vec<NoGoEntry>, PolicyError> {
+) -> Result<Vec<NoGoEntry>, PolicyError> {
     let array = as_array(value, pointer)?;
     let mut entries = Vec::with_capacity(array.len());
     for (index, entry_value) in array.iter().enumerate() {
@@ -1602,23 +466,24 @@ fn parse_no_go(value: &Value, pointer: &str) -> Result<Vec<NoGoEntry>, PolicyErr
             &entry_pointer,
             &[
                 "id",
-                "binaries",
-                "binary_prefixes",
+                "names",
+                "name_prefixes",
                 "position",
                 "predicates",
+                "reason",
             ],
         )?;
-        let id = require_string(map, "id", &entry_pointer)?;
-        if id.is_empty() {
-            return Err(PolicyError::EmptyRuleId {
-                pointer: child_pointer(&entry_pointer, "id"),
-                id,
-            });
-        }
-        let binaries = optional_string_array(map, "binaries", &entry_pointer)?;
-        let binary_prefixes = optional_string_array(map, "binary_prefixes", &entry_pointer)?;
-        if binaries.is_empty() && binary_prefixes.is_empty() {
-            return Err(PolicyError::NoGoWithoutBinary {
+        let id = parse_id(map, &entry_pointer, seen_ids)?;
+        let names = match map.get("names") {
+            Some(raw) => parse_names(raw, &child_pointer(&entry_pointer, "names"))?,
+            None => Vec::new(),
+        };
+        let name_prefixes = match map.get("name_prefixes") {
+            Some(raw) => parse_names(raw, &child_pointer(&entry_pointer, "name_prefixes"))?,
+            None => Vec::new(),
+        };
+        if names.is_empty() && name_prefixes.is_empty() {
+            return Err(PolicyError::EntryWithoutName {
                 pointer: entry_pointer,
             });
         }
@@ -1634,21 +499,28 @@ fn parse_no_go(value: &Value, pointer: &str) -> Result<Vec<NoGoEntry>, PolicyErr
             None => None,
         };
         let predicates = match map.get("predicates") {
-            Some(raw) => parse_no_go_predicates(raw, &child_pointer(&entry_pointer, "predicates"))?,
+            Some(raw) => parse_entry_predicates(raw, &child_pointer(&entry_pointer, "predicates"))?,
             None => Vec::new(),
         };
+        let reason = require_string(map, "reason", &entry_pointer)?;
+        if reason.is_empty() {
+            return Err(PolicyError::EntryWithoutReason {
+                pointer: entry_pointer,
+            });
+        }
         entries.push(NoGoEntry {
             id,
-            binaries,
-            binary_prefixes,
+            names,
+            name_prefixes,
             position,
             predicates,
+            reason,
         });
     }
     Ok(entries)
 }
 
-fn parse_no_go_predicates(value: &Value, pointer: &str) -> Result<Vec<NoGoPredicate>, PolicyError> {
+fn parse_entry_predicates(value: &Value, pointer: &str) -> Result<Vec<NoGoPredicate>, PolicyError> {
     let array = as_array(value, pointer)?;
     let mut predicates = Vec::with_capacity(array.len());
     for (index, item) in array.iter().enumerate() {
@@ -1710,17 +582,6 @@ fn parse_no_go_predicates(value: &Value, pointer: &str) -> Result<Vec<NoGoPredic
     Ok(predicates)
 }
 
-fn optional_string_array(
-    map: &serde_json::Map<String, Value>,
-    key: &str,
-    pointer: &str,
-) -> Result<Vec<String>, PolicyError> {
-    match map.get(key) {
-        Some(value) => parse_string_array(value, &child_pointer(pointer, key)),
-        None => Ok(Vec::new()),
-    }
-}
-
 /// A [`Position`] by its kebab-case wire name.
 fn parse_position(name: &str) -> Option<Position> {
     match name {
@@ -1733,1318 +594,377 @@ fn parse_position(name: &str) -> Option<Position> {
     }
 }
 
-fn parse_string_array(value: &Value, pointer: &str) -> Result<Vec<String>, PolicyError> {
-    let array = as_array(value, pointer)?;
-    let mut out = Vec::with_capacity(array.len());
-    for (index, item) in array.iter().enumerate() {
-        out.push(as_string(
-            item,
-            &child_pointer(pointer, &index.to_string()),
-        )?);
-    }
-    Ok(out)
-}
+// -- tools other than Bash ----------------------------------------------------
 
-fn parse_wrappers(value: &Value, pointer: &str) -> Result<Vec<Wrapper>, PolicyError> {
-    let array = as_array(value, pointer)?;
-    let mut wrappers = Vec::with_capacity(array.len());
-    for (index, wrapper_value) in array.iter().enumerate() {
-        let wrapper_pointer = child_pointer(pointer, &index.to_string());
-        let map = as_object(wrapper_value, &wrapper_pointer)?;
-        check_known_keys(
-            map,
-            &wrapper_pointer,
-            &[
-                "binary",
-                "required_subcommand",
-                "flags",
-                "value_options",
-                "operands",
-                "selectors",
-            ],
-        )?;
-        let binary = require_string(map, "binary", &wrapper_pointer)?;
-        let required_subcommand = match map.get("required_subcommand") {
-            Some(sub) => Some(as_string(
-                sub,
-                &child_pointer(&wrapper_pointer, "required_subcommand"),
-            )?),
-            None => None,
-        };
-        let optional_strings = |key: &str| match map.get(key) {
-            Some(value) => parse_string_array(value, &child_pointer(&wrapper_pointer, key)),
-            None => Ok(Vec::new()),
-        };
-        let flags = optional_strings("flags")?;
-        let value_options = optional_strings("value_options")?;
-        let selectors = optional_strings("selectors")?;
-        let operands = match map.get("operands") {
-            Some(value) => value
-                .as_u64()
-                .and_then(|n| usize::try_from(n).ok())
-                .ok_or_else(|| PolicyError::WrongType {
-                    pointer: child_pointer(&wrapper_pointer, "operands"),
-                    expected: "a non-negative integer".to_string(),
-                })?,
-            None => 0,
-        };
-        wrappers.push(Wrapper {
-            binary,
-            required_subcommand,
-            flags,
-            value_options,
-            operands,
-            selectors,
-        });
-    }
-    Ok(wrappers)
-}
-
-fn parse_global_options(value: &Value, pointer: &str) -> Result<Vec<GlobalOptions>, PolicyError> {
-    let array = as_array(value, pointer)?;
-    let mut declarations = Vec::with_capacity(array.len());
-    for (index, declaration_value) in array.iter().enumerate() {
-        let declaration_pointer = child_pointer(pointer, &index.to_string());
-        let map = as_object(declaration_value, &declaration_pointer)?;
-        check_known_keys(
-            map,
-            &declaration_pointer,
-            &["binary", "flags", "value_options", "inline_alias"],
-        )?;
-        let binary = require_string(map, "binary", &declaration_pointer)?;
-        let optional_strings = |key: &str| match map.get(key) {
-            Some(value) => parse_string_array(value, &child_pointer(&declaration_pointer, key)),
-            None => Ok(Vec::new()),
-        };
-        let inline_alias = match map.get("inline_alias") {
-            Some(value) => Some(parse_inline_alias(
-                value,
-                &child_pointer(&declaration_pointer, "inline_alias"),
-            )?),
-            None => None,
-        };
-        declarations.push(GlobalOptions {
-            binary,
-            flags: optional_strings("flags")?,
-            value_options: optional_strings("value_options")?,
-            inline_alias,
-        });
-    }
-    Ok(declarations)
-}
-
-fn parse_inline_alias(value: &Value, pointer: &str) -> Result<InlineAlias, PolicyError> {
+fn parse_tools(
+    value: &Value,
+    pointer: &str,
+    seen_ids: &mut HashMap<String, String>,
+) -> Result<BTreeMap<ToolKind, Vec<Rule>>, PolicyError> {
     let map = as_object(value, pointer)?;
-    check_known_keys(map, pointer, &["options", "prefix"])?;
-    Ok(InlineAlias {
-        options: parse_string_array(
-            require(map, "options", pointer)?,
-            &child_pointer(pointer, "options"),
-        )?,
-        prefix: require_string(map, "prefix", pointer)?,
+    let mut tools = BTreeMap::new();
+    for (key, tool_value) in map {
+        let tool_pointer = child_pointer(pointer, key);
+        let kind = ToolKind::parse(key).ok_or_else(|| PolicyError::UnknownToolKind {
+            pointer: tool_pointer.clone(),
+            kind: key.clone(),
+        })?;
+        let tool_map = as_object(tool_value, &tool_pointer)?;
+        check_known_keys(tool_map, &tool_pointer, &["rules"])?;
+        let rules = match tool_map.get("rules") {
+            Some(rules_value) => parse_rules(
+                rules_value,
+                &child_pointer(&tool_pointer, "rules"),
+                seen_ids,
+            )?,
+            None => Vec::new(),
+        };
+        tools.insert(kind, rules);
+    }
+    Ok(tools)
+}
+
+fn parse_rules(
+    value: &Value,
+    pointer: &str,
+    seen_ids: &mut HashMap<String, String>,
+) -> Result<Vec<Rule>, PolicyError> {
+    let array = as_array(value, pointer)?;
+    let mut rules = Vec::with_capacity(array.len());
+    for (index, rule_value) in array.iter().enumerate() {
+        let rule_pointer = child_pointer(pointer, &index.to_string());
+        rules.push(parse_rule(rule_value, &rule_pointer, seen_ids)?);
+    }
+    Ok(rules)
+}
+
+fn parse_rule(
+    value: &Value,
+    pointer: &str,
+    seen_ids: &mut HashMap<String, String>,
+) -> Result<Rule, PolicyError> {
+    let map = as_object(value, pointer)?;
+    check_known_keys(
+        map,
+        pointer,
+        &[
+            "id",
+            "predicates",
+            "requires_recall",
+            "requires_consult",
+            "outcome",
+        ],
+    )?;
+    let id = parse_id(map, pointer, seen_ids)?;
+    let predicates = match map.get("predicates") {
+        Some(preds) => parse_predicates(preds, &child_pointer(pointer, "predicates"))?,
+        None => Vec::new(),
+    };
+    let requires_recall = optional_bool(map, "requires_recall", pointer)?;
+    let requires_consult = optional_bool(map, "requires_consult", pointer)?;
+    let outcome = parse_outcome(
+        require(map, "outcome", pointer)?,
+        &child_pointer(pointer, "outcome"),
+    )?;
+    Ok(Rule {
+        id,
+        predicates,
+        requires_recall,
+        requires_consult,
+        outcome,
     })
 }
 
-fn parse_interpreters(value: &Value, pointer: &str) -> Result<Vec<Interpreter>, PolicyError> {
+fn parse_predicates(value: &Value, pointer: &str) -> Result<Vec<Predicate>, PolicyError> {
     let array = as_array(value, pointer)?;
-    let mut interpreters = Vec::with_capacity(array.len());
-    for (index, interpreter_value) in array.iter().enumerate() {
-        let interpreter_pointer = child_pointer(pointer, &index.to_string());
-        let map = as_object(interpreter_value, &interpreter_pointer)?;
-        check_known_keys(map, &interpreter_pointer, &["binary", "flag", "body"])?;
-        let binary = require_string(map, "binary", &interpreter_pointer)?;
-        let flag = require_string(map, "flag", &interpreter_pointer)?;
-        let body_str = require_string(map, "body", &interpreter_pointer)?;
-        let body = match body_str.as_str() {
-            "shell" => BodyLanguage::Shell,
-            "foreign" => BodyLanguage::Foreign,
-            other => {
-                return Err(PolicyError::UnknownBodyLanguage {
-                    pointer: child_pointer(&interpreter_pointer, "body"),
-                    language: other.to_string(),
-                });
-            }
-        };
-        interpreters.push(Interpreter { binary, flag, body });
+    let mut predicates = Vec::with_capacity(array.len());
+    for (index, predicate_value) in array.iter().enumerate() {
+        let predicate_pointer = child_pointer(pointer, &index.to_string());
+        predicates.push(parse_predicate(predicate_value, &predicate_pointer)?);
     }
-    Ok(interpreters)
+    Ok(predicates)
 }
 
-fn parse_script_carriers(value: &Value, pointer: &str) -> Result<Vec<ScriptCarrier>, PolicyError> {
-    let array = as_array(value, pointer)?;
-    let mut carriers = Vec::with_capacity(array.len());
-    for (index, carrier_value) in array.iter().enumerate() {
-        let carrier_pointer = child_pointer(pointer, &index.to_string());
-        let map = as_object(carrier_value, &carrier_pointer)?;
-        check_known_keys(map, &carrier_pointer, &["binary"])?;
-        let binary = require_string(map, "binary", &carrier_pointer)?;
-        carriers.push(ScriptCarrier { binary });
+fn parse_predicate(value: &Value, pointer: &str) -> Result<Predicate, PolicyError> {
+    let map = as_object(value, pointer)?;
+    let kind = require_string(map, "kind", pointer)?;
+    let predicate = match kind.as_str() {
+        "field-present" | "field-absent" => {
+            check_known_keys(map, pointer, &["kind", "field"])?;
+            let field = require_string(map, "field", pointer)?;
+            if kind == "field-present" {
+                Predicate::FieldPresent { field }
+            } else {
+                Predicate::FieldAbsent { field }
+            }
+        }
+        "field-equals" => {
+            check_known_keys(map, pointer, &["kind", "field", "any_of", "ignore_case"])?;
+            Predicate::FieldEquals {
+                field: require_string(map, "field", pointer)?,
+                any_of: parse_any_of(map, pointer)?,
+                ignore_case: optional_bool(map, "ignore_case", pointer)?,
+            }
+        }
+        "field-contains" => {
+            check_known_keys(map, pointer, &["kind", "field", "any_of"])?;
+            Predicate::FieldContains {
+                field: require_string(map, "field", pointer)?,
+                any_of: parse_any_of(map, pointer)?,
+            }
+        }
+        "field-ends-with" => {
+            check_known_keys(map, pointer, &["kind", "field", "any_of"])?;
+            Predicate::FieldEndsWith {
+                field: require_string(map, "field", pointer)?,
+                any_of: parse_any_of(map, pointer)?,
+            }
+        }
+        "field-greater-than" => {
+            check_known_keys(map, pointer, &["kind", "field", "value"])?;
+            let value_pointer = child_pointer(pointer, "value");
+            let value =
+                require(map, "value", pointer)?
+                    .as_i64()
+                    .ok_or_else(|| PolicyError::WrongType {
+                        pointer: value_pointer,
+                        expected: "an integer".to_string(),
+                    })?;
+            Predicate::FieldGreaterThan {
+                field: require_string(map, "field", pointer)?,
+                value,
+            }
+        }
+        other => {
+            return Err(PolicyError::UnknownPredicateKind {
+                pointer: child_pointer(pointer, "kind"),
+                kind: other.to_string(),
+            });
+        }
+    };
+    Ok(predicate)
+}
+
+/// A predicate's `any_of` list: one or more non-empty strings. An empty list
+/// would never match and an empty string would match everything, so both are
+/// rejected as the policy errors they are.
+fn parse_any_of(
+    map: &serde_json::Map<String, Value>,
+    pointer: &str,
+) -> Result<Vec<String>, PolicyError> {
+    let any_of_pointer = child_pointer(pointer, "any_of");
+    let values = parse_string_array(require(map, "any_of", pointer)?, &any_of_pointer)?;
+    if values.is_empty() || values.iter().any(String::is_empty) {
+        return Err(PolicyError::WrongType {
+            pointer: any_of_pointer,
+            expected: "a non-empty array of non-empty strings".to_string(),
+        });
     }
-    Ok(carriers)
+    Ok(values)
+}
+
+fn parse_outcome(value: &Value, pointer: &str) -> Result<RuleOutcome, PolicyError> {
+    let map = as_object(value, pointer)?;
+    let kind = require_string(map, "kind", pointer)?;
+    match kind.as_str() {
+        "allow" => {
+            check_known_keys(map, pointer, &["kind", "note"])?;
+            let note = match map.get("note") {
+                Some(note_value) => Some(as_string(note_value, &child_pointer(pointer, "note"))?),
+                None => None,
+            };
+            Ok(RuleOutcome::Allow { note })
+        }
+        "rewrite" => {
+            check_known_keys(map, pointer, &["kind", "target", "reason"])?;
+            let target = require_string(map, "target", pointer)?;
+            let reason = require_string(map, "reason", pointer)?;
+            if target.is_empty() || reason.is_empty() {
+                return Err(PolicyError::IncompleteRewrite {
+                    pointer: root_pointer(pointer),
+                });
+            }
+            Ok(RuleOutcome::Rewrite {
+                target: ManagedTarget::new(target),
+                reason,
+            })
+        }
+        "deny" => {
+            check_known_keys(map, pointer, &["kind", "reason", "instead"])?;
+            let reason = require_string(map, "reason", pointer)?;
+            let instead = require_string(map, "instead", pointer)?;
+            if reason.is_empty() || instead.is_empty() {
+                return Err(PolicyError::IncompleteDeny {
+                    pointer: root_pointer(pointer),
+                });
+            }
+            Ok(RuleOutcome::Deny { reason, instead })
+        }
+        "ask" => {
+            check_known_keys(
+                map,
+                pointer,
+                &["kind", "question", "reason", "needs_operator"],
+            )?;
+            let question = require_string(map, "question", pointer)?;
+            let reason = require_string(map, "reason", pointer)?;
+            if question.is_empty() || reason.is_empty() {
+                return Err(PolicyError::IncompleteAsk {
+                    pointer: root_pointer(pointer),
+                });
+            }
+            let needs_operator = optional_bool(map, "needs_operator", pointer)?;
+            Ok(RuleOutcome::Ask {
+                question,
+                reason,
+                needs_operator,
+            })
+        }
+        other => Err(PolicyError::UnknownDecision {
+            pointer: child_pointer(pointer, "kind"),
+            arm: other.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_a_minimal_bash_family_rule() {
-        let text = r#"{
-            "tools": {
-                "Bash": {
-                    "families": {
-                        "git push": {
-                            "rules": [
-                                {
-                                    "id": "git-push-force",
-                                    "predicates": [{"kind": "arg-present", "arg": "--force"}],
-                                    "outcome": {"kind": "deny", "reason": "force push", "instead": "git push"}
-                                }
-                            ]
-                        }
-                    }
-                }
-            }
-        }"#;
-        let policy = parse_policy(text).expect("valid policy");
-        assert!(!policy.is_empty());
-        let ToolRules::Bash { families } = &policy.tools[&ToolKind::Bash] else {
-            panic!("expected Bash rules");
-        };
-        let family = &families["git push"];
-        assert_eq!(family.rules.len(), 1);
-        assert_eq!(family.rules[0].id, "git-push-force");
-        assert_eq!(
-            family.rules[0].predicates,
-            vec![Predicate::ArgPresent("--force".to_string())]
-        );
+    fn parse(text: &str) -> Result<Policy, PolicyError> {
+        parse_policy(text)
     }
 
     #[test]
-    fn empty_policy_string_object_is_empty() {
-        let policy = parse_policy("{}").expect("valid");
-        assert!(policy.is_empty());
+    fn an_empty_object_is_an_empty_policy() {
+        assert_eq!(parse("{}").expect("parses"), Policy::default());
     }
 
     #[test]
-    fn a_policy_with_only_sym_jobs_is_empty() {
-        let text = r#"{"sym_jobs": [{"id": "find-content", "sym_command": "legion sym find-content", "interpreter_patterns": ["rglob"]}]}"#;
-        let policy = parse_policy(text).expect("valid");
-        assert!(policy.is_empty());
+    fn the_four_lists_and_tools_parse() {
+        let policy = parse(
+            r#"{
+            "proxy": ["git", "gh"],
+            "never_run": [{"id": "n1", "names": ["sqlite3"], "reason": "raw store access",
+                "predicates": [{"kind": "operand", "equals": ["legion.db"]}]}],
+            "ask": [{"id": "a1", "names": ["curl"], "reason": "reaches the network"}],
+            "power_switches": [{"id": "p1", "names": ["legion"], "reason": "forced push",
+                "predicates": [{"kind": "operand", "equals": ["push"]},
+                               {"kind": "flag", "short": ["f"], "long": ["force"]}]}],
+            "tools": {"WebSearch": {"rules": [{"id": "w1", "outcome": {"kind": "allow"}}]}}
+        }"#,
+        )
+        .expect("parses");
+        assert_eq!(policy.proxy, vec!["git".to_string(), "gh".to_string()]);
+        assert_eq!(policy.never_run[0].id, "n1");
+        assert_eq!(policy.never_run[0].reason, "raw store access");
+        assert_eq!(policy.ask[0].names, vec!["curl".to_string()]);
+        assert_eq!(policy.power_switches[0].predicates.len(), 2);
+        assert_eq!(policy.tools[&ToolKind::WebSearch][0].id, "w1");
     }
 
     #[test]
-    fn a_tool_with_no_families_is_empty() {
-        let policy = parse_policy(r#"{"tools": {"Bash": {"families": {}}}}"#).expect("valid");
-        assert!(policy.is_empty());
-    }
-
-    #[test]
-    fn a_family_with_no_rules_is_empty() {
-        let policy = parse_policy(r#"{"tools": {"Bash": {"families": {"gh": {"rules": []}}}}}"#)
-            .expect("valid");
-        assert!(policy.is_empty());
-    }
-
-    #[test]
-    fn unknown_top_level_field_is_rejected_with_its_pointer() {
-        let err = parse_policy(r#"{"toolz": {}}"#).expect_err("unknown field");
-        assert_eq!(
-            err,
-            PolicyError::UnknownField {
-                pointer: "/toolz".to_string(),
-                field: "toolz".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn the_route_settings_key_is_accepted_and_not_interpreted() {
-        // `route` carries the adapter's settings (#1229); the policy parser
-        // accepts the key so one file holds both, and reads nothing from it.
-        let text = r#"{"route": {"deadline_ms": 250},
-            "tools": {"Bash": {"families": {"gh": {"rules": [
-                {"id": "x", "outcome": {"kind": "allow"}}
-            ]}}}}}"#;
-        let policy = parse_policy(text).expect("route key is a known root key");
-        assert!(!policy.is_empty());
-        assert_eq!(
-            policy,
-            parse_policy(&text.replacen(r#""route": {"deadline_ms": 250},"#, "", 1))
-                .expect("valid")
-        );
-    }
-
-    #[test]
-    fn unknown_field_inside_a_rule_names_its_pointer() {
-        // A typo in `requires_recall` would otherwise drop the lookup
-        // requirement and fail the rule open; it must error instead.
-        let text = r#"{
-            "tools": {"Bash": {"families": {"gh": {"rules": [
-                {"id": "x", "outcome": {"kind": "allow"}, "requires_recal": true}
-            ]}}}}
-        }"#;
-        let err = parse_policy(text).expect_err("typo'd field must error");
-        assert_eq!(
-            err,
-            PolicyError::UnknownField {
-                pointer: "/tools/Bash/families/gh/rules/0/requires_recal".to_string(),
-                field: "requires_recal".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn unknown_tool_kind_is_rejected() {
-        let err = parse_policy(r#"{"tools": {"Shell": {"families": {}}}}"#).expect_err("bad kind");
-        assert_eq!(
-            err,
-            PolicyError::UnknownToolKind {
-                pointer: "/tools/Shell".to_string(),
-                kind: "Shell".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn unknown_decision_arm_is_rejected() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"id": "x", "outcome": {"kind": "block"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("bad arm");
-        assert_eq!(
-            err,
-            PolicyError::UnknownDecision {
-                pointer: "/tools/Bash/families/gh/rules/0/outcome/kind".to_string(),
-                arm: "block".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn unknown_proxy_reason_is_rejected() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"id": "x", "outcome": {"kind": "proxy", "reason": "network"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("bad proxy reason");
-        assert_eq!(
-            err,
-            PolicyError::UnknownProxyReason {
-                pointer: "/tools/Bash/families/gh/rules/0/outcome/reason".to_string(),
-                reason: "network".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn ask_rule_without_question_is_rejected() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"id": "x", "outcome": {"kind": "ask", "question": "", "reason": "why"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("incomplete ask");
-        assert_eq!(
-            err,
-            PolicyError::IncompleteAsk {
-                pointer: "/tools/Bash/families/gh/rules/0/outcome".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn needs_operator_on_non_ask_outcome_is_rejected_as_unknown_field() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"id": "x", "outcome": {"kind": "allow", "needs_operator": true}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("needs_operator only valid on ask");
-        assert_eq!(
-            err,
-            PolicyError::UnknownField {
-                pointer: "/tools/Bash/families/gh/rules/0/outcome/needs_operator".to_string(),
-                field: "needs_operator".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn sym_job_without_command_is_rejected() {
-        let text = r#"{"sym_jobs": [{"id": "x", "sym_command": ""}]}"#;
-        let err = parse_policy(text).expect_err("missing sym command");
-        assert_eq!(
-            err,
-            PolicyError::SymJobMissingCommand {
-                pointer: "/sym_jobs/0".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn rule_without_id_is_rejected() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"outcome": {"kind": "allow"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("missing id");
-        assert_eq!(
-            err,
-            PolicyError::MissingField {
-                pointer: "/tools/Bash/families/gh/rules/0".to_string(),
-                field: "id".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn duplicate_rule_id_across_families_is_rejected() {
-        let text = r#"{"tools": {"Bash": {"families": {
-            "gh": {"rules": [{"id": "dup", "outcome": {"kind": "allow"}}]},
-            "git push": {"rules": [{"id": "dup", "outcome": {"kind": "allow"}}]}
-        }}}}"#;
-        let err = parse_policy(text).expect_err("duplicate id");
-        match err {
-            PolicyError::DuplicateRuleId { id, first, .. } => {
-                assert_eq!(id, "dup");
-                assert_eq!(first, "/tools/Bash/families/gh/rules/0/id");
-            }
-            other => panic!("expected DuplicateRuleId, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sym_action_referencing_unknown_job_is_rejected() {
-        let text = r#"{"tools": {"Bash": {"families": {"grep": {"rules": [
-            {"id": "x", "outcome": {"kind": "sym", "job": "nope"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("dangling sym ref");
-        assert_eq!(
-            err,
-            PolicyError::UnknownSymJobRef {
-                pointer: "/tools/Bash/families/grep/rules/0/outcome/job".to_string(),
-                job: "nope".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn unknown_predicate_kind_is_rejected_with_a_dedicated_error() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"id": "x", "predicates": [{"kind": "arg-matches", "arg": "y"}],
-             "outcome": {"kind": "allow"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("bad predicate kind");
-        assert_eq!(
-            err,
-            PolicyError::UnknownPredicateKind {
-                pointer: "/tools/Bash/families/gh/rules/0/predicates/0/kind".to_string(),
-                kind: "arg-matches".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn every_tool_field_kind_parses_as_a_fields_tool() {
-        // The ten tool kinds the tool-field hooks are registered under
-        // (hooks.json) all parse, each as an ordered Fields rule list.
-        let text = r#"{"tools": {
-            "Grep": {"rules": []}, "Glob": {"rules": []}, "Read": {"rules": []},
-            "Write": {"rules": []}, "Edit": {"rules": []}, "MultiEdit": {"rules": []},
-            "Agent": {"rules": []}, "Task": {"rules": []},
-            "WebFetch": {"rules": []}, "WebSearch": {"rules": []}
-        }}"#;
-        let policy = parse_policy(text).expect("valid");
-        for kind in [
-            ToolKind::Grep,
-            ToolKind::Glob,
-            ToolKind::Read,
-            ToolKind::Write,
-            ToolKind::Edit,
-            ToolKind::MultiEdit,
-            ToolKind::Agent,
-            ToolKind::Task,
-            ToolKind::WebFetch,
-            ToolKind::WebSearch,
+    fn any_other_top_level_key_fails_to_parse() {
+        for key in [
+            "route",
+            "no_go",
+            "sym_jobs",
+            "wrappers",
+            "interpreters",
+            "script_carriers",
+            "global_options",
         ] {
+            let text = format!("{{\"{key}\": []}}");
             assert_eq!(
-                policy.tools.get(&kind),
-                Some(&ToolRules::Fields { rules: Vec::new() }),
-                "{kind:?} must parse as a Fields tool"
-            );
-        }
-    }
-
-    #[test]
-    fn every_field_predicate_kind_parses_under_a_fields_tool() {
-        let text = r#"{"tools": {"Read": {"rules": [
-            {"id": "r", "predicates": [
-                {"kind": "field-present", "field": "file_path"},
-                {"kind": "field-absent", "field": "limit"},
-                {"kind": "field-equals", "field": "a", "any_of": ["x", "y"], "ignore_case": true},
-                {"kind": "field-contains", "field": "b", "any_of": ["/memory/"]},
-                {"kind": "field-ends-with", "field": "c", "any_of": [".rs"]},
-                {"kind": "field-greater-than", "field": "limit", "value": 200}
-            ], "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let policy = parse_policy(text).expect("valid");
-        let ToolRules::Fields { rules } = &policy.tools[&ToolKind::Read] else {
-            panic!("expected Fields rules");
-        };
-        assert_eq!(
-            rules[0].predicates,
-            vec![
-                Predicate::FieldPresent {
-                    field: "file_path".to_string()
-                },
-                Predicate::FieldAbsent {
-                    field: "limit".to_string()
-                },
-                Predicate::FieldEquals {
-                    field: "a".to_string(),
-                    any_of: vec!["x".to_string(), "y".to_string()],
-                    ignore_case: true,
-                },
-                Predicate::FieldContains {
-                    field: "b".to_string(),
-                    any_of: vec!["/memory/".to_string()],
-                },
-                Predicate::FieldEndsWith {
-                    field: "c".to_string(),
-                    any_of: vec![".rs".to_string()],
-                },
-                Predicate::FieldGreaterThan {
-                    field: "limit".to_string(),
-                    value: 200,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn field_equals_ignore_case_defaults_to_false() {
-        let text = r#"{"tools": {"Agent": {"rules": [
-            {"id": "r", "predicates": [{"kind": "field-equals", "field": "a", "any_of": ["x"]}],
-             "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let policy = parse_policy(text).expect("valid");
-        let ToolRules::Fields { rules } = &policy.tools[&ToolKind::Agent] else {
-            panic!("expected Fields rules");
-        };
-        assert_eq!(
-            rules[0].predicates,
-            vec![Predicate::FieldEquals {
-                field: "a".to_string(),
-                any_of: vec!["x".to_string()],
-                ignore_case: false,
-            }]
-        );
-    }
-
-    #[test]
-    fn a_field_predicate_under_bash_is_rejected() {
-        // A field predicate has no Bash argument to resolve against; a rule
-        // carrying one would never fire, so it is a policy error.
-        let text = r#"{"tools": {"Bash": {"families": {"gh": {"rules": [
-            {"id": "x", "predicates": [{"kind": "field-present", "field": "command"}],
-             "outcome": {"kind": "allow"}}
-        ]}}}}}"#;
-        let err = parse_policy(text).expect_err("field predicate under Bash");
-        assert_eq!(
-            err,
-            PolicyError::PredicateNotApplicable {
-                pointer: "/tools/Bash/families/gh/rules/0/predicates/0/kind".to_string(),
-                kind: "field-present".to_string(),
-                tool: "Bash".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn an_arg_predicate_under_a_fields_tool_is_rejected() {
-        let text = r#"{"tools": {"Grep": {"rules": [
-            {"id": "x", "predicates": [{"kind": "arg-present", "arg": "secret"}],
-             "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let err = parse_policy(text).expect_err("arg predicate under a Fields tool");
-        assert_eq!(
-            err,
-            PolicyError::PredicateNotApplicable {
-                pointer: "/tools/Grep/rules/0/predicates/0/kind".to_string(),
-                kind: "arg-present".to_string(),
-                tool: "Grep".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn an_empty_any_of_list_is_rejected() {
-        let text = r#"{"tools": {"Write": {"rules": [
-            {"id": "x", "predicates": [{"kind": "field-contains", "field": "content", "any_of": []}],
-             "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let err = parse_policy(text).expect_err("empty any_of");
-        assert_eq!(
-            err,
-            PolicyError::WrongType {
-                pointer: "/tools/Write/rules/0/predicates/0/any_of".to_string(),
-                expected: "a non-empty array of non-empty strings".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn an_empty_string_in_any_of_is_rejected() {
-        // `ends_with("")` holds for every string: an empty suffix would turn a
-        // narrow deny into a deny of every call.
-        let text = r#"{"tools": {"Read": {"rules": [
-            {"id": "x", "predicates": [{"kind": "field-ends-with", "field": "file_path", "any_of": [".rs", ""]}],
-             "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let err = parse_policy(text).expect_err("empty string in any_of");
-        assert!(matches!(err, PolicyError::WrongType { .. }), "got {err:?}");
-    }
-
-    #[test]
-    fn a_non_integer_greater_than_value_is_rejected() {
-        let text = r#"{"tools": {"Read": {"rules": [
-            {"id": "x", "predicates": [{"kind": "field-greater-than", "field": "limit", "value": "200"}],
-             "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let err = parse_policy(text).expect_err("string value");
-        assert_eq!(
-            err,
-            PolicyError::WrongType {
-                pointer: "/tools/Read/rules/0/predicates/0/value".to_string(),
-                expected: "an integer".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn an_unknown_key_on_a_field_predicate_names_its_pointer() {
-        // `ignore_case` is only valid on field-equals; on field-contains it
-        // would be a silently ignored typo otherwise.
-        let text = r#"{"tools": {"Write": {"rules": [
-            {"id": "x", "predicates": [{"kind": "field-contains", "field": "content", "any_of": ["a"], "ignore_case": true}],
-             "outcome": {"kind": "allow"}}
-        ]}}}"#;
-        let err = parse_policy(text).expect_err("unknown key");
-        assert_eq!(
-            err,
-            PolicyError::UnknownField {
-                pointer: "/tools/Write/rules/0/predicates/0/ignore_case".to_string(),
-                field: "ignore_case".to_string(),
-            }
-        );
-    }
-
-    // -- rewrite specs (FR-CMD-008 rev 3) -------------------------------------
-
-    fn bash_rewrite_outcome(text: &str, family: &str) -> RuleOutcome {
-        let policy = parse_policy(text).expect("valid");
-        let ToolRules::Bash { families } = &policy.tools[&ToolKind::Bash] else {
-            panic!("expected Bash rules");
-        };
-        families[family].rules[0].outcome.clone()
-    }
-
-    #[test]
-    fn a_bash_rewrite_with_no_exceptions_is_the_bare_prefix() {
-        // The target's own definition judges the words, so a rewrite needs
-        // no argument declaration at all.
-        let text = r#"{"tools": {"Bash": {"families": {"git push": {"rules": [
-            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion push --repo {repo}", "reason": "r"}}
-        ]}}}}}"#;
-        assert_eq!(
-            bash_rewrite_outcome(text, "git push"),
-            RuleOutcome::Rewrite {
-                spec: RewriteSpec {
-                    target: ManagedTarget::new("legion push --repo {repo}"),
-                    positional: Vec::new(),
-                    reshape: BTreeMap::new(),
-                    deny_flags: Vec::new(),
-                },
-                reason: "r".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_bash_rewrite_parses_its_exceptions() {
-        let text = r#"{"tools": {"Bash": {"families": {"gh issue view": {"rules": [
-            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion issue view --repo {repo}",
-             "reason": "r", "positional": ["--number"], "reshape": {"--repo": "repo_name"},
-             "deny_flags": ["--json"]}}
-        ]}}}}}"#;
-        assert_eq!(
-            bash_rewrite_outcome(text, "gh issue view"),
-            RuleOutcome::Rewrite {
-                spec: RewriteSpec {
-                    target: ManagedTarget::new("legion issue view --repo {repo}"),
-                    positional: vec!["--number".to_string()],
-                    reshape: BTreeMap::from([("--repo".to_string(), Reshape::RepoName)]),
-                    deny_flags: vec!["--json".to_string()],
-                },
-                reason: "r".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_per_flag_translatable_list_is_no_longer_a_policy_key() {
-        // FR-CMD-008 rev 3: the policy declares no per-flag argument lists.
-        // A leftover `translatable` (or its `otherwise`) is an unknown field
-        // at its pointer, never a silently ignored declaration.
-        for key in [r#""translatable": {}"#, r#""otherwise": {"kind": "deny"}"#] {
-            let text = format!(
-                r#"{{"tools": {{"Bash": {{"families": {{"gh": {{"rules": [
-                {{"id": "x", "outcome": {{"kind": "rewrite", "target": "t", "reason": "r", {key}}}}}
-            ]}}}}}}}}}}"#
-            );
-            let field = if key.contains("translatable") {
-                "translatable"
-            } else {
-                "otherwise"
-            };
-            assert_eq!(
-                parse_policy(&text).expect_err("not a policy key"),
-                PolicyError::UnknownField {
-                    pointer: format!("/tools/Bash/families/gh/rules/0/outcome/{field}"),
-                    field: field.to_string(),
-                },
+                parse(&text),
+                Err(PolicyError::UnknownField {
+                    pointer: format!("/{key}"),
+                    field: key.to_string(),
+                }),
                 "{key}"
             );
         }
     }
 
     #[test]
-    fn a_malformed_rewrite_exception_names_its_pointer() {
-        let with = |exceptions: &str| {
-            format!(
-                r#"{{"tools": {{"Bash": {{"families": {{"gh": {{"rules": [
-                {{"id": "x", "outcome": {{"kind": "rewrite", "target": "t", "reason": "r", {exceptions}}}}}
-            ]}}}}}}}}}}"#
-            )
-        };
-        let base = "/tools/Bash/families/gh/rules/0/outcome";
-        let not_a_flag = |pointer: String| PolicyError::WrongType {
-            pointer,
-            expected: "an option word starting with '-'".to_string(),
-        };
-        assert_eq!(
-            parse_policy(&with(r#""positional": ["--number", "number"]"#)).expect_err("word"),
-            not_a_flag(format!("{base}/positional/1"))
-        );
-        assert_eq!(
-            parse_policy(&with(r#""deny_flags": ["-"]"#)).expect_err("bare dash"),
-            not_a_flag(format!("{base}/deny_flags/0"))
-        );
-        assert_eq!(
-            parse_policy(&with(r#""deny_flags": ["--"]"#)).expect_err("end of options"),
-            not_a_flag(format!("{base}/deny_flags/0"))
-        );
-        assert_eq!(
-            parse_policy(&with(r#""reshape": {"repo": "repo_name"}"#)).expect_err("key"),
-            not_a_flag(format!("{base}/reshape/repo"))
-        );
-        assert_eq!(
-            parse_policy(&with(r#""reshape": {"--repo": "lowercase"}"#)).expect_err("transform"),
-            PolicyError::WrongType {
-                pointer: format!("{base}/reshape/--repo"),
-                expected: "a reshape transform: 'repo_name'".to_string(),
-            }
-        );
-        assert_eq!(
-            parse_policy(&with(r#""reshape": ["--repo"]"#)).expect_err("not an object"),
-            PolicyError::WrongType {
-                pointer: format!("{base}/reshape"),
-                expected: "an object".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_fields_rewrite_carries_no_exceptions_and_rejects_one() {
-        // Operator, 2026-09-23: a Fields rewrite is lossless by construction,
-        // so it needs no declaration -- and a declaration there is a key that
-        // never takes effect.
-        let ok = r#"{"tools": {"Agent": {"rules": [
-            {"id": "x", "outcome": {"kind": "rewrite", "target": "legion:legion-explore", "reason": "r"}}
-        ]}}}"#;
-        let policy = parse_policy(ok).expect("a Fields rewrite needs no exceptions");
-        let ToolRules::Fields { rules } = &policy.tools[&ToolKind::Agent] else {
-            panic!("expected Fields rules");
-        };
-        assert_eq!(
-            rules[0].outcome,
-            RuleOutcome::Rewrite {
-                spec: RewriteSpec {
-                    target: ManagedTarget::new("legion:legion-explore"),
-                    positional: Vec::new(),
-                    reshape: BTreeMap::new(),
-                    deny_flags: Vec::new(),
-                },
-                reason: "r".to_string(),
-            }
-        );
-
-        let declared = r#"{"tools": {"Task": {"rules": [
-            {"id": "x", "outcome": {"kind": "rewrite", "target": "t", "reason": "r", "positional": ["--number"]}}
-        ]}}}"#;
-        assert_eq!(
-            parse_policy(declared).expect_err("an exception under a Fields tool"),
-            PolicyError::UnknownField {
-                pointer: "/tools/Task/rules/0/outcome/positional".to_string(),
-                field: "positional".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn the_repo_name_reshape_reads_an_owner_slash_name_slug() {
-        assert_eq!(
-            Reshape::RepoName.apply("runlegion/legion").as_deref(),
-            Some("legion")
-        );
-        // A bare name is already legion's spelling.
-        assert_eq!(Reshape::RepoName.apply("legion").as_deref(), Some("legion"));
-        for unreadable in ["", "/legion", "runlegion/", "a/b/c", "host/a/b"] {
-            assert_eq!(Reshape::RepoName.apply(unreadable), None, "{unreadable:?}");
-        }
-    }
-
-    #[test]
-    fn empty_sym_job_id_is_rejected() {
-        let text = r#"{"sym_jobs": [{"id": "", "sym_command": "legion sym x"}]}"#;
-        let err = parse_policy(text).expect_err("empty sym job id");
+    fn a_bash_key_under_tools_fails_to_parse() {
+        let err = parse(r#"{"tools": {"Bash": {"rules": []}}}"#).expect_err("Bash is not a tool");
         assert_eq!(
             err,
-            PolicyError::EmptySymJobId {
-                pointer: "/sym_jobs/0/id".to_string(),
+            PolicyError::UnknownToolKind {
+                pointer: "/tools/Bash".to_string(),
+                kind: "Bash".to_string(),
             }
         );
     }
 
     #[test]
-    fn a_sym_job_reads_pipe_filter_and_defaults_it_to_false() {
-        let text = r#"{"sym_jobs": [
-            {"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": true},
-            {"id": "file", "sym_command": "legion sym etc find-file"},
-            {"id": "tree", "sym_command": "legion sym tree", "pipe_filter": false}
-        ]}"#;
-        let policy = parse_policy(text).expect("valid policy");
-        assert!(policy.sym_job("content").expect("content").pipe_filter);
-        assert!(!policy.sym_job("file").expect("file").pipe_filter);
-        assert!(!policy.sym_job("tree").expect("tree").pipe_filter);
-    }
-
-    #[test]
-    fn a_non_boolean_pipe_filter_is_rejected() {
-        let text = r#"{"sym_jobs": [
-            {"id": "content", "sym_command": "legion sym etc find-content", "pipe_filter": "yes"}
-        ]}"#;
-        let err = parse_policy(text).expect_err("string pipe_filter");
+    fn an_entry_without_a_name_or_a_reason_fails_to_parse() {
         assert_eq!(
-            err,
-            PolicyError::WrongType {
-                pointer: "/sym_jobs/0/pipe_filter".to_string(),
-                expected: "a boolean".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn an_id_shared_between_a_rule_and_a_sym_job_is_rejected() {
-        // Rule ids and sym-job ids share one namespace (Deciding.id carries
-        // either), so a collision is ambiguous and must be rejected.
-        let text = r#"{
-            "sym_jobs": [{"id": "dup", "sym_command": "legion sym x", "interpreter_patterns": ["p"]}],
-            "tools": {"Bash": {"families": {"gh": {"rules": [
-                {"id": "dup", "outcome": {"kind": "allow"}}
-            ]}}}}
-        }"#;
-        let err = parse_policy(text).expect_err("cross-namespace duplicate id");
-        match err {
-            PolicyError::DuplicateRuleId { id, first, .. } => {
-                assert_eq!(id, "dup");
-                assert_eq!(first, "/sym_jobs/0/id");
-            }
-            other => panic!("expected DuplicateRuleId, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn interpreter_body_language_is_validated() {
-        let text = r#"{"interpreters": [{"binary": "sh", "flag": "-c", "body": "elvish"}]}"#;
-        let err = parse_policy(text).expect_err("bad body language");
-        assert_eq!(
-            err,
-            PolicyError::UnknownBodyLanguage {
-                pointer: "/interpreters/0/body".to_string(),
-                language: "elvish".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn wrappers_and_interpreters_and_carriers_parse() {
-        let text = r#"{
-            "wrappers": [
-                {"binary": "env"},
-                {"binary": "pnpm", "required_subcommand": "exec"}
-            ],
-            "interpreters": [
-                {"binary": "sh", "flag": "-c", "body": "shell"},
-                {"binary": "python3", "flag": "-c", "body": "foreign"}
-            ],
-            "script_carriers": [{"binary": "bash"}]
-        }"#;
-        let policy = parse_policy(text).expect("valid");
-        assert_eq!(policy.wrappers.len(), 2);
-        assert_eq!(
-            policy.matching_wrapper("pnpm", &["exec".to_string(), "eslint".to_string()]),
-            Some(&Wrapper {
-                binary: "pnpm".to_string(),
-                required_subcommand: Some("exec".to_string()),
-                ..Wrapper::default()
+            parse(r#"{"ask": [{"id": "a", "reason": "r"}]}"#),
+            Err(PolicyError::EntryWithoutName {
+                pointer: "/ask/0".to_string()
             })
         );
-        assert!(
-            policy
-                .matching_wrapper("pnpm", &["grep".to_string()])
-                .is_none()
-        );
         assert_eq!(
-            policy.matching_interpreter("sh").map(|i| i.body),
-            Some(BodyLanguage::Shell)
-        );
-        assert!(policy.matching_script_carrier("bash").is_some());
-    }
-
-    fn words(line: &str) -> Vec<String> {
-        line.split_whitespace().map(str::to_string).collect()
-    }
-
-    #[test]
-    fn wrapper_arguments_parse_from_the_declaration() {
-        let text = r#"{"wrappers": [{"binary": "timeout", "flags": ["-v"],
-            "value_options": ["-s"], "operands": 1, "selectors": ["workspace"]}]}"#;
-        let policy = parse_policy(text).expect("valid");
-        assert_eq!(
-            policy.wrappers[0],
-            Wrapper {
-                binary: "timeout".to_string(),
-                required_subcommand: None,
-                flags: vec!["-v".to_string()],
-                value_options: vec!["-s".to_string()],
-                operands: 1,
-                selectors: vec!["workspace".to_string()],
-            }
-        );
-    }
-
-    #[test]
-    fn wrapper_arguments_of_the_wrong_type_are_rejected() {
-        for (text, pointer, expected) in [
-            (
-                r#"{"wrappers": [{"binary": "timeout", "operands": -1}]}"#,
-                "/wrappers/0/operands",
-                "a non-negative integer",
-            ),
-            (
-                r#"{"wrappers": [{"binary": "timeout", "operands": "1"}]}"#,
-                "/wrappers/0/operands",
-                "a non-negative integer",
-            ),
-            (
-                r#"{"wrappers": [{"binary": "sudo", "flags": "-E"}]}"#,
-                "/wrappers/0/flags",
-                "an array",
-            ),
-            (
-                r#"{"wrappers": [{"binary": "sudo", "value_options": [1]}]}"#,
-                "/wrappers/0/value_options/0",
-                "a string",
-            ),
-            (
-                r#"{"wrappers": [{"binary": "yarn", "selectors": "workspace"}]}"#,
-                "/wrappers/0/selectors",
-                "an array",
-            ),
-        ] {
-            assert_eq!(
-                parse_policy(text).expect_err("wrong type"),
-                PolicyError::WrongType {
-                    pointer: pointer.to_string(),
-                    expected: expected.to_string(),
-                },
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn payload_start_consumes_the_declared_words_getopt_style() {
-        let timeout = Wrapper {
-            binary: "timeout".to_string(),
-            flags: vec!["-v".to_string(), "--foreground".to_string()],
-            value_options: vec!["-s".to_string(), "--signal".to_string()],
-            operands: 1,
-            ..Wrapper::default()
-        };
-        for (args, start) in [
-            ("5 cmd", 1),
-            ("-s KILL 5 cmd", 3),
-            ("-sKILL 5 cmd", 2),
-            ("--signal=KILL 5 cmd", 2),
-            ("--signal KILL --foreground 5 cmd", 4),
-            ("-vs KILL 5 cmd", 3),
-            ("-- 5 cmd", 2),
-            // Options stop at the first operand: `-v` here is the command's.
-            ("5 cmd -v", 1),
-            // Consumed to the end: the wrapper wraps no command.
-            ("5", 1),
-        ] {
-            assert_eq!(timeout.payload_start(&words(args)), Some(start), "{args}");
-        }
-        for args in [
-            "",
-            "-s",
-            "-x 5 cmd",
-            "--bogus 5 cmd",
-            "--foreground=1 5 cmd",
-            "-vx 5",
-        ] {
-            assert_eq!(timeout.payload_start(&words(args)), None, "{args}");
-        }
-    }
-
-    #[test]
-    fn payload_start_skips_the_required_subcommand_and_reads_a_lone_dash_by_declaration() {
-        let pnpm_exec = Wrapper {
-            binary: "pnpm".to_string(),
-            required_subcommand: Some("exec".to_string()),
-            flags: vec!["-r".to_string()],
-            value_options: vec!["-C".to_string()],
-            ..Wrapper::default()
-        };
-        // A runner's options precede its subcommand.
-        for (args, start) in [
-            ("exec eslint", 1),
-            ("-r exec eslint", 2),
-            ("-C pkg -r exec eslint", 4),
-            ("exec -- eslint", 2),
-        ] {
-            assert!(pnpm_exec.wraps(&words(args)), "{args}");
-            assert_eq!(pnpm_exec.payload_start(&words(args)), Some(start), "{args}");
-        }
-        // Not the runner: the subcommand is not the word after the options.
-        for args in ["grep", "-r install", "run exec"] {
-            assert!(!pnpm_exec.wraps(&words(args)), "{args}");
-        }
-        // A shape the declaration does not model before the subcommand -- an
-        // undeclared option, a `--` -- is claimed, then refused.
-        for args in [
-            "--bogus exec eslint",
-            "--bogus val exec eslint",
-            "-- exec eslint",
-            "-r -- exec eslint",
-        ] {
-            assert!(pnpm_exec.wraps(&words(args)), "{args}");
-            assert_eq!(pnpm_exec.payload_start(&words(args)), None, "{args}");
-        }
-        // The subcommand word as another command's operand stays ordinary.
-        for args in ["-C pkg run exec", "-- run exec"] {
-            assert!(!pnpm_exec.wraps(&words(args)), "{args}");
-        }
-
-        let env = Wrapper {
-            binary: "env".to_string(),
-            flags: vec!["-".to_string()],
-            ..Wrapper::default()
-        };
-        assert_eq!(env.payload_start(&words("- grep foo")), Some(1));
-        // Undeclared, a lone `-` is an operand, not an option.
-        assert_eq!(Wrapper::default().payload_start(&words("- grep")), Some(0));
-    }
-
-    #[test]
-    fn global_options_parse_from_the_declaration() {
-        let text = r#"{"global_options": [{"binary": "git", "flags": ["--no-pager"],
-            "value_options": ["-C"]}]}"#;
-        let policy = parse_policy(text).expect("valid");
-        assert_eq!(
-            policy.global_options,
-            vec![GlobalOptions {
-                binary: "git".to_string(),
-                flags: vec!["--no-pager".to_string()],
-                value_options: vec!["-C".to_string()],
-                inline_alias: None,
-            }]
-        );
-        // Declarations alone route nothing, like wrappers.
-        assert!(policy.is_empty());
-    }
-
-    #[test]
-    fn an_inline_alias_parses_from_its_global_options_declaration() {
-        let text = r#"{"global_options": [{"binary": "git", "value_options": ["-c"],
-            "inline_alias": {"options": ["-c"], "prefix": "alias."}}]}"#;
-        let policy = parse_policy(text).expect("valid");
-        assert_eq!(
-            policy.global_options[0].inline_alias,
-            Some(InlineAlias {
-                options: vec!["-c".to_string()],
-                prefix: "alias.".to_string(),
+            parse(r#"{"ask": [{"id": "a", "names": ["curl"], "reason": ""}]}"#),
+            Err(PolicyError::EntryWithoutReason {
+                pointer: "/ask/0".to_string()
             })
         );
+        assert!(matches!(
+            parse(r#"{"ask": [{"id": "a", "names": ["curl"]}]}"#),
+            Err(PolicyError::MissingField { .. })
+        ));
     }
 
     #[test]
-    fn an_inline_alias_of_the_wrong_shape_is_rejected_with_its_pointer() {
-        let declaration = |inline_alias: &str| {
-            format!(
-                r#"{{"global_options": [{{"binary": "git", "inline_alias": {inline_alias}}}]}}"#
-            )
-        };
-        assert_eq!(
-            parse_policy(&declaration(
-                r#"{"options": ["-c"], "prefix": "alias.", "prefixes": []}"#
-            ))
-            .expect_err("unknown field"),
-            PolicyError::UnknownField {
-                pointer: "/global_options/0/inline_alias/prefixes".to_string(),
-                field: "prefixes".to_string(),
-            }
-        );
-        assert_eq!(
-            parse_policy(&declaration(r#"{"options": ["-c"]}"#)).expect_err("missing prefix"),
-            PolicyError::MissingField {
-                pointer: "/global_options/0/inline_alias".to_string(),
-                field: "prefix".to_string(),
-            }
-        );
-        for (inline_alias, pointer, expected) in [
-            (r#"[]"#, "/global_options/0/inline_alias", "an object"),
-            (
-                r#"{"options": "-c", "prefix": "alias."}"#,
-                "/global_options/0/inline_alias/options",
-                "an array",
-            ),
-            (
-                r#"{"options": ["-c"], "prefix": 1}"#,
-                "/global_options/0/inline_alias/prefix",
-                "a string",
-            ),
-        ] {
-            assert_eq!(
-                parse_policy(&declaration(inline_alias)).expect_err("wrong type"),
-                PolicyError::WrongType {
-                    pointer: pointer.to_string(),
-                    expected: expected.to_string(),
-                },
-                "{inline_alias}"
+    fn an_empty_proxy_name_fails_to_parse() {
+        assert!(matches!(
+            parse(r#"{"proxy": ["git", ""]}"#),
+            Err(PolicyError::WrongType { .. })
+        ));
+    }
+
+    #[test]
+    fn ids_are_unique_across_every_list_and_rule() {
+        let err = parse(
+            r#"{"ask": [{"id": "x", "names": ["curl"], "reason": "r"}],
+                "tools": {"WebSearch": {"rules": [{"id": "x", "outcome": {"kind": "allow"}}]}}}"#,
+        )
+        .expect_err("duplicate id");
+        assert!(matches!(err, PolicyError::DuplicateRuleId { .. }));
+    }
+
+    #[test]
+    fn a_sym_or_proxy_outcome_is_not_a_decision_arm() {
+        for kind in ["sym", "proxy"] {
+            let text = format!(
+                r#"{{"tools": {{"Grep": {{"rules": [{{"id": "g", "outcome": {{"kind": "{kind}"}}}}]}}}}}}"#
+            );
+            assert!(
+                matches!(parse(&text), Err(PolicyError::UnknownDecision { .. })),
+                "{kind}"
             );
         }
     }
 
     #[test]
-    fn inline_alias_reading_follows_git_definition_rules() {
-        let git = GlobalOptions {
-            binary: "git".to_string(),
-            flags: vec!["-p".to_string()],
-            value_options: vec!["-c".to_string(), "--config-env".to_string()],
-            inline_alias: Some(InlineAlias {
-                options: vec!["-c".to_string()],
-                prefix: "alias.".to_string(),
-            }),
-        };
-        let read_args = |args: &[String]| {
-            let start = git.subcommand_start(args).expect("declared options");
-            git.inline_alias_reading(args, start)
-        };
-        let read = |args: &str| read_args(&words(args));
-        assert_eq!(
-            read("-c alias.p=push p origin"),
-            AliasReading::Expanded {
-                args: words("-c alias.p=push push origin"),
-                start: 2
-            }
-        );
-        // Several words; the alias's own option is read before its subcommand.
-        let several: Vec<String> = vec!["-c".into(), "alias.p=-p push  -u".into(), "p".into()];
-        let mut expanded: Vec<String> = several[..2].to_vec();
-        expanded.extend(words("-p push -u"));
-        assert_eq!(
-            read_args(&several),
-            AliasReading::Expanded {
-                args: expanded,
-                start: 3
-            }
-        );
-        // A shell alias, even after leading whitespace, and a blank value.
-        for value in ["alias.p= !sh", "alias.p=  "] {
-            let args: Vec<String> = vec!["-c".into(), value.into(), "p".into()];
-            assert_eq!(read_args(&args), AliasReading::Opaque, "{value}");
-        }
-        // The last definition wins across every option, readable or not.
-        assert_eq!(
-            read("--config-env=alias.p=X -c alias.p=push p"),
-            AliasReading::Expanded {
-                args: words("--config-env=alias.p=X -c alias.p=push push"),
-                start: 3
-            }
-        );
-        for args in [
-            "-c alias.p=push --config-env=alias.p=X p",
-            "--config-env alias.p=X p",
-            "-c alias.p=!sh p",
-            "-c alias.p= p",
-            "-c alias.p p",
-            "-c alias.p=q -c alias.q=push p",
-            "-c alias.p=Q -c ALIAS.q=push p",
-            "-c alias.p=pu\\sh p",
-            "-c alias.p=`x` p",
-        ] {
-            assert_eq!(read(args), AliasReading::Opaque, "{args}");
-        }
-        for args in ["-c alias.p=push status", "p", "", "-c alias.p=push"] {
-            assert_eq!(read(args), AliasReading::NotAlias, "{args}");
-        }
-        // Without an inline-alias declaration, nothing is an alias.
-        let plain = GlobalOptions {
-            inline_alias: None,
-            ..git.clone()
-        };
-        assert_eq!(
-            plain.inline_alias_reading(&words("-c alias.p=push p"), 2),
-            AliasReading::NotAlias
-        );
+    fn never_run_entries_list_the_builtins_first() {
+        let policy = parse(
+            r#"{"never_run": [{"id": "extra", "names": ["sqlite3"], "reason": "raw store access"}]}"#,
+        )
+        .expect("parses");
+        let entries = policy.never_run_entries();
+        let builtins = nogo::builtin_no_go();
+        assert_eq!(entries.len(), builtins.len() + 1);
+        assert_eq!(entries[..builtins.len()], builtins[..]);
+        assert_eq!(entries[builtins.len()].id, "extra");
     }
 
     #[test]
-    fn global_options_of_the_wrong_shape_are_rejected_with_their_pointer() {
-        assert_eq!(
-            parse_policy(r#"{"global_options": [{"binary": "git", "flag": ["-p"]}]}"#)
-                .expect_err("unknown field"),
-            PolicyError::UnknownField {
-                pointer: "/global_options/0/flag".to_string(),
-                field: "flag".to_string(),
-            }
-        );
-        assert_eq!(
-            parse_policy(r#"{"global_options": [{"flags": ["-p"]}]}"#).expect_err("missing binary"),
-            PolicyError::MissingField {
-                pointer: "/global_options/0".to_string(),
-                field: "binary".to_string(),
-            }
-        );
-        for (text, pointer, expected) in [
-            (r#"{"global_options": {}}"#, "/global_options", "an array"),
-            (
-                r#"{"global_options": [{"binary": "git", "value_options": "-C"}]}"#,
-                "/global_options/0/value_options",
-                "an array",
-            ),
-            (
-                r#"{"global_options": [{"binary": "git", "flags": [1]}]}"#,
-                "/global_options/0/flags/0",
-                "a string",
-            ),
-        ] {
-            assert_eq!(
-                parse_policy(text).expect_err("wrong type"),
-                PolicyError::WrongType {
-                    pointer: pointer.to_string(),
-                    expected: expected.to_string(),
-                },
-                "{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn subcommand_start_consumes_the_declared_global_options() {
-        let policy = Policy {
-            global_options: vec![GlobalOptions {
-                binary: "git".to_string(),
-                flags: vec!["--no-pager".to_string(), "-p".to_string()],
-                value_options: vec!["-C".to_string(), "-c".to_string(), "--git-dir".to_string()],
-                inline_alias: None,
-            }],
-            ..Policy::default()
-        };
-        for (args, start) in [
-            ("push", 0),
-            ("-C /tmp push", 2),
-            ("-c user.name=x commit -m y", 2),
-            ("--git-dir=.git push", 1),
-            ("--git-dir .git push", 2),
-            ("--no-pager -C a -C b push", 5),
-            // Options stop at the subcommand: `--force` is push's own.
-            ("push --force", 0),
-            // `--` ends the read and is left for the family match.
-            ("-- push", 0),
-            ("", 0),
-        ] {
-            assert_eq!(
-                policy.subcommand_start("git", &words(args)),
-                Some(start),
-                "{args}"
-            );
-        }
-        for args in ["--bogus push", "-C /tmp --bogus push", "-C", "-x push"] {
-            assert_eq!(policy.subcommand_start("git", &words(args)), None, "{args}");
-        }
-        // A binary with no declaration starts its subcommand at the first word.
-        assert_eq!(
-            policy.subcommand_start("gh", &words("--bogus issue list")),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn payload_start_consumes_selector_pairs_before_the_required_subcommand() {
-        let yarn_exec = Wrapper {
-            binary: "yarn".to_string(),
-            required_subcommand: Some("exec".to_string()),
-            flags: vec!["--silent".to_string()],
-            value_options: vec!["--cwd".to_string()],
-            selectors: vec!["workspace".to_string(), "workspaces".to_string()],
-            ..Wrapper::default()
-        };
-        // Any number of pairs, each optionally followed by declared options;
-        // a selector's word may itself be the subcommand word.
-        for (args, start) in [
-            ("workspace web exec grep", 3),
-            ("workspaces foreach exec grep", 3),
-            ("--cwd x workspace web exec grep", 5),
-            ("workspace web --silent exec grep", 4),
-            ("workspace a workspace b exec grep", 5),
-            ("workspace exec exec grep", 3),
-        ] {
-            assert!(yarn_exec.wraps(&words(args)), "{args}");
-            assert_eq!(yarn_exec.payload_start(&words(args)), Some(start), "{args}");
-        }
-        // Claimed, then refused: an undeclared option after a pair, or a
-        // selector whose word is missing.
-        for args in [
-            "workspaces foreach -A exec grep",
-            "workspace web --bogus exec grep",
-        ] {
-            assert!(yarn_exec.wraps(&words(args)), "{args}");
-            assert_eq!(yarn_exec.payload_start(&words(args)), None, "{args}");
-        }
-        assert_eq!(yarn_exec.payload_start(&words("workspace")), None);
-        // A script run through a selector names no subcommand: ordinary.
-        for args in [
-            "workspace web grep",
-            "workspace web build",
-            "workspace web run exec",
-        ] {
-            assert!(!yarn_exec.wraps(&words(args)), "{args}");
-        }
-        // A selector is read only before the subcommand: after it, the word is
-        // the payload's.
-        assert_eq!(
-            yarn_exec.payload_start(&words("exec workspace web")),
-            Some(1)
-        );
+    fn the_shipped_policy_parses() {
+        let text = include_str!("../../../plugin/legion-cmd/policy.json");
+        parse(text).expect("the shipped policy parses");
     }
 }

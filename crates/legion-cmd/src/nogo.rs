@@ -1,43 +1,43 @@
-//! The no-go list (FR-CMD-025) and the command key a confirmation matches on
-//! (FR-CMD-026).
+//! The never-run, ask and power-switch entries (FR-CMD-025, #1337) and the
+//! command key a confirmation matches on (FR-CMD-026).
 //!
-//! A no-go entry names a command that never runs. It matches one resolved
-//! [`Invocation`] -- a binary and its arguments as the splitter produced them
-//! -- never the literal command text, so a flag-order variant (`rm -fr /`,
-//! `rm / -rf`) and a wrapper variant (the positions FR-CMD-007 resolves: behind
-//! `sudo` or `env`, inside `sh -c`, after a pipe or list operator) hit the same
-//! entry. Every entry is data: a binary set and argument predicates, never a
-//! per-entry branch in Rust code (FR-CMD-011). The built-in entries live in
-//! [`builtin_no_go`]; the policy file's `no_go` array adds entries of the same
-//! shape and can never remove or weaken a built-in one.
+//! An entry matches one resolved command -- a name and its arguments as the
+//! splitter produced them -- never the literal command text, so a flag-order
+//! variant (`rm -fr /`, `rm / -rf`) and a prefix-word variant (behind `sudo`
+//! or `env`, inside `sh -c`, after a pipe or list operator) hit the same
+//! entry. Every entry is data: a name set and argument predicates, never a
+//! per-entry branch in Rust code (FR-CMD-011). The built-in never-run entries
+//! live in [`builtin_no_go`]; the policy file's `never_run` array adds entries
+//! of the same shape and can never remove or weaken a built-in one.
 //!
 //! [`command_key`] is the canonical parsed form of a command: two commands
 //! that differ only in whitespace or quoting yield the same key, and two whose
 //! parsed words or operators differ do not.
 
-use std::sync::LazyLock;
-
 use serde::{Deserialize, Serialize};
 
-use crate::policy::Policy;
-use crate::splitter::{self, Invocation, Position, ScanError};
+use crate::splitter::{self, Position, ScanError};
 
-/// One no-go entry (FR-CMD-025). It matches on parsed arguments from the
-/// splitter's [`crate::Scan`], never on the literal command text.
+/// One never-run, ask or power-switch entry (FR-CMD-025, #1337). It matches
+/// on parsed arguments from the splitter's [`crate::Scan`], never on the
+/// literal command text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoGoEntry {
     /// Stable id: recorded on the incident row and used as the repeat key
     /// (FR-CMD-027).
     pub id: String,
-    /// Binary names that match exactly (`rm`, `chmod`).
-    pub binaries: Vec<String>,
-    /// Binary name prefixes that match (`mkfs.` for `mkfs.ext4`).
-    pub binary_prefixes: Vec<String>,
-    /// When set, the invocation must sit at this grammar position (the fork
+    /// Command names that match exactly (`rm`, `chmod`).
+    pub names: Vec<String>,
+    /// Command name prefixes that match (`mkfs.` for `mkfs.ext4`).
+    pub name_prefixes: Vec<String>,
+    /// When set, the command must sit at this grammar position (the fork
     /// bomb's self-call sits in a function body).
     pub position: Option<Position>,
     /// All must hold.
     pub predicates: Vec<NoGoPredicate>,
+    /// Why a matching command is refused or asked about: the text the agent
+    /// reads.
+    pub reason: String,
 }
 
 /// An argument-level predicate over one invocation's words, each word read in
@@ -65,23 +65,21 @@ pub enum NoGoPredicate {
 }
 
 impl NoGoEntry {
-    /// Whether this entry matches `invocation`.
-    pub fn matches(&self, invocation: &Invocation) -> bool {
-        let binary_matches = self.binaries.contains(&invocation.binary)
+    /// Whether this entry matches the command `name` with arguments `args`
+    /// at grammar position `position`.
+    pub fn matches(&self, name: &str, args: &[String], position: Position) -> bool {
+        let name_matches = self.names.iter().any(|n| n == name)
             || self
-                .binary_prefixes
+                .name_prefixes
                 .iter()
-                .any(|p| invocation.binary.starts_with(p.as_str()));
-        if !binary_matches {
+                .any(|p| name.starts_with(p.as_str()));
+        if !name_matches {
             return false;
         }
-        if self
-            .position
-            .is_some_and(|position| position != invocation.position)
-        {
+        if self.position.is_some_and(|wanted| wanted != position) {
             return false;
         }
-        let words: Vec<String> = invocation.args.iter().map(|a| canonical_word(a)).collect();
+        let words: Vec<String> = args.iter().map(|a| canonical_word(a)).collect();
         self.predicates.iter().all(|p| p.holds(&words))
     }
 }
@@ -143,18 +141,6 @@ fn split_options(words: &[String]) -> (Vec<&str>, Vec<&str>) {
     (options, operands)
 }
 
-/// The first no-go entry matching any of `invocations`: built-in entries are
-/// listed before policy-file entries, so a policy entry reusing a built-in id
-/// never takes its place.
-pub(crate) fn first_match<'a>(
-    entries: &'a [NoGoEntry],
-    invocations: &[Invocation],
-) -> Option<&'a NoGoEntry> {
-    entries
-        .iter()
-        .find(|entry| invocations.iter().any(|inv| entry.matches(inv)))
-}
-
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
@@ -184,9 +170,9 @@ pub const DD_DISK: &str = "dd-to-disk";
 pub const FORK_BOMB: &str = "fork-bomb";
 /// Id of `chmod -R` or `chown -R` on `/`.
 pub const CHMOD_CHOWN_ROOT: &str = "chmod-chown-recursive-root";
-/// Id of a forced `git push` to main or master.
+/// Id of a forced push to main or master, by `git push` or its legion forms.
 pub const FORCE_PUSH_MAIN: &str = "git-force-push-main";
-/// Id of a `git push` whose `+` refspec force-writes main or master.
+/// Id of a push, by `git` or its legion forms, whose `+` refspec force-writes main or master.
 pub const FORCE_REFSPEC_MAIN: &str = "git-force-refspec-main";
 
 /// The ref names a forced push may not write.
@@ -205,36 +191,6 @@ const DISK_DEVICES: [&str; 8] = [
     "/dev/rdisk",
 ];
 
-/// The shipped policy file, embedded at compile time: the one source of the
-/// wrappers and interpreters the built-in no-go check resolves on its own
-/// (FR-CMD-025). The entries hold when the policy file is absent or empty,
-/// and "wrapper variants" are every position FR-CMD-007 resolves, so that
-/// set cannot depend on a file being present at run time.
-const SHIPPED_POLICY: &str = include_str!("../../../plugin/legion-cmd/policy.json");
-
-/// The embedded policy's wrappers and interpreters, parsed once. Its rules
-/// and no-go entries are dropped: only the no-go check expands with this.
-static BUILTIN_RESOLVER: LazyLock<Option<Policy>> = LazyLock::new(|| resolver_from(SHIPPED_POLICY));
-
-/// The wrappers and interpreters of the policy `text`, or `None` when it
-/// does not parse.
-fn resolver_from(text: &str) -> Option<Policy> {
-    let parsed: Policy = crate::parse_policy(text).ok()?;
-    Some(Policy {
-        wrappers: parsed.wrappers,
-        interpreters: parsed.interpreters,
-        ..Policy::default()
-    })
-}
-
-/// The built-in no-go resolver: the embedded policy's wrappers and
-/// interpreters. `None` only when the embedded file does not parse, which a
-/// test rules out for every build; route then refuses every Bash command
-/// rather than check less (FR-CMD-025).
-pub(crate) fn builtin_no_go_resolver() -> Option<&'static Policy> {
-    BUILTIN_RESOLVER.as_ref()
-}
-
 /// The built-in entries, embedded in the binary (FR-CMD-025). Present when
 /// the policy file is absent or empty.
 pub fn builtin_no_go() -> Vec<NoGoEntry> {
@@ -243,8 +199,8 @@ pub fn builtin_no_go() -> Vec<NoGoEntry> {
     vec![
         NoGoEntry {
             id: RM_ROOT.to_string(),
-            binaries: strings(&["rm"]),
-            binary_prefixes: Vec::new(),
+            names: strings(&["rm"]),
+            name_prefixes: Vec::new(),
             position: None,
             predicates: vec![
                 flag(&['r', 'R'], &["recursive"]),
@@ -257,41 +213,46 @@ pub fn builtin_no_go() -> Vec<NoGoEntry> {
                     &[],
                 ),
             ],
+            reason: "a recursive forced delete of the root, home, or everything under root destroys the machine".to_string(),
         },
         NoGoEntry {
             id: MKFS.to_string(),
-            binaries: strings(&["mkfs"]),
-            binary_prefixes: strings(&["mkfs."]),
+            names: strings(&["mkfs"]),
+            name_prefixes: strings(&["mkfs."]),
             position: None,
             predicates: vec![operand(&[], &["/dev/"], &[])],
+            reason: "making a filesystem on a device erases the device".to_string(),
         },
         NoGoEntry {
             id: DD_DISK.to_string(),
-            binaries: strings(&["dd"]),
-            binary_prefixes: Vec::new(),
+            names: strings(&["dd"]),
+            name_prefixes: Vec::new(),
             position: None,
             predicates: vec![operand(&[], &dd_outputs, &[])],
+            reason: "a raw block copy onto a disk device overwrites the disk".to_string(),
         },
         NoGoEntry {
             // `:(){ :|:& };:` defines a function named `:` whose body runs
             // `:` twice; the self-call inside the function body is the match.
             id: FORK_BOMB.to_string(),
-            binaries: strings(&[":"]),
-            binary_prefixes: Vec::new(),
+            names: strings(&[":"]),
+            name_prefixes: Vec::new(),
             position: Some(Position::FunctionBody),
             predicates: Vec::new(),
+            reason: "a fork bomb exhausts the machine's process table".to_string(),
         },
         NoGoEntry {
             id: CHMOD_CHOWN_ROOT.to_string(),
-            binaries: strings(&["chmod", "chown"]),
-            binary_prefixes: Vec::new(),
+            names: strings(&["chmod", "chown"]),
+            name_prefixes: Vec::new(),
             position: None,
             predicates: vec![flag(&['R'], &["recursive"]), operand(&["/"], &[], &[])],
+            reason: "a recursive permission or ownership change on the root breaks the whole system".to_string(),
         },
         NoGoEntry {
             id: FORCE_PUSH_MAIN.to_string(),
-            binaries: strings(&["git"]),
-            binary_prefixes: Vec::new(),
+            names: strings(&["git", "legion"]),
+            name_prefixes: Vec::new(),
             position: None,
             predicates: vec![
                 operand(&["push"], &[], &[]),
@@ -302,11 +263,12 @@ pub fn builtin_no_go() -> Vec<NoGoEntry> {
                     &[":main", ":master", ":refs/heads/main", ":refs/heads/master"],
                 ),
             ],
+            reason: "a forced push to main or master rewrites the shared history everyone builds on".to_string(),
         },
         NoGoEntry {
             id: FORCE_REFSPEC_MAIN.to_string(),
-            binaries: strings(&["git"]),
-            binary_prefixes: Vec::new(),
+            names: strings(&["git", "legion"]),
+            name_prefixes: Vec::new(),
             position: None,
             predicates: vec![
                 operand(&["push"], &[], &[]),
@@ -314,6 +276,7 @@ pub fn builtin_no_go() -> Vec<NoGoEntry> {
                     names: strings(&PROTECTED_BRANCHES),
                 },
             ],
+            reason: "a `+` refspec onto main or master is a forced push that rewrites the shared history".to_string(),
         },
     ]
 }
@@ -537,24 +500,25 @@ pub(crate) fn canonical_word(raw: &str) -> String {
 mod tests {
     use super::*;
 
-    fn invocations(command: &str) -> Vec<Invocation> {
-        splitter::scan(command).expect("parses").invocations
+    /// The first built-in entry any invocation of `command` matches, read
+    /// directly (no prefix words or shell payloads: route adds those).
+    fn matched(command: &str) -> Option<String> {
+        let invocations = splitter::scan(command).expect("parses").invocations;
+        builtin_no_go()
+            .into_iter()
+            .find(|entry| {
+                invocations
+                    .iter()
+                    .any(|inv| entry.matches(&inv.binary, &inv.args, inv.position))
+            })
+            .map(|e| e.id)
     }
 
     #[test]
-    fn the_embedded_policy_parses_into_a_non_empty_resolver() {
-        let resolver = builtin_no_go_resolver().expect("the embedded policy parses");
-        assert!(!resolver.wrappers.is_empty());
-        assert!(!resolver.interpreters.is_empty());
-        // Only the resolver: no rules and no no-go entries carried over.
-        assert!(resolver.is_empty());
-        assert!(resolver.no_go.is_empty());
-        assert!(resolver_from("{ not json").is_none());
-    }
-
-    fn matched(command: &str) -> Option<String> {
-        let entries = builtin_no_go();
-        first_match(&entries, &invocations(command)).map(|e| e.id.clone())
+    fn every_builtin_entry_carries_a_reason() {
+        for entry in builtin_no_go() {
+            assert!(!entry.reason.is_empty(), "{} has no reason", entry.id);
+        }
     }
 
     #[test]

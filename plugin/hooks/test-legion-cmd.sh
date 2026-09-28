@@ -71,7 +71,7 @@ assert_contains "a real adapter response passes through unchanged" "$OUT" '"perm
 
 OUT=$(run_hook_with_bin "$WORK/no-such-binary")
 assert_contains "a missing binary denies with a reason" "$OUT" '"permissionDecision":"deny"'
-assert_contains "a missing binary names the command to run instead" "$OUT" 'legion cmd-check'
+assert_not_contains "a missing binary names no command to run instead" "$OUT" 'Instead'
 assert_not_contains "a missing binary never allows" "$OUT" '"permissionDecision":"allow"'
 
 # -- a broken binary (non-zero exit) still yields a response -----------------

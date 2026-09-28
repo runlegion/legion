@@ -25,13 +25,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use legion_cmd::{Decision, Facts, ProxyReason, ToolCall, ToolKind};
+use legion_cmd::{Decision, Facts, ToolCall, ToolKind};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::cmd::hook::{
-    AdapterError, LEGION_REPO_ENV, LookupRunner, StoreLookups, command_in, error_deny_text,
-    panic_message, read_policy_text, replacement_for, route_call, run_hook,
+    AdapterError, LEGION_REPO_ENV, LookupRunner, StoreLookups, error_deny_reason, panic_message,
+    read_policy_text, replacement_for, route_call, run_hook,
 };
 use crate::cmd::replacement::rewritable_field;
 use crate::error;
@@ -86,9 +86,9 @@ fn check_with(
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         // No session work: a dry run never records, notifies, or uses up a
         // confirmation (#1237).
-        let decided = route_call(policy_text, call, lookups, legion_repo, cwd, None)?;
-        let replacement = replacement_for(&decided, &original)?;
-        Ok((decided.routed, replacement))
+        let routed = route_call(policy_text, call, lookups, legion_repo, cwd, None)?;
+        let replacement = replacement_for(&routed, &original)?;
+        Ok((routed, replacement))
     }))
     .unwrap_or_else(|payload| Err(AdapterError::Panic(panic_message(&payload))));
     let elapsed = started.elapsed();
@@ -100,7 +100,7 @@ fn check_with(
             elapsed,
         },
         Err(e) => CheckReport {
-            decision: error_decision(&e, command_in(&original)),
+            decision: error_decision(&e),
             facts: Facts::default(),
             replacement: None,
             elapsed,
@@ -108,14 +108,10 @@ fn check_with(
     }
 }
 
-/// The deny the hook sends for `err`, as a Decision (FR-CMD-009).
-fn error_decision(err: &AdapterError, command: Option<&str>) -> Decision {
-    let (reason, instead) = error_deny_text(err, command);
-    // Both strings carry fixed text, so the non-empty check cannot fail; the
-    // fallback mirrors legion_cmd's own `deny` helper.
-    Decision::deny(reason, instead).unwrap_or(Decision::Proxy {
-        reason: ProxyReason::Opaque,
-    })
+/// The deny the hook sends for `err`, as a Decision (FR-CMD-009). It names
+/// no command to run instead (#1337).
+fn error_decision(err: &AdapterError) -> Decision {
+    Decision::refuse(error_deny_reason(err))
 }
 
 /// Dispatches `legion cmd-check`. The hook mode always exits 0 with a
@@ -188,8 +184,10 @@ fn tool_call(
     command: Vec<String>,
 ) -> Result<ToolCall, String> {
     let tool: String = tool.unwrap_or_else(|| DEFAULT_TOOL.to_string());
-    if !ToolKind::ALL.into_iter().any(|kind| kind.as_str() == tool) {
-        let known: Vec<&str> = ToolKind::ALL.into_iter().map(ToolKind::as_str).collect();
+    if tool != DEFAULT_TOOL && ToolKind::parse(&tool).is_none() {
+        let known: Vec<&str> = std::iter::once(DEFAULT_TOOL)
+            .chain(ToolKind::ALL.into_iter().map(ToolKind::as_str))
+            .collect();
         return Err(format!(
             "unknown --tool '{tool}'; expected one of: {}",
             known.join(", ")
@@ -230,10 +228,6 @@ fn render_text(report: &CheckReport) -> String {
             lines.push(format!("target:   {}", target.as_str()));
             lines.push(format!("reason:   {reason}"));
         }
-        Decision::Proxy { reason } => {
-            lines.push("decision: proxy".to_string());
-            lines.push(format!("reason:   {}", reason.as_str()));
-        }
         Decision::Deny(details) => {
             lines.push("decision: deny".to_string());
             lines.push(format!("reason:   {}", details.reason()));
@@ -245,17 +239,6 @@ fn render_text(report: &CheckReport) -> String {
             lines.push(format!("reason:   {}", details.reason()));
         }
     }
-    let facts = &report.facts;
-    let issue_numbers: Vec<String> = facts.issue_numbers.iter().map(u64::to_string).collect();
-    lines.push("facts:".to_string());
-    lines.push(format!(
-        "  verb:          {}",
-        facts.verb.as_deref().unwrap_or("(none)")
-    ));
-    lines.push(format!("  paths:         {}", listed(&facts.paths)));
-    lines.push(format!("  issue numbers: {}", listed(&issue_numbers)));
-    lines.push(format!("  keywords:      {}", listed(&facts.keywords)));
-    lines.push(format!("  carried:       {}", listed(&facts.carried)));
     if let Some(replacement) = &report.replacement {
         lines.push(format!("replacement: {}", replaced_value(replacement)));
     }
@@ -263,14 +246,6 @@ fn render_text(report: &CheckReport) -> String {
     let mut text = lines.join("\n");
     text.push('\n');
     text
-}
-
-fn listed(items: &[String]) -> String {
-    if items.is_empty() {
-        "(none)".to_string()
-    } else {
-        items.join(", ")
-    }
 }
 
 /// The value the rewrite put in place: the replacement command for a Bash
@@ -349,39 +324,25 @@ mod tests {
         }
     }
 
-    /// One rule per arm: `rm -rf` denies, `gh issue list` rewrites, `gh
-    /// issue view` rewrites under a rule declaring translatable arguments,
-    /// `gh pr` asks, `xxd` proxies, `ls` allows with a note, `git push` needs
-    /// recall and consult, and an Explore spawn rewrites its `subagent_type`.
+    /// One entry per outcome: `git` and `gh` get `legion ` inserted, `rm -rf`
+    /// never runs, `curl` is asked, a Read allows with a note, a WebFetch
+    /// needs recall and consult, and an Explore spawn rewrites its
+    /// `subagent_type`.
     const POLICY: &str = r#"{
-        "route": {"deadline_ms": 7000},
+        "proxy": ["git", "gh"],
+        "never_run": [
+            {"id": "rm-rf", "names": ["rm"], "reason": "unrecoverable",
+             "predicates": [{"kind": "flag", "short": ["r"]}, {"kind": "flag", "short": ["f"]}]}
+        ],
+        "ask": [{"id": "curl-network", "names": ["curl"], "reason": "curl reaches the network"}],
         "tools": {
-            "Bash": {"families": {
-                "gh issue view": {"rules": [
-                    {"id": "gh-issue-view",
-                     "outcome": {"kind": "rewrite", "target": "legion issue view --repo {repo}",
-                                 "reason": "legion tracks issues", "positional": ["--number"]}}
-                ]},
-                "rm": {"rules": [
-                    {"id": "rm-rf", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
-                     "outcome": {"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}}
-                ]},
-                "gh issue list": {"rules": [
-                    {"id": "gh-issue-list",
-                     "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
-                                 "reason": "legion tracks issues"}}
-                ]},
-                "gh pr": {"rules": [
-                    {"id": "gh-pr", "outcome": {"kind": "ask", "question": "touch the PR?",
-                     "reason": "PRs are the orchestrator's"}}
-                ]},
-                "xxd": {"rules": [{"id": "xxd", "outcome": {"kind": "proxy", "reason": "binary"}}]},
-                "ls": {"rules": [{"id": "ls", "outcome": {"kind": "allow", "note": "prefer legion sym tree"}}]},
-                "git push": {"rules": [
-                    {"id": "git-push", "requires_recall": true, "requires_consult": true,
-                     "outcome": {"kind": "deny", "reason": "push through legion", "instead": "legion push"}}
-                ]}
-            }},
+            "Read": {"rules": [
+                {"id": "read-note", "outcome": {"kind": "allow", "note": "prefer legion sym tree"}}
+            ]},
+            "WebFetch": {"rules": [
+                {"id": "fetch-lookups", "requires_recall": true, "requires_consult": true,
+                 "outcome": {"kind": "deny", "reason": "fetch through recall", "instead": "legion recall"}}
+            ]},
             "Agent": {"rules": [
                 {"id": "agent-explore", "predicates": [{"kind": "field-equals", "field": "subagent_type", "any_of": ["Explore"]}],
                  "outcome": {"kind": "rewrite", "target": "legion:legion-explore", "reason": "use the legion explorer"}}
@@ -393,6 +354,13 @@ mod tests {
         ToolCall {
             tool: "Bash".to_string(),
             input: serde_json::json!({ "command": command }),
+        }
+    }
+
+    fn fetch() -> ToolCall {
+        ToolCall {
+            tool: "WebFetch".to_string(),
+            input: serde_json::json!({ "url": "https://example.com" }),
         }
     }
 
@@ -413,65 +381,45 @@ mod tests {
         }
     }
 
-    // -- each arm reported, with its facts (FR-CMD-017) -----------------------
+    // -- each outcome reported (FR-CMD-017) -----------------------------------
 
     #[test]
-    fn a_deny_reports_its_reason_instead_and_facts() {
+    fn a_never_run_deny_reports_its_reason_and_names_no_command() {
         let report = check_policy(bash("rm -rf build"), POLICY);
         let Decision::Deny(details) = &report.decision else {
             panic!("expected a deny, got {:?}", report.decision);
         };
         assert_eq!(details.reason(), "unrecoverable");
-        assert_eq!(details.instead(), "trash it");
-        assert_eq!(report.facts.verb.as_deref(), Some("rm"));
+        assert_eq!(details.instead(), legion_cmd::NO_GO_INSTEAD);
         assert!(report.replacement.is_none());
         let text = render_text(&report);
         assert!(text.contains("decision: deny"), "{text}");
         assert!(text.contains("reason:   unrecoverable"), "{text}");
-        assert!(text.contains("instead:  trash it"), "{text}");
-        assert!(text.contains("verb:          rm"), "{text}");
         assert!(text.contains("elapsed:"), "{text}");
     }
 
     #[test]
-    fn a_rewrite_reports_the_target_and_the_built_replacement() {
-        // FR-CMD-003: the replacement comes from the shared builder, which
-        // patches the command and keeps every sibling field.
+    fn an_insertion_reports_the_rewritten_command() {
+        // The replacement comes from the shared builder, which patches the
+        // command and keeps every sibling field.
         let call = ToolCall {
             tool: "Bash".to_string(),
-            input: serde_json::json!({"command": "gh issue list", "timeout": 9000}),
+            input: serde_json::json!({"command": "cd a && git log", "timeout": 9000}),
         };
         let report = check_policy(call, POLICY);
         assert!(matches!(report.decision, Decision::Rewrite { .. }));
         assert_eq!(
+            report.facts.rewritten.as_deref(),
+            Some("cd a && legion git log")
+        );
+        assert_eq!(
             report.replacement,
-            Some(
-                serde_json::json!({"command": "legion issue list --repo legion", "timeout": 9000})
-            )
+            Some(serde_json::json!({"command": "cd a && legion git log", "timeout": 9000}))
         );
         let text = render_text(&report);
         assert!(text.contains("decision: rewrite"), "{text}");
         assert!(
-            text.contains("target:   legion issue list --repo {repo}"),
-            "{text}"
-        );
-        assert!(text.contains("reason:   legion tracks issues"), "{text}");
-        assert!(
-            text.contains("replacement: legion issue list --repo legion"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn a_rewrite_reports_the_words_it_carried() {
-        // FR-CMD-003 rev 2: the carried words are a fact, reported beside the
-        // replacement built from them.
-        let report = check_policy(bash("gh issue view 7"), POLICY);
-        assert_eq!(report.facts.carried, vec!["7".to_string()]);
-        let text = render_text(&report);
-        assert!(text.contains("  carried:       7"), "{text}");
-        assert!(
-            text.contains("replacement: legion issue view --repo legion --number 7"),
+            text.contains("replacement: cd a && legion git log"),
             "{text}"
         );
     }
@@ -491,55 +439,42 @@ mod tests {
     }
 
     #[test]
-    fn a_proxy_reports_its_closed_set_reason() {
-        let report = check_policy(bash("xxd file.bin"), POLICY);
-        assert_eq!(
-            report.decision,
-            Decision::Proxy {
-                reason: ProxyReason::Binary
-            }
-        );
-        let text = render_text(&report);
-        assert!(text.contains("decision: proxy"), "{text}");
-        assert!(text.contains("reason:   binary"), "{text}");
-    }
-
-    #[test]
-    fn an_allow_reports_its_note_and_the_default_allow_has_none() {
-        let report = check_policy(bash("ls -la"), POLICY);
+    fn an_allow_reports_its_note_and_an_untouched_command_has_none() {
+        let call = ToolCall {
+            tool: "Read".to_string(),
+            input: serde_json::json!({"file_path": "a.md"}),
+        };
+        let report = check_policy(call, POLICY);
         assert!(render_text(&report).contains("note:     prefer legion sym tree"));
         let report = check_policy(bash("echo hi"), POLICY);
         assert_eq!(report.decision, Decision::Allow { note: None });
         assert!(render_text(&report).contains("note:     (none)"));
+        assert!(report.replacement.is_none());
     }
 
     #[test]
     fn an_ask_reports_its_question_and_reason() {
-        let report = check_policy(bash("gh pr merge 7"), POLICY);
+        let report = check_policy(bash("curl example.com"), POLICY);
         let text = render_text(&report);
         assert!(text.contains("decision: ask"), "{text}");
-        assert!(text.contains("question: touch the PR?"), "{text}");
         assert!(
-            text.contains("reason:   PRs are the orchestrator's"),
+            text.contains("question: this command needs the operator's approval"),
+            "{text}"
+        );
+        assert!(
+            text.contains("reason:   curl reaches the network"),
             "{text}"
         );
     }
 
     #[test]
     fn the_json_report_carries_every_field() {
-        let report = check_policy(bash("gh issue list"), POLICY);
+        let report = check_policy(bash("git status"), POLICY);
         let value: Value = serde_json::to_value(&report).expect("serializes");
         assert_eq!(value["decision"]["kind"], "rewrite");
-        assert_eq!(
-            value["decision"]["target"],
-            "legion issue list --repo {repo}"
-        );
-        assert_eq!(value["facts"]["verb"], "issue list");
-        assert_eq!(value["facts"]["carried"], serde_json::json!([]));
-        assert_eq!(
-            value["replacement"]["command"],
-            "legion issue list --repo legion"
-        );
+        assert_eq!(value["decision"]["target"], "legion");
+        assert_eq!(value["facts"]["rewritten"], "legion git status");
+        assert_eq!(value["replacement"]["command"], "legion git status");
         assert!(value["elapsed"].is_object());
     }
 
@@ -549,7 +484,7 @@ mod tests {
     fn the_lookup_pre_pass_runs_scoped_to_the_given_repo() {
         let lookups = Lookups::new(Duration::ZERO);
         let report = check_with(
-            bash("git push origin main"),
+            fetch(),
             Ok(POLICY.to_string()),
             lookups.clone(),
             Some("other-repo".to_string()),
@@ -559,46 +494,29 @@ mod tests {
             lookups.calls.lock().expect("calls lock").clone(),
             vec!["recall:other-repo".to_string(), "consult".to_string()]
         );
-        assert_eq!(deny_reason(&report), "push through legion");
+        assert_eq!(deny_reason(&report), "fetch through recall");
     }
 
     // -- fail closed (FR-CMD-009, FR-CMD-016) -----------------------------------
 
     #[test]
-    fn an_overrun_reports_a_deny_naming_the_deadline() {
-        let policy = POLICY.replacen("\"deadline_ms\": 7000", "\"deadline_ms\": 20", 1);
-        let report = check_with(
-            bash("git push"),
-            Ok(policy),
-            Lookups::new(Duration::from_millis(400)),
-            Some("legion".to_string()),
-            None,
-        );
-        assert!(
-            deny_reason(&report).contains("deadline exceeded: no decision within 20 ms"),
-            "{}",
-            deny_reason(&report)
-        );
-        assert_eq!(report.facts, Facts::default());
-        assert!(report.replacement.is_none());
-    }
-
-    #[test]
     fn a_failed_lookup_reports_a_deny_naming_the_error() {
         let report = check_with(
-            bash("git push"),
+            fetch(),
             Ok(POLICY.to_string()),
             Arc::new(FailingLookups),
             Some("legion".to_string()),
             None,
         );
         assert!(deny_reason(&report).contains("lookup: search index error: db unavailable"));
+        assert_eq!(report.facts, Facts::default());
+        assert!(report.replacement.is_none());
     }
 
     #[test]
     fn a_panic_in_the_core_reports_a_deny_naming_the_panic() {
         let report = check_with(
-            bash("git push"),
+            fetch(),
             Ok(POLICY.to_string()),
             Arc::new(PanickingLookups),
             Some("legion".to_string()),
@@ -608,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_policy_reports_a_deny_with_the_read_error() {
+    fn an_unreadable_policy_reports_a_deny_with_the_read_error_and_no_command() {
         let report = check_with(
             bash("echo hi"),
             read_policy_text(Some(Path::new("/nowhere/policy.json"))),
@@ -621,19 +539,21 @@ mod tests {
         let Decision::Deny(details) = &report.decision else {
             unreachable!()
         };
-        assert_eq!(details.instead(), "legion cmd-check -- 'echo hi'");
+        assert_eq!(details.instead(), legion_cmd::NO_GO_INSTEAD);
     }
 
     #[test]
     fn an_unparsable_policy_reports_a_deny_with_the_parse_error() {
         let report = check_policy(bash("echo hi"), "{ not json");
-        assert!(deny_reason(&report).contains("policy: policy text is not valid JSON"));
+        assert!(deny_reason(&report).contains("policy: policy is not valid JSON"));
+        let report = check_policy(bash("echo hi"), r#"{"route": {}}"#);
+        assert!(deny_reason(&report).contains("unknown field 'route'"));
     }
 
     #[test]
-    fn an_empty_policy_denies_every_command() {
+    fn an_empty_policy_runs_an_unmatched_command_untouched() {
         let report = check_policy(bash("echo hi"), "{}");
-        assert!(deny_reason(&report).contains("policy is empty"));
+        assert_eq!(report.decision, Decision::Allow { note: None });
     }
 
     #[test]
@@ -653,30 +573,6 @@ mod tests {
         assert!(report.replacement.is_none());
     }
 
-    #[test]
-    fn a_rewrite_the_target_rejects_reports_the_hook_deny() {
-        // #1278 through the shared core: route returns Rewrite carrying
-        // `7 --web`, the target's own parse rejects `--web`, and cmd-check
-        // reports exactly the reason and instead the hook's deny_for_error
-        // renders.
-        let command = "gh issue view 7 --web";
-        let report = check_policy(bash(command), POLICY);
-        let Decision::Deny(details) = &report.decision else {
-            panic!("expected a deny, got {:?}", report.decision);
-        };
-        let expected_error = AdapterError::Replacement(
-            crate::cmd::replacement::ReplacementError::Rejected {
-                target: "legion issue view --repo {repo}".to_string(),
-                reason: "error: unexpected argument '--web' found".to_string(),
-            }
-            .to_string(),
-        );
-        let (reason, instead) = error_deny_text(&expected_error, Some(command));
-        assert_eq!(details.reason(), reason);
-        assert_eq!(details.instead(), instead);
-        assert!(report.replacement.is_none());
-    }
-
     // -- usage errors are not decisions ------------------------------------------
 
     #[test]
@@ -689,22 +585,12 @@ mod tests {
 
     #[test]
     fn one_quoted_argument_decides_the_same_as_the_string_via_input() {
-        // Every case the review found in the earlier requoting design: the
-        // command passed as one argument is the typed string, so it decides
-        // exactly as the same string given with --input.
-        for (command, expected) in [
-            (
-                "git commit -m \"a; rm -rf x\"",
-                Decision::Allow { note: None },
-            ),
-            (
-                "FOO+='a b' rm -rf build",
-                Decision::deny("unrecoverable", "trash it").expect("valid deny"),
-            ),
-            (
-                "arr[i[0]]=x rm -rf build",
-                Decision::deny("unrecoverable", "trash it").expect("valid deny"),
-            ),
+        // The command passed as one argument is the typed string, so it
+        // decides exactly as the same string given with --input.
+        for command in [
+            "git commit -m \"a; rm -rf x\"",
+            "FOO+='a b' rm -rf build",
+            "arr[i[0]]=x rm -rf build",
         ] {
             let positional = check_policy(
                 tool_call(None, None, vec![command.to_string()]).expect("a valid call"),
@@ -716,8 +602,12 @@ mod tests {
                 POLICY,
             );
             assert_eq!(positional.decision, typed.decision, "{command}");
-            assert_eq!(positional.decision, expected, "{command}");
+            assert_eq!(positional.facts, typed.facts, "{command}");
         }
+        assert_eq!(
+            check_policy(bash("FOO+='a b' rm -rf build"), POLICY).decision,
+            Decision::no_go("unrecoverable").expect("valid deny")
+        );
     }
 
     #[test]
@@ -750,6 +640,7 @@ mod tests {
         let err =
             tool_call(Some("Bsh".to_string()), None, vec!["ls".into()]).expect_err("unknown tool");
         assert!(err.contains("unknown --tool 'Bsh'"), "{err}");
+        assert!(err.contains("Bash"), "{err}");
     }
 
     #[test]
