@@ -737,7 +737,8 @@ pub(crate) fn handle(args: Vec<String>) -> error::Result<()> {
         GhPlan::Read => exit_with(run_gh(&args)?),
         GhPlan::Write(write) => {
             let target: Option<String> = gh_target(write_repo(&write));
-            let legion_repo: Option<String> = target.as_deref().and_then(legion_repo_for);
+            let legion_repo: Option<String> =
+                target.as_deref().and_then(worksource::repo_for_github);
             if let Some(r) = legion_repo.as_deref()
                 && run_write(write, r)?
             {
@@ -747,7 +748,8 @@ pub(crate) fn handle(args: Vec<String>) -> error::Result<()> {
         }
         GhPlan::Passthrough => {
             let target: Option<String> = gh_target(repo_flag(&args).as_deref());
-            let legion_repo: Option<String> = target.as_deref().and_then(legion_repo_for);
+            let legion_repo: Option<String> =
+                target.as_deref().and_then(worksource::repo_for_github);
             passthrough(&args, target, legion_repo)
         }
     }
@@ -849,11 +851,6 @@ fn gh_target(explicit: Option<&str>) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-}
-
-/// The legion repo whose watch.toml `github` equals the gh target.
-fn legion_repo_for(target: &str) -> Option<String> {
-    worksource::repo_for_github(target)
 }
 
 /// The number of the one open PR whose head is the current branch.
