@@ -16,6 +16,9 @@ mod documents;
 mod etc;
 mod find_file;
 mod governance;
+// Unix only: the tests drive real grep/rg and sh stubs on PATH.
+#[cfg(unix)]
+mod grep;
 mod index_telemetry;
 mod inventory_freshness;
 mod memory;
