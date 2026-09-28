@@ -162,28 +162,53 @@ fn empty_path() -> tempfile::TempDir {
     tempfile::tempdir().expect("empty PATH dir")
 }
 
-#[test]
-fn grep_sym_forms_match_real_grep_and_need_no_grep() {
+/// Each form must be answered by sym alone (no tool on PATH, so a fallback
+/// exits 127), and where the real tool exists, legion with and without it
+/// must match the tool.
+fn assert_sym_forms(tool: &str, forms: &[&[&str]]) {
     let fx = fixture();
     let cwd: &Path = fx.repo.path();
     let path_env: String = std::env::var("PATH").unwrap_or_default();
     let no_tools = empty_path();
     let no_tools_path: String = no_tools.path().display().to_string();
-    for args in GREP_SYM_FORMS {
-        let label: String = format!("grep {args:?}");
-        let sym_only: Output = legion(&fx, cwd, &no_tools_path, "grep", args);
+    for args in forms {
+        let label: String = format!("{tool} {args:?}");
+        let sym_only: Output = legion(&fx, cwd, &no_tools_path, tool, args);
         assert!(
             matches!(sym_only.status.code(), Some(0) | Some(1)),
             "{label}: sym did not answer (exit {:?}): {}",
             sym_only.status.code(),
             String::from_utf8_lossy(&sym_only.stderr)
         );
-        if tool_present("grep") {
-            let theirs: Output = real(cwd, "grep", args);
-            assert_same(&label, &legion(&fx, cwd, &path_env, "grep", args), &theirs);
+        if tool_present(tool) {
+            let theirs: Output = real(cwd, tool, args);
+            assert_same(&label, &legion(&fx, cwd, &path_env, tool, args), &theirs);
             assert_same(&format!("{label} (sym only)"), &sym_only, &theirs);
         }
     }
+}
+
+/// Each form must give the real tool's answer. Skipped where the tool is
+/// not installed.
+fn assert_tool_forms(tool: &str, forms: &[&[&str]]) {
+    if !tool_present(tool) {
+        return;
+    }
+    let fx = fixture();
+    let cwd: &Path = fx.repo.path();
+    let path_env: String = std::env::var("PATH").unwrap_or_default();
+    for args in forms {
+        assert_same(
+            &format!("{tool} {args:?}"),
+            &legion(&fx, cwd, &path_env, tool, args),
+            &real(cwd, tool, args),
+        );
+    }
+}
+
+#[test]
+fn grep_sym_forms_match_real_grep_and_need_no_grep() {
+    assert_sym_forms("grep", &GREP_SYM_FORMS);
 }
 
 #[test]
@@ -213,62 +238,17 @@ fn grep_sym_answer_prints_path_line_text() {
 
 #[test]
 fn rg_sym_forms_match_real_rg_and_need_no_rg() {
-    let fx = fixture();
-    let cwd: &Path = fx.repo.path();
-    let path_env: String = std::env::var("PATH").unwrap_or_default();
-    let no_tools = empty_path();
-    let no_tools_path: String = no_tools.path().display().to_string();
-    for args in RG_SYM_FORMS {
-        let label: String = format!("rg {args:?}");
-        let sym_only: Output = legion(&fx, cwd, &no_tools_path, "rg", args);
-        assert!(
-            matches!(sym_only.status.code(), Some(0) | Some(1)),
-            "{label}: sym did not answer (exit {:?}): {}",
-            sym_only.status.code(),
-            String::from_utf8_lossy(&sym_only.stderr)
-        );
-        if tool_present("rg") {
-            let theirs: Output = real(cwd, "rg", args);
-            assert_same(&label, &legion(&fx, cwd, &path_env, "rg", args), &theirs);
-            assert_same(&format!("{label} (sym only)"), &sym_only, &theirs);
-        }
-    }
+    assert_sym_forms("rg", &RG_SYM_FORMS);
 }
 
 #[test]
 fn grep_tool_forms_match_real_grep() {
-    if !tool_present("grep") {
-        return;
-    }
-    let fx = fixture();
-    let cwd: &Path = fx.repo.path();
-    let path_env: String = std::env::var("PATH").unwrap_or_default();
-    for args in GREP_TOOL_FORMS {
-        let label: String = format!("grep {args:?}");
-        assert_same(
-            &label,
-            &legion(&fx, cwd, &path_env, "grep", args),
-            &real(cwd, "grep", args),
-        );
-    }
+    assert_tool_forms("grep", &GREP_TOOL_FORMS);
 }
 
 #[test]
 fn rg_tool_forms_match_real_rg() {
-    if !tool_present("rg") {
-        return;
-    }
-    let fx = fixture();
-    let cwd: &Path = fx.repo.path();
-    let path_env: String = std::env::var("PATH").unwrap_or_default();
-    for args in RG_TOOL_FORMS {
-        let label: String = format!("rg {args:?}");
-        assert_same(
-            &label,
-            &legion(&fx, cwd, &path_env, "rg", args),
-            &real(cwd, "rg", args),
-        );
-    }
+    assert_tool_forms("rg", &RG_TOOL_FORMS);
 }
 
 /// A stub named `tool` that prints each argument on its own line, then its
