@@ -102,9 +102,9 @@ scored insights; the schema has no verdict for "the operator's bet may be wrong,
 **Two passes.** The first slice of a fresh crawl supports an ORIENTATION pass: score what can
 be scored, record per theme what came back, land a `draft`, and return `parked` so the
 conductor re-arms the wake. The AUTHORITATIVE pass runs on the wake over a corpus a day of
-re-crawl has built, or on a lens already warm at that depth. Only the authoritative pass runs
-the inverse pass, emits verdict predictions, witnesses the agenda's claims, and lands past
-`draft`.
+re-crawl has built, or on a lens already warm at that depth. Only the authoritative pass or a
+re-listen pass runs the inverse pass, emits verdict predictions, and lands past `draft`; the
+authoritative pass alone witnesses the agenda's claims.
 
 **The inverse pass holds at the authoritative pass.** An all-supported Discovery is
 unfalsified: probes written by a theme's author score their own topic on-topic (the first
@@ -127,8 +127,9 @@ committed-item challenge note (a note-only Discovery included). A Discovery with
 those, past its authoritative pass, lands at `done`.
 
 **Predictions.** One per insight with a verdict (`supported`, `bounded`, `contradicted`),
-under feature key `sd.discover.insight`, at the authoritative pass only; blocked and
-saturated-unevidenced insights carry no verdict and get none. Stake from what you have:
+under feature key `sd.discover.insight`, at the authoritative pass or the re-listen pass
+only; blocked and saturated-unevidenced insights carry no verdict and get none. Stake from
+what you have:
 
 - supported on five or more independent voices (distinct author and thread), hits clearly
   above the control, counter-probes empty: near 0.8;
@@ -241,8 +242,9 @@ returns rather than wait on it.
      --payload "$(cat insight-pred.json)"
    ```
 
-   Then witness the agenda's claims (Rules). On a re-listen, run the re-listen pass instead
-   of steps 2 to 7, revise the Discovery, and emit for the re-scored insights.
+   At the authoritative pass, witness the agenda's claims (Rules). On a re-listen, run the
+   re-listen pass instead of steps 2 to 7, revise the Discovery, emit for the re-scored
+   insights, and witness only the prior predictions passed to you.
 
 ## Return
 
