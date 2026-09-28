@@ -8,7 +8,7 @@
 //! times out or exits non-zero fails OPEN -- its output is discarded, the
 //! tool call proceeds, and the model is never told -- so the adapter never
 //! lets the harness time it out. It enforces its own deadline
-//! (`route.deadline_ms`, `crate::cmd::config`) on a worker thread and turns an
+//! ([`ROUTE_DEADLINE`]) on a worker thread and turns an
 //! overrun, a lookup failure, a replacement failure, an unreadable payload or
 //! policy, and a panic anywhere into a deny with a reason. Nothing here
 //! falls through to running the raw command.
@@ -17,7 +17,7 @@
 //! `crate::cli::cmd_check`) runs the same core: [`read_policy_text`] and
 //! [`route_call`] (policy loading, the settings, the repo, the lookup
 //! pre-pass, route, all under the deadline), [`replacement_for`], and the
-//! error deny from [`error_deny_text`]. Only the rendering differs: this
+//! error deny from [`error_deny_reason`]. Only the rendering differs: this
 //! module writes a hook response, the operator mode a report.
 //!
 //! # The response shapes (Claude Code hook contract)
@@ -29,23 +29,29 @@
 //! Those facts fix the arms below:
 //!
 //! - allow: no `permissionDecision`, so the harness's own rules decide and
-//!   an allow never grants a permission the harness would not (FR-CMD-002);
-//!   route's note, if any, rides along as `additionalContext`. The FR-CMD-016
-//!   no-match default carries no note, so the adapter supplies one: a default
-//!   is always visible to the agent.
-//! - rewrite: `allow` plus `updatedInput` built by
-//!   `crate::cmd::replacement`, with what the command became and why in
+//!   an allow never grants a permission the harness would not (FR-CMD-002).
+//!   A Bash command that matched no rule runs byte for byte as typed: the
+//!   response carries no decision, no `additionalContext` and no note
+//!   (#1337). A non-Bash rule's note, if any, rides along as
+//!   `additionalContext`.
+//! - a Bash insertion (#1337): `updatedInput` with `legion ` before each
+//!   proxied name, and no `permissionDecision`, so the harness's own
+//!   permission flow judges the command that will run and the insertion
+//!   grants nothing the operator's rules would not ([`insertion_response`]).
+//! - a non-Bash rewrite (Agent, Task): `allow` plus `updatedInput` built by
+//!   `crate::cmd::replacement`, with what the call became and why in
 //!   `additionalContext` (FR-CMD-003).
-//! - proxy: the command runs unchanged (FR-CMD-004).
-//! - deny: `deny` with the reason and the command to run instead (FR-CMD-005).
+//! - deny: `deny` with the reason (FR-CMD-005). A Bash refusal names no
+//!   command to run instead.
 //! - ask without the operator mark: `deny` carrying route's question and
 //!   reason and how to confirm (FR-CMD-006, FR-CMD-026). `deny` rather than
 //!   `ask` because only a deny's reason reaches the agent, and the agent is
 //!   who must answer the question. The operator is not prompted.
 //! - ask with the operator mark set on `Routed` (#1227; route sets it only
 //!   when the agent's confirmation is in `Context`, #1237): `ask`, the
-//!   harness's own permission prompt, carrying the reason. This is the only
-//!   path that prompts the operator. The adapter holds no routing branch for
+//!   harness's own permission prompt, carrying the reason, and the inserted
+//!   command as `updatedInput` when route rewrote it. This is the only path
+//!   that prompts the operator. The adapter holds no routing branch for
 //!   confirmations (FR-CMD-011); it reads the mark route set.
 //!
 //! # What the adapter does not do
@@ -58,19 +64,19 @@
 //!
 //! # The rewrite prediction (#1272, FR-CMD-015)
 //!
-//! A rewrite the adapter applies is a prediction that the constructed
-//! command will work: the adapter emits one `legion.cmd` prediction for it,
+//! A rewrite the adapter applies -- a Bash insertion (#1337) or a non-Bash
+//! rule's rewrite -- is a prediction that the constructed command will work: the adapter emits one `legion.cmd` prediction for it,
 //! keyed by the call's `tool_use_id` (`crate::cmd::prediction`), after the
 //! response is written and flushed (#1288), so a store write lock never
 //! holds the response. Each run also starts, before its own work, a pass
 //! that witnesses this session's earlier rewrites whose `tool_result` is now
 //! in the session transcript. The pass runs on a worker thread beside the
 //! decision: the decision never waits on it, and after the response it gets
-//! only the rest of one `route.deadline_ms`, then is abandoned. Both run
+//! only the rest of one [`ROUTE_DEADLINE`], then is abandoned. Both run
 //! outside the decision, which reads neither: a failure in either is
 //! reported on stderr and never changes the response. The store both use is
 //! opened once, before the decision, and that open waits at most one
-//! `route.deadline_ms`; the decision's confirmation and incident work
+//! [`ROUTE_DEADLINE`]; the decision's confirmation and incident work
 //! (#1237) shares the same handle. An open that fails or has not finished
 //! by then skips both for the call, and the decision, which cannot read
 //! confirmations without the store, is a deny naming why (FR-CMD-009).
@@ -97,16 +103,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use clap::CommandFactory;
 use legion_cmd::{
-    AskDetails, CommandKey, Context, Deciding, Decision, Lookup, Policy, RewriteSpec, Routed, Rule,
-    RuleOutcome, ToolCall, ToolRules, parse_policy, required_lookups, route,
+    AskDetails, CommandKey, Context, Deciding, Decision, Lookup, Policy, Routed, ToolCall,
+    parse_policy, required_lookups, route,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::cli::Cli;
-use crate::cmd::config::RouteSettings;
 use crate::cmd::confirm::{live_confirmations, use_confirmation, was_used};
 use crate::cmd::incident::{IncidentLog, Origin};
 use crate::cmd::prediction::{self, AppliedRewrite};
@@ -138,13 +141,13 @@ const LOOKUP_LIMIT: usize = 5;
 
 /// The response written when the adapter cannot serialize its own response.
 /// A fixed string, not built with `serde_json`, so it cannot itself fail.
-const FALLBACK_DENY_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd could not serialize its response -- instead: legion cmd-check -- <command>"}}"#;
+const FALLBACK_DENY_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd could not serialize its response"}}"#;
 
-/// What the agent reads when no policy rule governed its command and the
-/// FR-CMD-016 default allowed it. Without it the default allow would be
-/// byte-identical to the hook not running, and the default must be visible.
-const DEFAULT_ALLOW_NOTE: &str =
-    "legion-cmd: no policy rule governs this command; it runs under the default allow";
+/// How long the decision may take before the adapter denies (FR-CMD-009):
+/// well under the harness's own hook timeout, so the adapter's deny reaches
+/// the harness before the harness could time the hook out and fail open.
+/// It bounds the pre-decision store open and the witness pass too.
+pub(crate) const ROUTE_DEADLINE: Duration = Duration::from_millis(7000);
 
 /// The PreToolUse payload fields the adapter acts on. Unknown fields are
 /// ignored, not rejected: the harness may add fields. `session_id` binds the
@@ -241,7 +244,7 @@ pub fn run_hook(mut stdin: impl Read, mut stdout: impl Write) -> ExitCode {
     let mut after: AfterResponse = AfterResponse::default();
     let response: Value = match stdin.read_to_string(&mut input) {
         Ok(_) => guarded(|| respond(&input, &mut after)),
-        Err(e) => deny_for_error(&AdapterError::Payload(e.to_string()), None),
+        Err(e) => deny_for_error(&AdapterError::Payload(e.to_string())),
     };
     let body: String =
         serde_json::to_string(&response).unwrap_or_else(|_| FALLBACK_DENY_JSON.to_string());
@@ -293,7 +296,7 @@ impl AfterResponse {
 fn guarded(build: impl FnOnce() -> Value) -> Value {
     match panic::catch_unwind(AssertUnwindSafe(build)) {
         Ok(response) => response,
-        Err(payload) => deny_for_error(&AdapterError::Panic(panic_message(&payload)), None),
+        Err(payload) => deny_for_error(&AdapterError::Panic(panic_message(&payload))),
     }
 }
 
@@ -329,7 +332,7 @@ pub(crate) fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 /// (FR-CMD-009) rather than a second wait on the store.
 fn respond(input: &str, after: &mut AfterResponse) -> Value {
     let policy_text: Result<String, AdapterError> = read_policy_text(None);
-    let deadline: Duration = deadline_for(&policy_text);
+    let deadline: Duration = ROUTE_DEADLINE;
     let store: Result<StoreHandle, String> =
         open_store_within(deadline, crate::cli::util::open_db).map(|db| Arc::new(Mutex::new(db)));
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
@@ -351,18 +354,6 @@ fn respond(input: &str, after: &mut AfterResponse) -> Value {
     after.witness = pending;
     after.prediction = applied.rewrite.zip(store.ok());
     applied.response
-}
-
-/// The route deadline the policy sets: the default when the policy cannot be
-/// read or its settings do not parse, which the decision reports itself.
-/// Bounds the pre-decision store open and the witness pass's budget.
-fn deadline_for(policy_text: &Result<String, AdapterError>) -> Duration {
-    policy_text
-        .as_ref()
-        .ok()
-        .and_then(|text| RouteSettings::from_policy_text(text).ok())
-        .unwrap_or_default()
-        .deadline
 }
 
 /// Runs `open` on its own worker thread and waits at most `deadline` for the
@@ -567,7 +558,7 @@ fn respond_with(
 ) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(payload) => payload,
-        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string()), None).into(),
+        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string())).into(),
     };
     let call = ToolCall {
         tool: payload.tool_name.clone(),
@@ -589,27 +580,15 @@ fn respond_with(
         payload.cwd.clone(),
         Some(session),
     ) {
-        Ok(decided) => apply(&decided, &payload),
-        Err(e) => deny_for_error(&e, Some(&payload)).into(),
+        Ok(routed) => apply(&routed, &payload),
+        Err(e) => deny_for_error(&e).into(),
     }
 }
 
-/// What [`route_call`] decided a call under: route's result, the policy it
-/// decided under (which [`replacement_for`] reads to find a rewrite's rule),
-/// and the repo derived for `Context` (which fills a rewrite target's
-/// `{repo}`).
-pub(crate) struct Decided {
-    pub(crate) routed: Routed,
-    pub(crate) policy: Arc<Policy>,
-    pub(crate) repo: Option<String>,
-}
-
-/// The decision core both modes run (FR-CMD-017). Parses the policy and its
-/// settings first (the text is a local file, read outside the deadline), then
-/// runs repo derivation, the lookup pre-pass, and route on a worker thread
-/// under `route.deadline_ms`. Returns route's result with the policy it
-/// decided under and the repo it derived, as [`Decided`].
-/// Every failure is an [`AdapterError`], which each mode turns into a deny
+/// The decision core both modes run (FR-CMD-017). Parses the policy first
+/// (the text is a local file, read outside the deadline), then runs repo
+/// derivation, the lookup pre-pass, and route on a worker thread under
+/// [`ROUTE_DEADLINE`]. Returns route's result. Every failure is an [`AdapterError`], which each mode turns into a deny
 /// (FR-CMD-009, FR-CMD-016). `session` is the hook mode's [`SessionWork`],
 /// run inside the same deadline; the operator mode passes `None`.
 pub(crate) fn route_call(
@@ -619,30 +598,23 @@ pub(crate) fn route_call(
     legion_repo: Option<String>,
     cwd: Option<String>,
     session: Option<SessionWork>,
-) -> Result<Decided, AdapterError> {
+) -> Result<Routed, AdapterError> {
     // A policy file that cannot be read still leaves the built-in no-go list
     // in force (FR-CMD-025): route runs over an empty policy, so a no-go
     // match is refused (and, in the hook mode, recorded and notified), and
     // every other command is denied with the read error exactly as before. A
     // file that reads but does not parse is a different failure and denies
     // outright.
-    let (policy, settings, unread): (Arc<Policy>, RouteSettings, Option<AdapterError>) =
-        match policy_text {
-            Err(e) => (
-                Arc::new(Policy::default()),
-                RouteSettings::default(),
-                Some(e),
-            ),
-            Ok(text) => {
-                let settings: RouteSettings = RouteSettings::from_policy_text(&text)
-                    .map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
-                let policy: Policy =
-                    parse_policy(&text).map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
-                (Arc::new(policy), settings, None)
-            }
-        };
+    let (policy, unread): (Arc<Policy>, Option<AdapterError>) = match policy_text {
+        Err(e) => (Arc::new(Policy::default()), Some(e)),
+        Ok(text) => {
+            let policy: Policy =
+                parse_policy(&text).map_err(|e| AdapterError::PolicyRead(e.to_string()))?;
+            (Arc::new(policy), None)
+        }
+    };
     let worker_policy: Arc<Policy> = Arc::clone(&policy);
-    let (routed, repo): (Routed, Option<String>) = decide(settings.deadline, move || {
+    let routed: Routed = decide(ROUTE_DEADLINE, move || {
         let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
         let now: DateTime<Utc> = Utc::now();
         // The hook's confirmation and incident-record work (#1237). Pending
@@ -684,30 +656,40 @@ pub(crate) fn route_call(
                 work.store.notify(record)
             })?;
         }
-        Ok((routed, repo))
+        Ok(routed)
     })?;
     match unread {
         Some(read_error) if !matches!(routed.deciding, Deciding::NoGo { .. }) => Err(read_error),
-        _ => Ok(Decided {
-            routed,
-            policy,
-            repo,
-        }),
+        _ => Ok(routed),
     }
 }
 
-/// The replacement `tool_input` for a rewrite, built from route's facts
-/// (FR-CMD-003); `None` for every other arm. A replacement that cannot be
-/// built -- including one the target's own command-line definition rejects
-/// (FR-CMD-008) -- is a [`AdapterError::Replacement`], a deny in both modes.
+/// The replacement `tool_input` for a changed call (FR-CMD-003): a Bash
+/// command with `legion ` inserted, on a rewrite or an operator ask, or a
+/// spawn's new `subagent_type` on a non-Bash rewrite; `None` for every other
+/// outcome. A replacement that cannot be built is an
+/// [`AdapterError::Replacement`], a deny in both modes.
 pub(crate) fn replacement_for(
-    decided: &Decided,
+    routed: &Routed,
     original: &Value,
 ) -> Result<Option<Value>, AdapterError> {
-    match &decided.routed.decision {
-        Decision::Rewrite { .. } => rewritten_input(decided, original).map(Some),
-        _ => Ok(None),
-    }
+    let value: Option<&str> = match (&routed.decision, routed.facts.rewritten.as_deref()) {
+        (Decision::Rewrite { .. } | Decision::Ask(_), Some(rewritten)) => Some(rewritten),
+        // A Bash command changes only by insertion: a rewrite with nothing
+        // inserted has nothing to run, and the target is not a command.
+        (Decision::Rewrite { .. }, None) if rewritable_field(original) == Some("command") => {
+            return Err(AdapterError::Replacement(
+                "the rewrite carries no rewritten command".to_string(),
+            ));
+        }
+        (Decision::Rewrite { target, .. }, None) => Some(target.as_str()),
+        _ => None,
+    };
+    value
+        .map(|value| {
+            build_replacement(original, value).map_err(|e| AdapterError::Replacement(e.to_string()))
+        })
+        .transpose()
 }
 
 /// One hook response, and the rewrite it applied if it applied one -- the
@@ -726,25 +708,6 @@ impl From<Value> for Applied {
             rewrite: None,
         }
     }
-}
-
-/// Finds the rewrite rule that decided the call and builds the replacement
-/// under it, judged by legion's own clap command tree (FR-CMD-008). A
-/// rewrite whose deciding entry names no rewrite rule in the policy is
-/// refused rather than built.
-fn rewritten_input(decided: &Decided, original: &Value) -> Result<Value, AdapterError> {
-    let spec: &RewriteSpec =
-        rewrite_rule(&decided.policy, &decided.routed.deciding).ok_or_else(|| {
-            AdapterError::Replacement("the rewrite names no rewrite rule in the policy".to_string())
-        })?;
-    build_replacement(
-        spec,
-        &decided.routed.facts,
-        decided.repo.as_deref(),
-        &Cli::command(),
-        original,
-    )
-    .map_err(|e| AdapterError::Replacement(e.to_string()))
 }
 
 /// Runs `work` on a worker thread and waits at most `deadline` for its
@@ -1002,46 +965,47 @@ fn record_outcome(
     Ok(())
 }
 
-/// Applies route's Decision to the hook response (FR-CMD-017). The policy and
-/// repo in `decided` are read only to build a rewrite's replacement. A
-/// rewrite whose replacement was built is also returned as the
+/// Applies route's Decision to the hook response (FR-CMD-017). A rewrite whose replacement was built is also returned as the
 /// [`AppliedRewrite`] its prediction records (#1272); a refused rewrite is a
 /// deny and carries none.
-fn apply(decided: &Decided, payload: &HookPayload) -> Applied {
-    let routed: &Routed = &decided.routed;
-    let response: Value = match &routed.decision {
-        Decision::Allow { note } => match (&routed.deciding, note.as_deref()) {
-            (Deciding::Default, None | Some("")) => pass_through(Some(DEFAULT_ALLOW_NOTE)),
-            (_, note) => pass_through(note),
-        },
-        Decision::Proxy { .. } => pass_through(None),
-        Decision::Rewrite { reason, .. } => {
-            return match rewritten_input(decided, &payload.tool_input) {
-                Ok(updated) => {
-                    let constructed: String =
-                        rewritten_value_in(&updated).unwrap_or_default().to_string();
-                    Applied {
-                        response: rewrite_response(
-                            payload.rewritten_value(),
-                            &constructed,
-                            reason,
-                            updated,
-                        ),
-                        rewrite: Some(applied_rewrite(payload, constructed)),
-                    }
-                }
-                Err(e) => deny_for_error(&e, Some(payload)).into(),
+fn apply(routed: &Routed, payload: &HookPayload) -> Applied {
+    let replacement: Option<Value> = match replacement_for(routed, &payload.tool_input) {
+        Ok(replacement) => replacement,
+        Err(e) => return deny_for_error(&e).into(),
+    };
+    let response: Value = match (&routed.decision, replacement) {
+        (Decision::Allow { note }, _) => pass_through(note.as_deref()),
+        (Decision::Rewrite { reason, .. }, Some(updated)) => {
+            let constructed: String = rewritten_value_in(&updated).unwrap_or_default().to_string();
+            let response: Value = if routed.facts.rewritten.is_some() {
+                insertion_response(updated)
+            } else {
+                rewrite_response(payload.rewritten_value(), &constructed, reason, updated)
+            };
+            return Applied {
+                response,
+                rewrite: Some(applied_rewrite(payload, constructed)),
             };
         }
-        Decision::Deny(details) => {
-            let mut reason = format!("{} -- instead: {}", details.reason(), details.instead());
+        (Decision::Rewrite { .. }, None) => deny_for_error(&AdapterError::Replacement(
+            "the rewrite carries nothing to run".to_string(),
+        )),
+        (Decision::Deny(details), _) => {
+            let mut reason: String = details.reason().to_string();
+            // A Bash refusal names no replacement; a non-Bash rule's deny
+            // still says what to do instead.
+            if details.instead() != legion_cmd::NO_GO_INSTEAD {
+                reason = format!("{reason} -- instead: {}", details.instead());
+            }
             if matches!(routed.deciding, Deciding::NoGo { .. }) {
                 reason.push_str(". ");
                 reason.push_str(RECORDED_NOTE);
             }
             deny_response(&reason)
         }
-        Decision::Ask(details) => ask_response(details, &routed.deciding, payload),
+        (Decision::Ask(details), updated) => {
+            ask_response(details, &routed.deciding, payload, updated)
+        }
     };
     response.into()
 }
@@ -1072,29 +1036,6 @@ fn applied_rewrite(payload: &HookPayload, constructed: String) -> AppliedRewrite
     }
 }
 
-/// The [`RewriteSpec`] of the rewrite rule that decided a rewrite. Rule ids
-/// are unique across the whole policy, so the id `Deciding` names finds
-/// exactly one rule, under a Bash family or a Fields tool. `None` when the
-/// deciding entry is not a rule, or names no rewrite rule in `policy`; the
-/// adapter then refuses rather than build a replacement it cannot judge.
-fn rewrite_rule<'p>(policy: &'p Policy, deciding: &Deciding) -> Option<&'p RewriteSpec> {
-    let Deciding::Rule { id, .. } = deciding else {
-        return None;
-    };
-    let named = |rule: &&Rule| rule.id == *id;
-    let rule: &Rule = policy.tools.values().find_map(|rules| match rules {
-        ToolRules::Bash { families } => families
-            .values()
-            .flat_map(|family| family.rules.iter())
-            .find(named),
-        ToolRules::Fields { rules } => rules.iter().find(named),
-    })?;
-    match &rule.outcome {
-        RuleOutcome::Rewrite { spec, .. } => Some(spec),
-        _ => None,
-    }
-}
-
 /// The command runs unchanged and the harness's own rules decide the
 /// permission (FR-CMD-002): no `permissionDecision`. A note reaches the agent
 /// as `additionalContext`.
@@ -1109,7 +1050,18 @@ fn pass_through(note: Option<&str>) -> Value {
     hook_output(fields)
 }
 
-/// The rewrite (FR-CMD-003): `allow` so the audited replacement runs, the
+/// A Bash insertion (#1337): the command with `legion ` before each proxied
+/// name as `updatedInput`, and no `permissionDecision`, so the harness's own
+/// permission flow judges the command that will run: the insertion grants
+/// nothing the operator's rules would not. The one place the insertion's
+/// response shape is decided.
+fn insertion_response(updated: Value) -> Value {
+    let mut fields = Map::new();
+    fields.insert("updatedInput".to_string(), updated);
+    hook_output(fields)
+}
+
+/// A non-Bash rewrite (FR-CMD-003): `allow` so the replacement runs, the
 /// patched `tool_input` as `updatedInput`, and what the command became and
 /// why as `additionalContext`, so the agent is never left believing its
 /// original command ran (FR-CMD-009).
@@ -1130,11 +1082,17 @@ fn rewrite_response(
 }
 
 /// The ask (FR-CMD-006). With the operator mark set on `Routed`, the
-/// harness's own permission prompt carrying the reason. Without it, a
+/// harness's own permission prompt carrying the reason, and the inserted
+/// command as `updatedInput` when route rewrote one. Without it, a
 /// refusal the agent reads: the question, the reason, and how to confirm
 /// (`legion cmd confirm`, #1237). The confirm hint does not pre-fill the
 /// reason: the agent must state its own, not copy the policy's.
-fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload) -> Value {
+fn ask_response(
+    details: &AskDetails,
+    deciding: &Deciding,
+    payload: &HookPayload,
+    updated: Option<Value>,
+) -> Value {
     if matches!(
         deciding,
         Deciding::Rule {
@@ -1142,7 +1100,11 @@ fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload
             ..
         }
     ) {
-        return hook_output(decision_fields("ask", details.reason()));
+        let mut fields = decision_fields("ask", details.reason());
+        if let Some(updated) = updated {
+            fields.insert("updatedInput".to_string(), updated);
+        }
+        return hook_output(fields);
     }
     deny_response(&format!(
         "{} -- {}. {RECORDED_NOTE} To confirm: legion cmd confirm --reason <why> -- {}",
@@ -1152,22 +1114,16 @@ fn ask_response(details: &AskDetails, deciding: &Deciding, payload: &HookPayload
     ))
 }
 
-/// The deny for an adapter failure (FR-CMD-005, FR-CMD-009): the reason names
-/// the failure, and the command to run instead is `legion cmd-check` over the
-/// same command, so the agent and the operator can see what route decides.
-fn deny_for_error(err: &AdapterError, payload: Option<&HookPayload>) -> Value {
-    let (reason, instead) = error_deny_text(err, payload.and_then(HookPayload::command));
-    deny_response(&format!("{reason} -- instead: {instead}"))
+/// The deny for an adapter failure (FR-CMD-005, FR-CMD-009): the reason
+/// names the failure. It names no command to run instead (#1337).
+fn deny_for_error(err: &AdapterError) -> Value {
+    deny_response(&error_deny_reason(err))
 }
 
-/// The reason and the command to run instead for a deny over an adapter
-/// failure, shared by both modes so the operator mode reports the deny the
-/// hook would send.
-pub(crate) fn error_deny_text(err: &AdapterError, command: Option<&str>) -> (String, String) {
-    (
-        format!("legion-cmd could not decide this command ({err})"),
-        format!("legion cmd-check -- {}", quoted_command(command)),
-    )
+/// The reason for a deny over an adapter failure, shared by both modes so the
+/// operator mode reports the deny the hook would send.
+pub(crate) fn error_deny_reason(err: &AdapterError) -> String {
+    format!("legion-cmd could not decide this command ({err})")
 }
 
 fn deny_response(reason: &str) -> Value {
@@ -1330,13 +1286,25 @@ mod tests {
 
     const REPO_CWD: &str = "/repo/legion";
 
-    /// A policy that exercises every arm: `rm -rf` denies, `gh issue list`
-    /// rewrites, `gh issue view` rewrites with its operand carried as
-    /// `--number`, `gh pr` asks (marked), `xxd` proxies, `ls` allows with a
-    /// note, `git push` needs recall and consult. The Agent and Edit rewrite
-    /// rules back the hand-built `Routed` values that name them.
+    /// A policy that exercises every arm: `git`, `gh`, `grep` and `rg` get
+    /// `legion ` inserted, `rm -rf` never runs, `curl` is asked, a forced
+    /// `legion ... push` is a power switch, a Read allows with a note, a
+    /// WebFetch needs recall and consult. The Agent and Edit rewrite rules
+    /// back the hand-built `Routed` values that name them.
     const POLICY: &str = r#"{
-        "route": {"deadline_ms": 7000},
+        "proxy": ["git", "gh", "grep", "rg"],
+        "never_run": [
+            {"id": "rm-rf", "names": ["rm"], "reason": "unrecoverable",
+             "predicates": [{"kind": "flag", "short": ["r"]}, {"kind": "flag", "short": ["f"]}]}
+        ],
+        "ask": [
+            {"id": "curl-network", "names": ["curl"], "reason": "curl reaches the network"}
+        ],
+        "power_switches": [
+            {"id": "push-force", "names": ["legion"], "reason": "a forced push",
+             "predicates": [{"kind": "operand", "equals": ["push"]},
+                            {"kind": "flag", "short": ["f"], "long": ["force"]}]}
+        ],
         "tools": {
           "Agent": {"rules": [
               {"id": "agent-explore-to-legion",
@@ -1350,50 +1318,28 @@ mod tests {
                "outcome": {"kind": "rewrite", "target": "legion issue list",
                            "reason": "a hand-built rewrite on an Edit"}}
           ]},
-          "Bash": {"families": {
-            "gh issue view": {"rules": [
-                {"id": "gh-issue-view",
-                 "outcome": {"kind": "rewrite", "target": "legion issue view --repo {repo}",
-                             "reason": "legion tracks issues", "positional": ["--number"]}}
-            ]},
-            "rm": {"rules": [
-                {"id": "rm-rf", "predicates": [{"kind": "arg-present", "arg": "-rf"}],
-                 "outcome": {"kind": "deny", "reason": "unrecoverable", "instead": "trash it"}}
-            ]},
-            "gh issue list": {"rules": [
-                {"id": "gh-issue-list",
-                 "outcome": {"kind": "rewrite", "target": "legion issue list --repo {repo}",
-                             "reason": "legion tracks issues"}}
-            ]},
-            "gh pr": {"rules": [
-                {"id": "gh-pr", "outcome": {"kind": "ask", "question": "touch the PR?",
-                 "reason": "PRs are the orchestrator's", "needs_operator": true}}
-            ]},
-            "xxd": {"rules": [{"id": "xxd", "outcome": {"kind": "proxy", "reason": "binary"}}]},
-            "ls": {"rules": [{"id": "ls", "outcome": {"kind": "allow", "note": "prefer legion sym tree"}}]},
-            "git push": {"rules": [
-                {"id": "git-push", "requires_recall": true, "requires_consult": true,
-                 "outcome": {"kind": "deny", "reason": "push through legion", "instead": "legion push"}}
-            ]}
-          }}
+          "Read": {"rules": [
+              {"id": "read-note", "outcome": {"kind": "allow", "note": "prefer legion sym tree"}}
+          ]},
+          "WebFetch": {"rules": [
+              {"id": "fetch-lookups", "requires_recall": true, "requires_consult": true,
+               "outcome": {"kind": "deny", "reason": "fetch through recall", "instead": "legion recall"}}
+          ]}
         }
     }"#;
 
-    /// [`POLICY`] parsed, for the tests that call [`apply`] on a hand-built
-    /// `Routed`.
-    fn policy() -> Policy {
-        parse_policy(POLICY).expect("the test policy parses")
-    }
-
-    /// [`apply`] over a hand-built `Routed`, decided under `policy` for the
-    /// repo `legion`.
-    fn apply_routed(routed: &Routed, payload: &HookPayload, policy: &Policy) -> Applied {
-        let decided = Decided {
-            routed: routed.clone(),
-            policy: Arc::new(policy.clone()),
-            repo: Some("legion".to_string()),
-        };
-        apply(&decided, payload)
+    /// A WebFetch payload: the tool whose test rule needs both lookups.
+    fn fetch_payload(url: &str, cwd: Option<&str>) -> String {
+        let mut value = json!({
+            "tool_name": "WebFetch",
+            "tool_input": {"url": url},
+            "session_id": "s1",
+            "tool_use_id": "t1"
+        });
+        if let Some(cwd) = cwd {
+            value["cwd"] = json!(cwd);
+        }
+        value.to_string()
     }
 
     fn payload(command: &str) -> String {
@@ -1488,11 +1434,11 @@ mod tests {
         let response = respond_stub("{\"tool_name\": ", POLICY);
         assert_denied(&response);
         assert!(reason(&response).contains("payload:"));
-        assert!(reason(&response).contains("legion cmd-check -- <command>"));
+        assert!(!reason(&response).contains("instead"));
     }
 
     #[test]
-    fn an_unreadable_policy_denies_and_names_the_command_to_check() {
+    fn an_unreadable_policy_denies_naming_the_failure_and_no_command() {
         let response = respond_with(
             &payload("echo hi"),
             Err(AdapterError::PolicyRead(
@@ -1505,7 +1451,7 @@ mod tests {
         .response;
         assert_denied(&response);
         assert!(reason(&response).contains("policy: /nowhere/policy.json: missing"));
-        assert!(reason(&response).ends_with("instead: legion cmd-check -- 'echo hi'"));
+        assert!(!reason(&response).contains("instead"));
     }
 
     #[test]
@@ -1516,22 +1462,23 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_route_setting_denies_rather_than_defaulting() {
-        let response = respond_stub(
-            &payload("echo hi"),
-            r#"{"route": {"deadline_ms": "soon"}, "tools": {"Bash": {"families": {
-                "rm": {"rules": [{"id": "r", "outcome": {"kind": "allow"}}]}}}}}"#,
-        );
+    fn a_policy_with_a_key_outside_the_four_lists_denies() {
+        // #1337: the deadline no longer lives in the policy file, so a
+        // `route` key is an unknown field and the file fails to parse.
+        let response = respond_stub(&payload("echo hi"), r#"{"route": {"deadline_ms": 7000}}"#);
         assert_denied(&response);
-        assert!(reason(&response).contains("route.deadline_ms"));
+        assert!(reason(&response).contains("policy:"));
+        assert!(reason(&response).contains("route"));
     }
 
     #[test]
-    fn an_empty_policy_denies_every_command() {
-        // FR-CMD-016: nothing runs until the policy is populated.
-        let response = respond_stub(&payload("echo hi"), "{}");
-        assert_denied(&response);
-        assert!(reason(&response).contains("policy is empty"));
+    fn an_empty_policy_still_refuses_the_builtins_and_runs_the_rest() {
+        let refused = respond_stub(&payload("rm -rf /"), "{}");
+        assert_denied(&refused);
+        let untouched = respond_stub(&payload("git status"), "{}");
+        let out = output(&untouched);
+        assert!(out.get("permissionDecision").is_none());
+        assert!(out.get("updatedInput").is_none());
     }
 
     #[test]
@@ -1547,16 +1494,16 @@ mod tests {
     // -- each Decision applied (FR-CMD-017) -----------------------------------
 
     #[test]
-    fn an_unmanaged_command_passes_through_and_the_default_is_surfaced() {
-        // FR-CMD-002: the harness's own rules decide the permission.
-        // FR-CMD-016: the default allow still reaches the agent, so it is
-        // never indistinguishable from the hook not running.
-        let response = respond_stub(&payload("echo hi"), POLICY);
-        let out = output(&response);
-        assert_eq!(out["hookEventName"], "PreToolUse");
-        assert!(out.get("permissionDecision").is_none());
-        assert!(out.get("updatedInput").is_none());
-        assert_eq!(out["additionalContext"], DEFAULT_ALLOW_NOTE);
+    fn a_command_matching_no_rule_runs_as_typed_with_nothing_added() {
+        // #1337: no decision, no additionalContext, no note, no updatedInput.
+        for command in ["echo hi", "ls -la", "echo git", "sh -c 'git status'"] {
+            let response = respond_stub(&payload(command), POLICY);
+            assert_eq!(
+                response,
+                json!({"hookSpecificOutput": {"hookEventName": "PreToolUse"}}),
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -1572,7 +1519,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply_routed(&routed, &parsed_payload("ls"), &policy()).response;
+        let response = apply(&routed, &parsed_payload("ls")).response;
         assert!(output(&response).get("additionalContext").is_none());
     }
 
@@ -1599,7 +1546,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let response = apply_routed(&routed, &payload, &policy()).response;
+        let response = apply(&routed, &payload).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
     }
@@ -1627,7 +1574,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let out = apply_routed(&routed, &payload, &policy()).response["hookSpecificOutput"].clone();
+        let out = apply(&routed, &payload).response["hookSpecificOutput"].clone();
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
             out["updatedInput"],
@@ -1642,152 +1589,91 @@ mod tests {
     }
 
     #[test]
-    fn an_allow_note_reaches_the_agent_as_additional_context() {
-        let response = respond_stub(&payload("ls -la"), POLICY);
+    fn a_tool_rule_allow_note_reaches_the_agent_as_additional_context() {
+        let input = json!({
+            "tool_name": "Read",
+            "tool_input": {"file_path": "a.md"},
+            "cwd": REPO_CWD
+        })
+        .to_string();
+        let response = respond_stub(&input, POLICY);
         let out = output(&response);
         assert!(out.get("permissionDecision").is_none());
         assert_eq!(out["additionalContext"], "prefer legion sym tree");
     }
 
     #[test]
-    fn a_deny_carries_the_reason_and_the_command_to_run_instead() {
+    fn a_never_run_deny_carries_its_reason_and_names_no_command() {
         let response = respond_stub(&payload("rm -rf build"), POLICY);
         assert_denied(&response);
-        assert_eq!(reason(&response), "unrecoverable -- instead: trash it");
+        assert_eq!(reason(&response), format!("unrecoverable. {RECORDED_NOTE}"));
     }
 
     #[test]
-    fn a_rewrite_patches_updated_input_and_tells_the_agent() {
+    fn an_insertion_patches_updated_input_and_grants_nothing() {
+        // #1337: `updatedInput` carries the inserted command with every
+        // sibling field kept, and no `permissionDecision`: the harness's own
+        // permission flow judges the command that runs.
         let input = json!({
             "tool_name": "Bash",
-            "tool_input": {"command": "gh issue list", "description": "list", "timeout": 9000,
-                           "run_in_background": true},
+            "tool_input": {"command": "cd a && git log | grep x", "description": "log",
+                           "timeout": 9000, "run_in_background": true},
             "cwd": REPO_CWD
         })
         .to_string();
         let response = respond_stub(&input, POLICY);
-        let out = output(&response);
-        assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
-            out["updatedInput"],
-            json!({"command": "legion issue list --repo legion", "description": "list",
-                   "timeout": 9000, "run_in_background": true})
-        );
-        let context = out["additionalContext"].as_str().expect("context");
-        assert!(context.contains("`gh issue list`"));
-        assert!(context.contains("`legion issue list --repo legion`"));
-        assert!(context.contains("legion tracks issues"));
-    }
-
-    #[test]
-    fn a_rewrite_carries_its_arguments_into_the_replacement() {
-        // #1278: route carries `7`; the rule's positional exception writes it
-        // as `--number`, and the target's own parse accepts the result.
-        let response = respond_stub(&payload("gh issue view 7"), POLICY);
-        let out = output(&response);
-        assert_eq!(out["permissionDecision"], "allow");
-        assert_eq!(
-            out["updatedInput"]["command"],
-            "legion issue view --repo legion --number 7"
+            response,
+            json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": {"command": "cd a && legion git log | legion grep x",
+                                 "description": "log", "timeout": 9000,
+                                 "run_in_background": true}
+            }})
         );
     }
 
     #[test]
-    fn a_rewrite_the_target_rejects_denies_naming_the_argument() {
-        // FR-CMD-008 rev 3: route carries every word and returns Rewrite; the
-        // target's clap definition rejects the one it does not take, and the
-        // adapter denies naming it rather than running without it.
-        for (command, named) in [
-            ("gh issue view 7 --web", "'--web'"),
-            ("gh issue list src/", "'src/'"),
-        ] {
-            let routed = route(
-                &policy(),
-                &ToolCall {
-                    tool: "Bash".to_string(),
-                    input: json!({"command": command}),
-                },
-                &Context::default(),
-            );
-            assert!(
-                matches!(routed.decision, Decision::Rewrite { .. }),
-                "`{command}`: route carries the words and leaves the judgment to the target: {:?}",
-                routed.decision
-            );
-            let applied = respond_applied(&payload(command), POLICY);
-            assert_denied(&applied.response);
-            let text = reason(&applied.response);
-            assert!(text.contains("replacement:"), "`{command}`: {text}");
-            assert!(text.contains(named), "`{command}`: {text}");
-            assert!(applied.rewrite.is_none(), "`{command}`");
-        }
-    }
-
-    #[test]
-    fn a_rewrite_whose_rule_is_not_in_the_policy_is_refused() {
+    fn a_bash_rewrite_with_nothing_inserted_is_refused() {
         let routed = Routed {
             decision: Decision::Rewrite {
-                target: ManagedTarget::new("legion issue list"),
-                reason: "legion tracks issues".to_string(),
+                target: ManagedTarget::new("legion"),
+                reason: "a hand-built rewrite".to_string(),
             },
             facts: Facts::default(),
             deciding: Deciding::Rule {
-                id: "no-such-rule".to_string(),
+                id: legion_cmd::PROXY_ID.to_string(),
                 needs_operator: false,
             },
             confirmed: false,
         };
-        let applied = apply_routed(&routed, &parsed_payload("gh issue list"), &policy());
+        let applied = apply(&routed, &parsed_payload("git status"));
         assert!(
             applied.rewrite.is_none(),
             "a refused rewrite yields no prediction"
         );
-        let response = applied.response;
-        assert_denied(&response);
-        assert!(reason(&response).contains("names no rewrite rule"));
-    }
-
-    #[test]
-    fn route_denies_a_rewrite_whose_word_is_not_a_plain_literal() {
-        // FR-CMD-008: a word the shell expands is never carried, so route
-        // denies before the adapter builds anything, naming the word and the
-        // managed command to run instead.
-        let response = respond_stub(&payload("gh issue list \"$LABEL\""), POLICY);
-        assert_denied(&response);
-        assert!(
-            reason(&response).contains("`\"$LABEL\"`"),
-            "got: {}",
-            reason(&response)
-        );
-        assert!(reason(&response).contains("instead: legion issue list --repo {repo}"));
-    }
-
-    #[test]
-    fn a_proxy_runs_unchanged() {
-        let response = respond_stub(&payload("xxd file.bin"), POLICY);
-        let out = output(&response);
-        assert!(out.get("permissionDecision").is_none());
-        assert!(out.get("updatedInput").is_none());
+        assert_denied(&applied.response);
+        assert!(reason(&applied.response).contains("no rewritten command"));
     }
 
     #[test]
     fn an_ask_from_route_is_refused_with_question_reason_and_confirm_hint() {
         // Without a confirmation route leaves the operator mark unset, so the
-        // ask takes the refusal path, whatever the rule says (#1237).
-        let response = respond_stub(&payload("gh pr merge 7"), POLICY);
+        // ask takes the refusal path (#1237).
+        let response = respond_stub(&payload("curl example.com"), POLICY);
         assert_denied(&response);
         let text = reason(&response);
-        assert!(text.contains("touch the PR?"));
-        assert!(text.contains("PRs are the orchestrator's"));
-        assert!(text.contains("legion cmd confirm --reason <why> -- 'gh pr merge 7'"));
+        assert!(text.contains("needs the operator's approval"));
+        assert!(text.contains("curl reaches the network"));
+        assert!(text.contains("legion cmd confirm --reason <why> -- 'curl example.com'"));
     }
 
     #[test]
-    fn a_parse_error_ask_is_refused_the_same_way() {
+    fn a_parse_error_is_denied_naming_the_parser() {
         let response = respond_stub(&payload("gh pr 'unterminated"), POLICY);
         assert_denied(&response);
-        assert!(reason(&response).contains("could not be parsed"));
-        assert!(reason(&response).contains("legion cmd confirm"));
+        assert!(reason(&response).contains("shell parser"));
+        assert!(!reason(&response).contains("instead"));
     }
 
     fn ask_routed(needs_operator: bool) -> Routed {
@@ -1804,12 +1690,7 @@ mod tests {
 
     #[test]
     fn an_unmarked_ask_never_prompts_the_operator() {
-        let response = apply_routed(
-            &ask_routed(false),
-            &parsed_payload("gh pr merge 7"),
-            &policy(),
-        )
-        .response;
+        let response = apply(&ask_routed(false), &parsed_payload("gh pr merge 7")).response;
         assert_denied(&response);
         assert!(reason(&response).contains("merge it?"));
     }
@@ -1818,20 +1699,23 @@ mod tests {
     fn a_marked_ask_prompts_the_operator_through_the_harness_with_the_reason() {
         // The only path that prompts the operator: the harness's own
         // permission prompt, carrying the reason.
-        let response = apply_routed(
-            &ask_routed(true),
-            &parsed_payload("gh pr merge 7"),
-            &policy(),
-        )
-        .response;
+        let response = apply(&ask_routed(true), &parsed_payload("gh pr merge 7")).response;
         let out = output(&response);
         assert_eq!(out["permissionDecision"], "ask");
         assert_eq!(out["permissionDecisionReason"], "the agent said: hotfix");
         assert!(out.get("updatedInput").is_none());
+
+        // With a rewritten command, the operator's ask carries it.
+        let mut rewritten = ask_routed(true);
+        rewritten.facts.rewritten = Some("legion gh pr merge 7".to_string());
+        let response = apply(&rewritten, &parsed_payload("gh pr merge 7")).response;
+        let out = output(&response);
+        assert_eq!(out["permissionDecision"], "ask");
+        assert_eq!(out["updatedInput"]["command"], "legion gh pr merge 7");
     }
 
     #[test]
-    fn a_no_go_deny_keeps_its_fixed_instead_text() {
+    fn a_no_go_deny_names_no_command_and_says_it_was_recorded() {
         let routed = Routed {
             decision: Decision::Deny(DenyDetails::no_go("never").expect("valid")),
             facts: Facts::default(),
@@ -1840,23 +1724,17 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply_routed(&routed, &parsed_payload("forbidden"), &policy()).response;
+        let response = apply(&routed, &parsed_payload("forbidden")).response;
         assert_denied(&response);
-        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
-        assert!(reason(&response).ends_with(RECORDED_NOTE));
+        assert!(!reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert_eq!(reason(&response), format!("never. {RECORDED_NOTE}"));
     }
 
     // -- no-go, confirmations, and incident records (#1237) --------------------
 
-    /// POLICY plus an unmarked ask for `curl`.
+    /// The policy the confirmation tests run under.
     fn confirm_policy() -> String {
-        POLICY.replacen(
-            "\"xxd\": {",
-            r#""curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
-                "question": "fetch it?", "reason": "network"}}]},
-            "xxd": {"#,
-            1,
-        )
+        POLICY.to_string()
     }
 
     fn session_payload(command: &str, session: &str) -> String {
@@ -1906,7 +1784,7 @@ mod tests {
         let store = temp_store();
         let response = run(&store, "rm -rf /", "s1");
         assert_denied(&response);
-        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(!reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert!(reason(&response).contains(RECORDED_NOTE));
 
         let first = &records(&store)[0];
@@ -1951,7 +1829,7 @@ mod tests {
         });
         let response = run(&store, "rm -rf /", "s1");
         assert_denied(&response);
-        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(!reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert!(
             records(&store)[0]
                 .notice_error
@@ -1978,7 +1856,7 @@ mod tests {
         )
         .response;
         assert_denied(&response);
-        assert!(reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
+        assert!(!reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert!(reason(&response).contains(RECORDED_NOTE));
         let rows = records(&store);
         assert_eq!(rows.len(), 1);
@@ -2026,7 +1904,7 @@ mod tests {
             .response;
             assert_denied(&response);
             assert!(
-                reason(&response).contains(legion_cmd::NO_GO_INSTEAD),
+                !reason(&response).contains(legion_cmd::NO_GO_INSTEAD),
                 "{command}"
             );
             assert!(reason(&response).contains(RECORDED_NOTE), "{command}");
@@ -2052,18 +1930,18 @@ mod tests {
         let rows = records(&store);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::Ask);
-        assert_eq!(rows[0].entry.as_deref(), Some("curl-ask"));
+        assert_eq!(rows[0].entry.as_deref(), Some("curl-network"));
     }
 
     #[test]
-    fn a_confirmed_command_runs_once_and_a_second_run_is_asked_again() {
+    fn a_confirmed_command_goes_to_the_operator_once_and_a_second_run_is_asked_again() {
         let store = temp_store();
         agent_confirms(&store, "curl example.com", "s1", Utc::now());
         let response = run(&store, "curl   'example.com'", "s1");
-        assert!(output(&response).get("permissionDecision").is_none());
+        assert_eq!(output(&response)["permissionDecision"], "ask");
         let again = run(&store, "curl example.com", "s1");
         assert_denied(&again);
-        assert!(reason(&again).contains("fetch it?"));
+        assert!(reason(&again).contains("needs the operator's approval"));
     }
 
     #[test]
@@ -2084,18 +1962,19 @@ mod tests {
     }
 
     #[test]
-    fn a_confirmed_operator_ask_prompts_with_the_agents_reason_and_uses_the_confirmation() {
+    fn a_confirmed_power_switch_prompts_with_the_agents_reason_and_the_inserted_command() {
         let store = temp_store();
-        agent_confirms(&store, "gh pr merge 7", "s1", Utc::now());
-        let response = run(&store, "gh pr merge 7", "s1");
+        agent_confirms(&store, "git push --force", "s1", Utc::now());
+        let response = run(&store, "git push --force", "s1");
         let out = output(&response);
         assert_eq!(out["permissionDecision"], "ask");
         assert_eq!(out["permissionDecisionReason"], "the agent's reason");
+        assert_eq!(out["updatedInput"]["command"], "legion git push --force");
         // The confirmation was used by that prompt: an operator refusal leaves
         // nothing to reuse, and the next attempt is asked again.
-        let again = run(&store, "gh pr merge 7", "s1");
+        let again = run(&store, "git push --force", "s1");
         assert_denied(&again);
-        assert!(reason(&again).contains("touch the PR?"));
+        assert!(reason(&again).contains("a forced push"));
     }
 
     #[test]
@@ -2106,16 +1985,16 @@ mod tests {
         // before it.
         let store = temp_store();
         let now = Utc::now();
-        agent_confirms(&store, "gh pr merge 7", "s1", now);
-        let response = run(&store, "gh pr merge 7", "s1");
+        agent_confirms(&store, "curl example.com", "s1", now);
+        let response = run(&store, "curl example.com", "s1");
         assert_eq!(output(&response)["permissionDecision"], "ask");
         let asks: Vec<crate::telemetry::CmdIncidentRecord> = records(&store)
             .into_iter()
             .filter(|r| r.kind == crate::telemetry::CmdIncidentKind::Ask)
             .collect();
         assert_eq!(asks.len(), 1, "{asks:?}");
-        assert_eq!(asks[0].entry.as_deref(), Some("gh-pr"));
-        assert_eq!(asks[0].command, "gh pr merge 7");
+        assert_eq!(asks[0].entry.as_deref(), Some("curl-network"));
+        assert_eq!(asks[0].command, "curl example.com");
         assert_eq!(asks[0].reason.as_deref(), Some("the agent's reason"));
         let db = store.db();
         let drops = store
@@ -2213,7 +2092,7 @@ mod tests {
             .log()
             .record_ask(
                 &origin,
-                Some("curl-ask"),
+                Some("curl-network"),
                 None,
                 None,
                 Utc::now() - chrono::Duration::minutes(15),
@@ -2232,7 +2111,7 @@ mod tests {
     #[test]
     fn a_failing_required_lookup_denies_naming_the_lookup() {
         let response = respond_with(
-            &payload("git push origin main"),
+            &fetch_payload("https://example.com", Some(REPO_CWD)),
             Ok(POLICY.to_string()),
             Arc::new(FailingLookups),
             temp_store(),
@@ -2248,28 +2127,30 @@ mod tests {
     fn a_fetched_lookup_reaches_route_and_the_rule_decides() {
         // With both lookups fetched, the rule's own deny fires -- proof the
         // results are wired into `Context`, not fetched and dropped.
-        let response = respond_stub(&payload("git push origin main"), POLICY);
+        let response = respond_stub(
+            &fetch_payload("https://example.com", Some(REPO_CWD)),
+            POLICY,
+        );
         assert_denied(&response);
         assert_eq!(
             reason(&response),
-            "push through legion -- instead: legion push"
+            "fetch through recall -- instead: legion recall"
         );
     }
 
     #[test]
     fn a_required_recall_with_no_derivable_repo_denies() {
-        let input = json!({"tool_name": "Bash", "tool_input": {"command": "git push"}}).to_string();
-        let response = respond_stub(&input, POLICY);
+        let response = respond_stub(&fetch_payload("https://example.com", None), POLICY);
         assert_denied(&response);
         assert!(reason(&response).contains("lookup:"));
         assert!(reason(&response).contains("none could be derived"));
     }
 
     #[test]
-    fn the_lookups_are_scoped_to_the_validated_repo_and_queried_with_the_scan_text() {
+    fn the_lookups_are_scoped_to_the_validated_repo_and_queried_with_the_input_text() {
         let lookups = RecordingLookups::new(Duration::ZERO);
         let response = respond_with(
-            &payload("git push origin main"),
+            &fetch_payload("https://example.com", Some(REPO_CWD)),
             Ok(POLICY.to_string()),
             lookups.clone(),
             temp_store(),
@@ -2282,9 +2163,9 @@ mod tests {
             vec![
                 (
                     "recall:legion".to_string(),
-                    "git push origin main".to_string()
+                    "https://example.com".to_string()
                 ),
-                ("consult".to_string(), "git push origin main".to_string()),
+                ("consult".to_string(), "https://example.com".to_string()),
             ]
         );
     }
@@ -2293,7 +2174,7 @@ mod tests {
     fn legion_repo_scopes_the_recall_over_cwd() {
         let lookups = RecordingLookups::new(Duration::ZERO);
         let _response = respond_with(
-            &payload("git push"),
+            &fetch_payload("https://example.com", Some(REPO_CWD)),
             Ok(POLICY.to_string()),
             lookups.clone(),
             temp_store(),
@@ -2316,19 +2197,9 @@ mod tests {
             err,
             AdapterError::DeadlineExceeded { deadline_ms: 10 }
         ));
-        let response = deny_for_error(&err, Some(&parsed_payload("slow")));
+        let response = deny_for_error(&err);
         assert_denied(&response);
         assert!(reason(&response).contains("deadline exceeded: no decision within 10 ms"));
-    }
-
-    #[test]
-    fn a_slow_lookup_overruns_the_configured_deadline_end_to_end() {
-        let slow = RecordingLookups::new(Duration::from_millis(400));
-        let policy = POLICY.replacen("\"deadline_ms\": 7000", "\"deadline_ms\": 20", 1);
-        let response =
-            respond_with(&payload("git push"), Ok(policy), slow, temp_store(), None).response;
-        assert_denied(&response);
-        assert!(reason(&response).contains("no decision within 20 ms"));
     }
 
     #[test]
@@ -2337,7 +2208,7 @@ mod tests {
             decide(Duration::from_secs(5), || panic!("simulated route panic"));
         let err = outcome.expect_err("a panicked worker must not succeed");
         assert!(matches!(err, AdapterError::Panic(_)));
-        let response = deny_for_error(&err, None);
+        let response = deny_for_error(&err);
         assert_denied(&response);
         assert!(reason(&response).contains("panic: simulated route panic"));
     }
@@ -2388,14 +2259,8 @@ mod tests {
         // the command is denied; the recorder is never called and nothing
         // is allowed or rewritten.
         let lookups = RecordingLookups::new(Duration::ZERO);
-        let input = json!({
-            "tool_name": "Bash",
-            "tool_input": {"command": "git push"},
-            "cwd": "/tmp/legion; touch pwned"
-        })
-        .to_string();
         let response = respond_with(
-            &input,
+            &fetch_payload("https://example.com", Some("/tmp/legion; touch pwned")),
             Ok(POLICY.to_string()),
             lookups.clone(),
             temp_store(),
@@ -2448,13 +2313,16 @@ mod tests {
     // -- quoting -----------------------------------------------------------------
 
     #[test]
-    fn the_command_is_quoted_as_one_shell_word_in_every_hint() {
+    fn the_command_is_quoted_as_one_shell_word_in_the_confirm_hint() {
         assert_eq!(shell_single_quote("it's; rm -rf /"), r"'it'\''s; rm -rf /'");
-        let response = deny_for_error(
-            &AdapterError::Lookup("x".to_string()),
-            Some(&parsed_payload("echo 'a'; touch pwned")),
+        let response = respond_stub(&payload("curl 'a'; touch pwned"), POLICY);
+        assert_denied(&response);
+        assert!(
+            reason(&response)
+                .ends_with(r"legion cmd confirm --reason <why> -- 'curl '\''a'\''; touch pwned'"),
+            "{}",
+            reason(&response)
         );
-        assert!(reason(&response).ends_with(r"legion cmd-check -- 'echo '\''a'\''; touch pwned'"));
     }
 
     #[test]
@@ -2463,7 +2331,7 @@ mod tests {
         // call's ids, the command as issued and the command constructed.
         let input = json!({
             "tool_name": "Bash",
-            "tool_input": {"command": "gh issue list"},
+            "tool_input": {"command": "git status"},
             "session_id": "s1",
             "tool_use_id": "toolu_1",
             "transcript_path": "/tmp/s1.jsonl",
@@ -2477,19 +2345,23 @@ mod tests {
                 tool_use_id: Some("toolu_1".to_string()),
                 session_id: Some("s1".to_string()),
                 tool_name: "Bash".to_string(),
-                issued: Some("gh issue list".to_string()),
-                constructed: "legion issue list --repo legion".to_string(),
+                issued: Some("git status".to_string()),
+                constructed: "legion git status".to_string(),
                 background: false,
             })
         );
-        assert_eq!(output(&applied.response)["permissionDecision"], "allow");
+        assert!(
+            output(&applied.response)
+                .get("permissionDecision")
+                .is_none()
+        );
     }
 
     #[test]
     fn a_backgrounded_rewrite_is_marked_background() {
         let input = json!({
             "tool_name": "Bash",
-            "tool_input": {"command": "gh issue list", "run_in_background": true},
+            "tool_input": {"command": "git status", "run_in_background": true},
             "tool_use_id": "toolu_bg",
             "cwd": REPO_CWD
         })
@@ -2499,33 +2371,14 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_the_target_rejects_emits_no_prediction() {
-        // #1278: route returns Rewrite, but the target's own parse rejects
-        // `--web`, so the adapter denies. Nothing was constructed, so nothing
-        // is predicted.
-        let input = json!({
-            "tool_name": "Bash",
-            "tool_input": {"command": "gh issue view 7 --web"},
-            "session_id": "s1",
-            "tool_use_id": "toolu_refused",
-            "cwd": REPO_CWD
-        })
-        .to_string();
-        let applied = respond_applied(&input, POLICY);
-        assert_denied(&applied.response);
-        assert!(reason(&applied.response).contains("'--web'"));
-        assert!(applied.rewrite.is_none());
-    }
-
-    #[test]
     fn no_decision_but_an_applied_rewrite_yields_a_prediction() {
-        // Allow, deny, proxy, ask, and a route-level refusal of a rewrite.
+        // Untouched, never-run, ask, and a parse error.
         for command in [
             "ls -la",
+            "echo git",
             "rm -rf build",
-            "xxd file.bin",
-            "gh pr merge 7",
-            "gh issue list \"$LABEL\"",
+            "curl example.com",
+            "git 'unterminated",
         ] {
             let applied = respond_applied(&payload(command), POLICY);
             assert!(applied.rewrite.is_none(), "{command} yielded a rewrite");
@@ -2536,20 +2389,20 @@ mod tests {
     fn a_rewrite_whose_replacement_fails_yields_no_prediction() {
         let routed = Routed {
             decision: Decision::Rewrite {
-                target: ManagedTarget::new("legion issue list"),
-                reason: "legion tracks issues".to_string(),
+                target: ManagedTarget::new("legion"),
+                reason: "a hand-built rewrite".to_string(),
             },
             facts: Facts {
-                carried: vec!["src/".to_string()],
+                rewritten: Some("  ".to_string()),
                 ..Facts::default()
             },
             deciding: Deciding::Rule {
-                id: "gh-issue-list".to_string(),
+                id: legion_cmd::PROXY_ID.to_string(),
                 needs_operator: false,
             },
             confirmed: false,
         };
-        let applied = apply_routed(&routed, &parsed_payload("gh issue list src/"), &policy());
+        let applied = apply(&routed, &parsed_payload("git status"));
         assert_denied(&applied.response);
         assert!(applied.rewrite.is_none());
     }
@@ -2578,19 +2431,14 @@ mod tests {
                 tool_use_id: Some("toolu_pending".to_string()),
                 session_id: Some("s1".to_string()),
                 tool_name: "Bash".to_string(),
-                issued: Some("gh issue list".to_string()),
-                constructed: "legion issue list".to_string(),
+                issued: Some("git status".to_string()),
+                constructed: "legion git status".to_string(),
                 background: false,
             },
         )
         .expect("emits");
 
         let deadline = Duration::from_millis(400);
-        let policy: String = POLICY.replace(r#""deadline_ms": 7000"#, r#""deadline_ms": 400"#);
-        assert_ne!(
-            policy, POLICY,
-            "the test policy must carry the short deadline"
-        );
         let transcript: PathBuf = fifo.clone();
         // The decision opens the confirmation store (#1237); migrate it before
         // the clock starts so the timing measures the decision, not setup.
@@ -2598,9 +2446,9 @@ mod tests {
         drop(store.db());
         let started = Instant::now();
         let (applied, pending) = respond_beside_witness(
-            &payload("gh issue list"),
+            &payload("git status"),
             deadline,
-            Ok(policy),
+            Ok(POLICY.to_string()),
             Arc::new(StubLookups(Lookup::Empty)),
             store,
             None,
@@ -2618,7 +2466,7 @@ mod tests {
             decided < deadline,
             "the decision waited {decided:?} on a stuck witness pass"
         );
-        assert_eq!(output(&applied.response)["permissionDecision"], "allow");
+        assert!(output(&applied.response).get("updatedInput").is_some());
         assert!(
             applied.rewrite.is_some(),
             "the decision itself is unchanged"
@@ -2652,22 +2500,14 @@ mod tests {
     }
 
     #[test]
-    fn an_extreme_configured_deadline_yields_the_routing_decision() {
-        // #1288: the largest deadline the policy accepts reaches the
-        // decision, not a panic deny.
-        let policy: String = POLICY.replace(
-            r#""deadline_ms": 7000"#,
-            &format!(r#""deadline_ms": {}"#, u64::MAX),
-        );
-        assert_ne!(policy, POLICY, "the test policy must carry the deadline");
-        let policy_text: Result<String, AdapterError> = Ok(policy);
-        let deadline: Duration = deadline_for(&policy_text);
-        assert_eq!(deadline, Duration::from_millis(u64::MAX));
+    fn an_extreme_witness_deadline_yields_the_routing_decision() {
+        // #1288: the largest deadline reaches the decision, not a panic deny.
+        let deadline = Duration::from_millis(u64::MAX);
         let response: Value = guarded(|| {
             respond_beside_witness(
-                &payload("gh issue list"),
+                &payload("git status"),
                 deadline,
-                policy_text,
+                Ok(POLICY.to_string()),
                 Arc::new(StubLookups(Lookup::Empty)),
                 temp_store(),
                 None,
@@ -2677,11 +2517,10 @@ mod tests {
             .response
         });
         assert_eq!(
-            output(&response)["permissionDecision"],
-            "allow",
+            output(&response)["updatedInput"]["command"],
+            "legion git status",
             "got {response}"
         );
-        assert!(output(&response).get("updatedInput").is_some());
     }
 
     #[test]
@@ -2751,10 +2590,6 @@ mod tests {
     /// exactly what ships, with legion's own clap tree judging each rewrite.
     const SHIPPED_POLICY: &str = include_str!("../../plugin/legion-cmd/policy.json");
 
-    /// The FR-CMD-010 hook battery; its Bash rewrite rows say what the adapter
-    /// builds (`replacement`) or why it refuses (`adapter_denies`).
-    const HOOK_CASES: &str = include_str!("../../crates/legion-cmd/tests/fixtures/hook_cases.json");
-
     /// The adapter's response to `command` under the shipped policy, for the
     /// repo `legion`.
     fn shipped(command: &str) -> Value {
@@ -2768,41 +2603,28 @@ mod tests {
         .response
     }
 
-    /// The command a rewrite response runs in place of the agent's.
+    /// The command an insertion response runs in place of the agent's.
     fn rewritten_command(response: &Value) -> Option<&str> {
         let out = output(response);
-        (out["permissionDecision"] == "allow")
+        out.get("permissionDecision")
+            .is_none()
             .then(|| out["updatedInput"]["command"].as_str())
             .flatten()
     }
 
     #[test]
-    fn the_shipped_rewrites_carry_the_agents_arguments() {
-        // The issue's acceptance: each managed command runs as the legion
-        // command carrying its arguments, shell-quoted, with the repo filled
-        // and a work-source slug reshaped.
+    fn the_shipped_policy_inserts_legion_and_keeps_every_other_byte() {
         for (command, replacement) in [
+            ("git commit -m \"a b\"", "legion git commit -m \"a b\""),
+            ("git push", "legion git push"),
+            ("git push -h", "legion git push -h"),
             (
-                "git commit -m \"a b\"",
-                "legion commit --repo legion -m 'a b'",
+                "gh pr view 42 --json title",
+                "legion gh pr view 42 --json title",
             ),
-            ("git push", "legion push --repo legion"),
-            ("gh pr view 42", "legion pr view --repo legion --number 42"),
-            (
-                "gh issue view 1278 --repo runlegion/legion",
-                "legion issue view --repo legion --number 1278",
-            ),
-            (
-                "gh issue list --repo runlegion/legion",
-                "legion issue list --repo legion",
-            ),
-            // git's -C before the verb is carried; legion push and commit
-            // take it (#1301).
-            ("git -C /tmp/x push", "legion push --repo legion -C /tmp/x"),
-            (
-                "git -C /tmp/x commit -m \"fix: y\"",
-                "legion commit --repo legion -C /tmp/x -m 'fix: y'",
-            ),
+            ("git -C /tmp/x push", "legion git -C /tmp/x push"),
+            ("grep -rn foo src | head", "legion grep -rn foo src | head"),
+            ("cd x && rg foo", "cd x && legion rg foo"),
         ] {
             let response = shipped(command);
             assert_eq!(
@@ -2814,28 +2636,18 @@ mod tests {
     }
 
     #[test]
-    fn a_shipped_rewrite_the_target_rejects_denies_naming_the_argument() {
-        for (command, named) in [
-            ("gh pr view 42 --web", "'--web'"),
-            ("git push origin", "'origin'"),
-            ("git commit --amend -m x", "'--amend'"),
-            ("git push -h", "help"),
-            ("git push --force", "`--force`"),
-            ("git push --repo origin", "`--repo`"),
-            ("gh issue view 7 --json title", "`--json`"),
-            ("git commit -m \"$MSG\"", "`\"$MSG\"`"),
-            ("git commit -m *.txt", "`*.txt`"),
-            // A global option other than -C is carried and the target, which
-            // defines only -C, refuses it (#1301).
-            ("git -c user.name=x commit -m y", "'-c'"),
-            ("git --git-dir=.git push", "'--git-dir'"),
-            // After the verb, git commit's -C reuses a message (#1301).
-            ("git commit -C HEAD -m x", "`-C`"),
+    fn no_shipped_response_names_a_command_to_run_instead() {
+        for command in [
+            "rm -rf /",
+            "rm -rf build",
+            "sqlite3 legion.db",
+            "git push --force origin main",
+            "grep 'unterminated",
         ] {
             let response = shipped(command);
             assert_denied(&response);
             assert!(
-                reason(&response).contains(named),
+                !reason(&response).contains("instead"),
                 "`{command}`: {}",
                 reason(&response)
             );
@@ -2843,50 +2655,10 @@ mod tests {
     }
 
     #[test]
-    fn every_hook_battery_bash_rewrite_row_states_what_the_adapter_does() {
-        // The battery pins route's arm; a Bash rewrite is only half decided
-        // there, because the target's own parse runs in the adapter. Each
-        // such row names the command the adapter builds, or what it refuses.
-        let rows: Vec<Value> = serde_json::from_str(HOOK_CASES).expect("the battery parses");
-        let mut failures: Vec<String> = Vec::new();
-        for row in rows
-            .iter()
-            .filter(|row| row["tool"] == "Bash" && row["route"] == "rewrite")
-        {
-            let id = format!("{}/{}", row["hook"], row["case"]);
-            let Some(command) = row["input"]["command"].as_str() else {
-                failures.push(format!("{id}: no command"));
-                continue;
-            };
-            let response = shipped(command);
-            match (row["replacement"].as_str(), row["adapter_denies"].as_str()) {
-                (Some(want), None) => {
-                    if rewritten_command(&response) != Some(want) {
-                        failures.push(format!("{id}: expected `{want}`, got {response}"));
-                    }
-                }
-                (None, Some(want)) => {
-                    let out = output(&response);
-                    let denied = out["permissionDecision"] == "deny";
-                    let text = out["permissionDecisionReason"].as_str().unwrap_or("");
-                    if !denied || !text.contains(want) {
-                        failures.push(format!(
-                            "{id}: expected a deny naming {want:?}, got {response}"
-                        ));
-                    }
-                }
-                _ => failures.push(format!(
-                    "{id}: a Bash rewrite row carries exactly one of replacement / adapter_denies"
-                )),
-            }
-        }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-    }
-
-    #[test]
     fn the_command_tree_is_well_formed_with_the_git_short_spellings() {
         // `-m` and `-F` on `legion commit` (#1278) must not collide with any
         // other short on the path, the global `-v` included.
-        Cli::command().debug_assert();
+        use clap::CommandFactory;
+        crate::cli::Cli::command().debug_assert();
     }
 }

@@ -114,8 +114,8 @@ fn run_confirm(reason: Option<String>, command: &str) -> Result<(), ConfirmError
 /// The policy whose no-go entries a confirmation is checked against. With no
 /// policy file configured in this environment -- the normal state in an
 /// agent's own Bash -- the built-in entries alone apply: they hold with an
-/// empty policy, wrapper variants included, because route resolves the
-/// wrappers the built-in check needs itself (FR-CMD-025). A configured file
+/// empty policy, prefix-word and shell-payload variants included, because
+/// route reads those forms itself (FR-CMD-025, #1337). A configured file
 /// that cannot be read or parsed refuses the confirmation rather than
 /// checking less.
 fn read_policy(configured: Option<PathBuf>) -> Result<Policy, ConfirmError> {
@@ -305,10 +305,7 @@ mod tests {
         let (log, _dir) = log();
         let now = Utc::now();
         let policy = legion_cmd::parse_policy(
-            r#"{"tools": {"Bash": {"families": {
-                "curl": {"rules": [{"id": "curl-ask", "outcome": {"kind": "ask",
-                    "question": "fetch?", "reason": "network"}}]}
-            }}}}"#,
+            r#"{"ask": [{"id": "curl-ask", "names": ["curl"], "reason": "network"}]}"#,
         )
         .expect("policy");
         let cases: [(&[&str], &str); 2] = [

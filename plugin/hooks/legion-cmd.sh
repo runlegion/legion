@@ -24,11 +24,11 @@
 # hook entries use 5 and 6 seconds, below even the adapter's own 7000 ms
 # default).
 
-STATIC_DENY='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd could not run the legion binary (missing, failed, or silent) -- failing closed rather than running an unrouted command. Instead: legion cmd-check -- <command>"}}'
+STATIC_DENY='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legion-cmd could not run the legion binary (missing, failed, or silent) -- failing closed rather than running an unrouted command"}}'
 
 # Seconds to wait for `legion cmd-check --hook` before killing it and
 # printing the static deny. Three numbers stay ordered: the adapter's own
-# deadline (route.deadline_ms, default 7000 ms) < this timeout (a buffer for
+# deadline (ROUTE_DEADLINE in src/cmd/hook.rs, 7000 ms) < this timeout (a buffer for
 # process start and output) < the hooks.json entry timeout the cutover sets.
 LEGION_CMD_HOOK_TIMEOUT_SECS="${LEGION_CMD_HOOK_TIMEOUT_SECS:-9}"
 
