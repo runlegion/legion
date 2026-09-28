@@ -305,11 +305,13 @@ fn grep_fallback_hands_grep_the_argv_untouched() {
     let fx = fixture();
     let outside = tempfile::tempdir().expect("outside dir");
     let outside_path: String = outside.path().display().to_string();
-    let cases: [Vec<&str>; 5] = [
+    let cases: [Vec<&str>; 6] = [
         // -v is grep's invert-match, never legion's verbose.
         vec!["-v", "needle", "src"],
         // `--` reaches grep: clap would have eaten it.
         vec!["-rnv", "--", "-x", "src"],
+        // A leading `--` too: clap drops it before a trailing positional.
+        vec!["--", "-x", "src/a.rs"],
         // -h is grep's no-filename, not help.
         vec!["-h", "needle", "src/a.rs"],
         // A path outside every watched repo.
