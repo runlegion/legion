@@ -22,8 +22,8 @@
 //! - every operand must be a real directory inside a watched repo;
 //! - the files searched are the ones the tool searches: the tool's own walk
 //!   (`tool_files`) lists them, honoring `--hidden`, `--no-ignore`, `-g`,
-//!   `-t` and `--include`, and sym scans exactly that list. The scan must
-//!   come back with nothing skipped, capped, or binary, and no matched file
+//!   `-t` and `--include`, and sym scans exactly that list, uncapped. The
+//!   scan must come back with nothing skipped or binary, and no matched file
 //!   holding a CR or bytes that are not UTF-8.
 //!
 //! Anything outside that set -- another flag, a file operand, standard
@@ -393,8 +393,10 @@ fn scan(search: &SymSearch, root: &Path, files: &[String]) -> Option<Vec<etc::Co
         fixed_strings: search.fixed_strings,
         include_hidden: true,
         no_ignore: true,
-        max_file_size: etc::MAX_FILE_SIZE,
-        max_hits: etc::MAX_HITS,
+        // The tools print every match in every file, however large; the
+        // CLI's caps exist to keep find-content's own output short.
+        max_file_size: u64::MAX,
+        max_hits: usize::MAX,
     };
     let result: etc::FindContentResult = etc::find_content(&search.pattern, &scope).ok()?;
     if result.suppressed > 0

@@ -312,7 +312,7 @@ fn assert_sym_prints(tool: &str, args: &[&str], expected: &[&str], code: i32) {
 
 #[test]
 fn rg_sym_answers_print_what_rg_prints() {
-    let cases: [(&[&str], &[&str], i32); 11] = [
+    let cases: [(&[&str], &[&str], i32); 13] = [
         (
             &["needle", "src"],
             &[
@@ -394,10 +394,80 @@ fn rg_sym_answers_print_what_rg_prints() {
             0,
         ),
         (&["-c", "absent-pattern", "src"], &[], 1),
+        (
+            &["-n", "needle", "src"],
+            &[
+                "src/a.rs:2:let needle = 1;",
+                "src/a.rs:3:// needle again",
+                "src/c.md:1:f(x)+ needle -v",
+                "src/d.txt:2:xneedle_y",
+                "src/sub/b.txt:2:needle",
+            ],
+            0,
+        ),
+        (&["-F", "f(x)+", "src"], &["src/c.md:f(x)+ needle -v"], 0),
     ];
     for (args, expected, code) in cases {
         assert_sym_prints("rg", args, expected, code);
     }
+}
+
+/// More matches than find-content's CLI cap (500) and a file over its size
+/// cap (2 MB): the tools print them all, so sym must too.
+#[test]
+fn large_answers_are_not_capped() {
+    let fx = fixture();
+    let many: String = "needle\n".repeat(600);
+    write(fx.repo.path(), "src/many.txt", &many);
+    let mut big: String = "x".repeat(2 * 1024 * 1024 + 16);
+    big.push_str("\nneedle at the end\n");
+    write(fx.repo.path(), "src/big.txt", &big);
+    let no_tools = empty_path();
+    let path_env: String = no_tools.path().display().to_string();
+    let rg: Output = legion(
+        &fx,
+        fx.repo.path(),
+        &path_env,
+        "rg",
+        &["-c", "needle", "src"],
+    );
+    assert_eq!(
+        rg.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&rg.stderr)
+    );
+    let rg_lines: Vec<String> = sorted_lines(&rg);
+    assert!(
+        rg_lines.contains(&"src/many.txt:600".to_string()),
+        "{rg_lines:?}"
+    );
+    assert!(
+        rg_lines.contains(&"src/big.txt:1".to_string()),
+        "{rg_lines:?}"
+    );
+    let grep: Output = legion(
+        &fx,
+        fx.repo.path(),
+        &path_env,
+        "grep",
+        &["-rn", "needle", "src"],
+    );
+    assert_eq!(
+        grep.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&grep.stderr)
+    );
+    let grep_lines: Vec<String> = sorted_lines(&grep);
+    assert_eq!(
+        grep_lines
+            .iter()
+            .filter(|l| l.starts_with("src/many.txt:"))
+            .count(),
+        600
+    );
+    assert!(grep_lines.contains(&"src/big.txt:2:needle at the end".to_string()));
 }
 
 #[test]
