@@ -15,6 +15,7 @@ mod daemon_watch;
 mod documents;
 mod etc;
 mod find_file;
+mod gh_proxy;
 mod git;
 mod governance;
 // Unix only: the tests drive real grep/rg and sh stubs on PATH.
