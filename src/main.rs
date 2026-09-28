@@ -109,6 +109,12 @@ fn main() {
 
 fn run() -> error::Result<()> {
     raise_fd_limit();
+    // grep and rg take their tool's argv untouched, so they are dispatched
+    // before clap, whose global -v and `--` handling would alter it (#1334).
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(result) = cli::grep::run_from_argv(&argv) {
+        return result;
+    }
     let cli = Cli::parse();
     VERBOSE.store(cli.verbose, Ordering::Relaxed);
 
@@ -372,6 +378,8 @@ fn run() -> error::Result<()> {
             deny_patterns: false,
         } => cli::cmd_check::handle_cmd_check(hook, repo, tool, input, json, policy, command)?,
         Commands::Cmd { action } => cli::cmd_confirm::handle_cmd(action)?,
+        Commands::Grep { args } => cli::grep::handle_grep(args)?,
+        Commands::Rg { args } => cli::grep::handle_rg(args)?,
     }
 
     Ok(())
