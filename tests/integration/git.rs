@@ -697,7 +697,9 @@ fn git_push_to_main_or_master_is_refused() {
     let fx = Fixture::new();
     // Local main ahead of origin/main, so any push of it would change origin.
     run_git_fixture(fx.lp(), &["branch", "-f", "main", "feat"]);
-    let cases: [&[&str]; 8] = [
+    let cases: [&[&str]; 10] = [
+        &["push", "origin", ":"],
+        &["push", "origin", "refs/heads/*:refs/heads/*"],
         &["push", "origin", "main"],
         &["push", "origin", "master"],
         &["push", "origin", "feat:main"],

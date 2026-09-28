@@ -613,6 +613,17 @@ fn main_master_ref(push: &PushArgs, facts: &dyn RepoFacts) -> Option<String> {
             continue;
         }
         let spec: &str = raw.strip_prefix('+').unwrap_or(raw);
+        if spec == ":" {
+            // The matching refspec: every branch that exists on both sides
+            // under the same name, so a local main/master can update it.
+            if let Some(b) = ["main", "master"]
+                .into_iter()
+                .find(|b| facts.has_local_branch(b))
+            {
+                return Some(b.to_string());
+            }
+            continue;
+        }
         let dest: String = match spec.split_once(':') {
             Some((_, dst)) if !dst.is_empty() => dst.to_string(),
             Some((src, _)) => src.to_string(),
@@ -624,11 +635,33 @@ fn main_master_ref(push: &PushArgs, facts: &dyn RepoFacts) -> Option<String> {
             }
             None => spec.to_string(),
         };
-        if is_protected(&dest) {
+        if is_protected(&dest) || glob_reaches_protected(&dest) {
             return Some(dest);
         }
     }
     None
+}
+
+/// Whether a glob refspec side (`refs/heads/*`, `refs/heads/ma*`) matches
+/// `main` or `master` in any spelling [`is_protected`] accepts. Judged on the
+/// destination pattern alone, so a glob that could update either is refused.
+fn glob_reaches_protected(pattern: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return false;
+    };
+    ["main", "master"].into_iter().any(|name| {
+        [
+            name.to_string(),
+            format!("heads/{name}"),
+            format!("refs/heads/{name}"),
+        ]
+        .iter()
+        .any(|full| {
+            full.len() >= prefix.len() + suffix.len()
+                && full.starts_with(prefix)
+                && full.ends_with(suffix)
+        })
+    })
 }
 
 /// The audited push for these arguments, when the audited path can express
@@ -1018,6 +1051,11 @@ mod tests {
             &["--branches", "origin"],
             &["--mirror"],
             &["origin", "--del", "main"],
+            &["origin", ":"],
+            &["origin", "feat", ":"],
+            &["origin", "refs/heads/*:refs/heads/*"],
+            &["origin", "refs/heads/*"],
+            &["origin", "refs/heads/m*:refs/heads/m*"],
         ] {
             let msg: String = refusal(case, &facts).unwrap_or_else(|| panic!("{case:?}"));
             assert!(msg.contains("main/master rule"), "{case:?}: {msg}");
@@ -1056,6 +1094,15 @@ mod tests {
             ..FakeFacts::default()
         };
         assert_eq!(refusal(&["--all"], &facts), None);
+        assert_eq!(refusal(&["origin", ":"], &facts), None);
+        assert_eq!(
+            refusal(&["origin", "refs/heads/f*:refs/heads/f*"], &facts),
+            None
+        );
+        assert_eq!(
+            refusal(&["origin", "refs/tags/*:refs/tags/*"], &facts),
+            None
+        );
         assert_eq!(refusal(&["origin", "feat", "tag", "main"], &facts), None);
     }
 
