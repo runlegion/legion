@@ -1187,19 +1187,23 @@ mod tests {
             render(tool, &s, "src", &files, &hits, &mut lines).expect("render");
             lines
         };
+        // Output paths join the operand with the platform separator, as the
+        // tools' own paths do (rg prints `src\a.rs` on Windows).
+        let a: String = Path::new("src").join("a.rs").display().to_string();
+        let b: String = Path::new("src").join("b.rs").display().to_string();
         assert_eq!(
             lines_of(Tool::Rg, Shape::Lines { numbered: true }),
-            vec!["src/a.rs:1:x", "src/a.rs:3:xx"]
+            vec![format!("{a}:1:x"), format!("{a}:3:xx")]
         );
         assert_eq!(
             lines_of(Tool::Rg, Shape::Lines { numbered: false }),
-            vec!["src/a.rs:x", "src/a.rs:xx"]
+            vec![format!("{a}:x"), format!("{a}:xx")]
         );
-        assert_eq!(lines_of(Tool::Grep, Shape::Files), vec!["src/a.rs"]);
-        assert_eq!(lines_of(Tool::Rg, Shape::Counts), vec!["src/a.rs:2"]);
+        assert_eq!(lines_of(Tool::Grep, Shape::Files), vec![a.clone()]);
+        assert_eq!(lines_of(Tool::Rg, Shape::Counts), vec![format!("{a}:2")]);
         assert_eq!(
             lines_of(Tool::Grep, Shape::Counts),
-            vec!["src/a.rs:2", "src/b.rs:0"]
+            vec![format!("{a}:2"), format!("{b}:0")]
         );
     }
 
