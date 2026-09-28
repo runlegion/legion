@@ -7,6 +7,7 @@ pub(crate) mod cmd_confirm;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
+pub(crate) mod gh;
 pub(crate) mod inbox;
 pub(crate) mod index_cmd;
 pub(crate) mod issue;
@@ -855,6 +856,15 @@ pub(crate) enum Commands {
         /// shell-safe way to pass a body containing backticks or $(...).
         #[arg(long)]
         body: Option<String>,
+    },
+
+    /// Run a gh command. Writes whose arguments translate go through legion's
+    /// work-source verbs; everything else runs the real gh.
+    #[command(disable_help_flag = true)]
+    Gh {
+        /// gh's arguments, exactly as gh would receive them
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Manage pull requests via work source plugins

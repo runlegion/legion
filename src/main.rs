@@ -300,6 +300,7 @@ fn run() -> error::Result<()> {
         Commands::Schedule { action } => cli::schedule::handle(action)?,
         Commands::Issue { action } => cli::issue::handle(action)?,
         Commands::Pr { action } => cli::pr::handle(action)?,
+        Commands::Gh { args } => cli::gh::handle(args)?,
         Commands::Push {
             repo,
             branch,

@@ -447,6 +447,35 @@ pub fn resolve_config(legion_repo: &str) -> Option<(String, String, String)> {
     None
 }
 
+/// Find the legion repo whose watch.toml `github` field names `github_repo`
+/// (`owner/name`, compared case-insensitively as GitHub does).
+///
+/// The reverse of `resolve_config`, which matches by `name`: `legion gh`
+/// knows only the gh target, and needs the legion repo to call the verbs.
+/// An entry counts only when `resolve_config` would also resolve it to the
+/// same project, so a half-configured entry (no `workdir`) is no match
+/// rather than a verb that then fails with "no work source configured".
+pub fn repo_for_github(github_repo: &str) -> Option<String> {
+    let data_dir = crate::data_dir().ok()?;
+    let content = std::fs::read_to_string(data_dir.join("watch.toml")).ok()?;
+    let config: toml::Table = content.parse().ok()?;
+
+    config
+        .get("repos")?
+        .as_array()?
+        .iter()
+        .filter(|repo| {
+            repo.get("github")
+                .and_then(|v| v.as_str())
+                .is_some_and(|gh| gh.eq_ignore_ascii_case(github_repo))
+        })
+        .filter_map(|repo| repo.get("name").and_then(|v| v.as_str()))
+        .find(|name| {
+            resolve_config(name).is_some_and(|(_, gh, _)| gh.eq_ignore_ascii_case(github_repo))
+        })
+        .map(str::to_owned)
+}
+
 /// Resolve work source config for a repo, or fail with the canonical
 /// "no work source configured" error.
 ///

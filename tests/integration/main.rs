@@ -15,6 +15,7 @@ mod daemon_watch;
 mod documents;
 mod etc;
 mod find_file;
+mod gh_proxy;
 mod governance;
 mod index_telemetry;
 mod inventory_freshness;
