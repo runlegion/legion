@@ -36,6 +36,9 @@ authoritative pass).
   carries its `key` and `prediction` id.
 - On a resume, the draft Discovery id: `legion document view <discovery-id> --json`. The draft
   is the state; continue from the items it names as blocked.
+- On a re-listen (a claim reopened by an intent revision), the intent id, the agenda path, the
+  landed Discovery id, and the prediction ids of the insights to re-score. The prediction ids
+  mark the dispatch as a re-listen; each one's fingerprint names its insight.
 
 Validate each document against the schema whose payload carries its `"x-doc-type"`, resolved
 from `legion document list --doc-type schema --json` (the `payload` is a JSON string; parse it
@@ -154,11 +157,15 @@ Name every claim left unwitnessed, with its reason.
 **Your own predictions go to a later pass.** A later listening pass over discourse accrued
 after this verdict witnesses each insight prediction: `shipped` at 1.0 when the verdict
 stands, `scoped-down` at 0.5 when supported became bounded or a bound moved, `abandoned` at
-0.0 when it flipped. You report each id and stop. When you run as that re-listen pass, find
-the prior Discovery with `legion document list --doc-type discovery --surface <surface>
---json`, take its prediction ids from the conductor's dispatch, re-run the probes and
-counter-probes, rebuild `<discovery-id>:insight:<insight-id>`, and witness the earlier pass's
-predictions alone.
+0.0 when it flipped. You report each id and stop.
+
+**The re-listen pass.** When you run as that later pass, the landed Discovery is the prior
+revision (`legion document list --doc-type discovery --surface <surface> --json` confirms it).
+For each prediction id passed, rebuild `<discovery-id>:insight:<insight-id>` to confirm it,
+re-run that insight's probes and counter-probes over the corpus as it stands now, and witness
+it by the rule above. Then revise the Discovery in place with the re-scored insights, under
+the same status rules, and emit a fresh prediction for each re-scored verdict; a later pass
+witnesses those. The predictions passed to you are the only ones you witness.
 
 **Emit mechanics.**
 
@@ -221,14 +228,21 @@ returns rather than wait on it.
    payload is wrong; fix it and validate again.
 9. At the authoritative pass, emit one prediction per insight with a verdict:
 
+   Build the payload in a file, since the null query is free text and an apostrophe would
+   end a single-quoted payload while emit still exits 0:
+
    ```
+   cat > insight-pred.json <<'JSON'
+   {"insight":"<insight-id>","verdict":"<status>","voices":<n>,"null":"<null query>"}
+   JSON
    legion uncertainty emit --surface legion.sd --feature-key sd.discover.insight \
      --session-id "$CLAUDE_CODE_SESSION_ID" --orphan-ttl-days 180 \
      --input-fingerprint <discovery-id>:insight:<insight-id> --claimed-confidence <p> \
-     --payload '{"insight":"<insight-id>","verdict":"<status>","voices":<n>,"null":"<null query>"}'
+     --payload "$(cat insight-pred.json)"
    ```
 
-   Then witness the agenda's claims (Rules).
+   Then witness the agenda's claims (Rules). On a re-listen, run the re-listen pass instead
+   of steps 2 to 7, revise the Discovery, and emit for the re-scored insights.
 
 ## Return
 
@@ -237,12 +251,12 @@ then stop. Leave out lines that are empty for your status.
 
 ```
 status: done | parked | stopped
-documents: <discovery-id> | discovery | <draft|review|done> | <orientation|authoritative> pass
+documents: <discovery-id> | discovery | <draft|review|done> | <orientation|authoritative|re-listen> pass
 predictions: <id> | <discovery-id>:insight:<insight-id> | <confidence> | <insight> | <emit error, if any>
 waiting_on: <crawl lens, source depth, a question out, or operator rulings>  (parked)
 questions: <world (lens) or operator> | <question> | <recommended answer> | <reasoning> (parked)
 gaps: <document id or agenda path> | <failure>                                (stopped)
-notes: each agenda claim witnessed (label, correctness) or left open (why); contradicted
+notes: each agenda claim (or, on a re-listen, each prior insight prediction) witnessed (label, correctness) or left open (why); contradicted
   and saturated-unevidenced insights with rulings; challenge notes; meta.threshold carries
   no meaning; anything else the conductor needs
 ```

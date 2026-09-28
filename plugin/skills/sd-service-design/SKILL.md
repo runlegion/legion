@@ -77,7 +77,10 @@ stops here: the intent comes first, and writing one is not this pipeline's job).
    orientation pass, and the authoritative scoring runs on the wake after the crawl has
    accumulated, about a day later. A Discovery that returns at `review` carries contradicted
    or saturated-unevidenced insights, or challenge notes on committed items: take each to the
-   operator with its recommended ruling, and wait for the rulings before step 3.
+   operator with its recommended ruling, and wait for the rulings before step 3. When every
+   ruling is in, record them by revising the Discovery to `done` (`legion document revise`);
+   the intent's owner makes any change to the intent. sd-ecosystem-imagine returns `stopped`
+   on a Discovery still at `review`.
 3. **`sd-ecosystem-imagine`** -- dispatch with the intent and Discovery ids, and on a redraw
    with the ecosystem id too. It may park on questions for real people or choices for the
    operator; keep its register (each entry's prediction id and route) until every entry is
@@ -131,8 +134,10 @@ draft document id. The draft document is the state; nothing lives only in a dead
 context.
 
 **sd-discover's two-pass cadence.** After an orientation pass returns `parked`, re-arm the
-defer; never clear it. Only when the authoritative pass returns (at `done`, or at `review`
-for rulings) clear it: `legion undefer --work-item <id>` (it takes no `--repo`).
+defer; never clear it. Only when the authoritative pass returns (at `done`, or `parked` at
+`review` for rulings) clear it: `legion undefer --work-item <id>` (it takes no `--repo`). The
+return's documents line names the pass (orientation, authoritative, or re-listen), so read it
+there.
 
 ## When the intent revises after artifacts land
 
@@ -141,8 +146,9 @@ propagates by what actually changed, not by re-running the pipeline:
 
 - **Discovery**: untouched by direction or proposal deltas -- only a changed CLAIM
   reopens listening. No verdict moves because the plans did. Dispatch sd-discover as the
-  re-listen pass with the prior Discovery id and its insight prediction ids; it witnesses
-  the earlier verdicts it re-scores, and is never the pass that emitted them.
+  re-listen pass with the intent id, the agenda path, the landed Discovery id, and the
+  prediction ids of the insights the changed claim touches; it witnesses those earlier
+  verdicts, revises the Discovery, and is never the pass that emitted them.
 - **Ecosystem**: revises. This is the register loop closing: dispatch sd-ecosystem-imagine
   with the ecosystem id, and open entries the revision answers are recorded as answered, and
   the answers they ground are adjusted. Each answered entry's prediction is witnessed by you

@@ -38,9 +38,10 @@ One Ecosystem document, with one prediction per open register entry.
 
 Validate each against the schema whose payload carries its `"x-doc-type"`, resolved from
 `legion document list --doc-type schema --json` (the `payload` is a JSON string; parse it
-twice). A missing or invalid input returns `stopped`. A Discovery that still carries
-contradicted insights the operator has yet to rule on returns `stopped`, naming them: the
-step starts after the rulings.
+twice). A missing or invalid input returns `stopped`. A Discovery at `review` is waiting on
+the operator's rulings on its contradicted or saturated-unevidenced insights and challenge
+notes; it returns `stopped`, naming them. The step starts once the conductor has recorded the
+rulings by moving the Discovery to `done`.
 
 ## Rules
 
@@ -135,8 +136,9 @@ its entry's `recovery`, prefixed `ANSWERED:`, and build what it settles into the
 map. Register entries keep their position and stay in the document, since the position is the
 prediction id. The register is empty when every entry is answered.
 
-**Actors' persona field.** Each primary actor's `persona` stays null; the conductor revises it
-in after that persona lands.
+**Actors' persona field.** On a first land each primary actor's `persona` is null. On a
+redraw, carry each existing `persona` value over unchanged. The conductor sets it after that
+persona lands.
 
 **Predictions.** One per open register entry, under feature key `sd.ecosystem-imagine.edge`,
 that the drafted answer holds (the people or the operator confirm it). Answered questions and
@@ -177,7 +179,8 @@ sends questions to eavesdrop and choices to the operator, and arms the wake.
    - `meta`: `title`, `core_service`, `status` (draft/review/done), `date`, `author` = you;
    - `actors` tiered `primary`/`secondary`/`tertiary` (primary required); each primary actor
      carries `entry_point` (where they first touch the service), `need` (one line), and
-     `persona: null`; secondary and tertiary actors carry no persona field;
+     `persona` (null on a first land, carried over on a redraw); secondary and tertiary
+     actors carry no persona field;
    - `channels`: `name`, `type`, `purpose`, `users`;
    - `value_exchanges`: `from`, `to`, `gives`, `gets`;
    - `moments_of_truth`: `number`, `title`, `actor`, `success`, `failure`,
