@@ -109,12 +109,15 @@ fn main() {
 
 fn run() -> error::Result<()> {
     raise_fd_limit();
-    // `legion git <args>` (#1335): every argument after `git` is git's. Handed
-    // over before clap parses, because clap would still take legion's global
-    // `-v`/`--verbose` and a leading `--` out of the trailing arguments.
+    // Proxies whose argv belongs to another tool are dispatched before clap,
+    // whose global -v and `--` handling would alter it: git (#1335), grep and
+    // rg (#1334).
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if argv.get(1).is_some_and(|first| first == "git") {
         return cli::git::handle_git(argv.get(2..).unwrap_or(&[]).to_vec());
+    }
+    if let Some(result) = cli::grep::run_from_argv(&argv) {
+        return result;
     }
     let cli = Cli::parse();
     VERBOSE.store(cli.verbose, Ordering::Relaxed);
@@ -380,6 +383,8 @@ fn run() -> error::Result<()> {
             deny_patterns: false,
         } => cli::cmd_check::handle_cmd_check(hook, repo, tool, input, json, policy, command)?,
         Commands::Cmd { action } => cli::cmd_confirm::handle_cmd(action)?,
+        Commands::Grep { args } => cli::grep::handle_grep(args)?,
+        Commands::Rg { args } => cli::grep::handle_rg(args)?,
     }
 
     Ok(())
