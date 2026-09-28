@@ -246,29 +246,39 @@ fn scan(tool: Tool, search: &SymSearch, root: &Path) -> Option<Vec<etc::ContentH
     Some(result.hits)
 }
 
-/// Parse grep's argv into a sym search, or `None` for any form outside the
-/// accepted set. Options must all precede the first operand: BSD grep stops
+/// The flags, pattern and operands of one argv, read with the tool's own
+/// flag meanings. Only the flags sym can answer are known; any other flag
+/// makes the argv a form sym does not answer.
+#[derive(Default)]
+struct ToolArgv {
+    recursive: bool,
+    line_numbers: bool,
+    extended: bool,
+    fixed: bool,
+    pattern: String,
+    operands: Vec<String>,
+}
+
+/// Read `args` as `tool` reads them, or `None` for any flag outside the
+/// known set, a second pattern, no operand, or an empty or multi-line
+/// pattern. grep options must all precede the first operand: BSD grep stops
 /// option parsing there and GNU grep does not, so a later option means
-/// different things to the two.
-fn parse_grep(args: &[OsString]) -> Option<SymSearch> {
+/// different things to the two. rg reads options anywhere before `--`.
+fn read_argv(tool: Tool, args: &[OsString]) -> Option<ToolArgv> {
     let args: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
-    let mut recursive = false;
-    let mut line_numbers = false;
-    let mut extended = false;
-    let mut fixed = false;
+    let grep: bool = tool == Tool::Grep;
+    let mut argv = ToolArgv::default();
     let mut pattern: Option<String> = None;
-    let mut positionals: Vec<String> = Vec::new();
     let mut i: usize = 0;
     let mut options_done = false;
     while i < args.len() {
         let arg: &str = args[i];
         i += 1;
         if options_done || !arg.starts_with('-') || arg == "-" {
-            positionals.push(arg.to_string());
+            argv.operands.push(arg.to_string());
             continue;
         }
-        // An option after an operand: GNU reads it, BSD reads a file name.
-        if !positionals.is_empty() {
+        if grep && !argv.operands.is_empty() {
             return None;
         }
         if arg == "--" {
@@ -277,29 +287,26 @@ fn parse_grep(args: &[OsString]) -> Option<SymSearch> {
         }
         if let Some(long) = arg.strip_prefix("--") {
             match long {
-                "recursive" => recursive = true,
-                "line-number" => line_numbers = true,
-                "extended-regexp" => extended = true,
-                "fixed-strings" => fixed = true,
+                "recursive" if grep => argv.recursive = true,
+                "extended-regexp" if grep => argv.extended = true,
+                "line-number" => argv.line_numbers = true,
+                "fixed-strings" => argv.fixed = true,
                 "regexp" => {
                     set_once(&mut pattern, args.get(i)?)?;
                     i += 1;
                 }
-                other => {
-                    let value: &str = other.strip_prefix("regexp=")?;
-                    set_once(&mut pattern, value)?;
-                }
+                other => set_once(&mut pattern, other.strip_prefix("regexp=")?)?,
             }
             continue;
         }
         let cluster: &str = &arg[1..];
         for (pos, flag) in cluster.char_indices() {
             match flag {
-                'r' | 'R' => recursive = true,
-                'n' => line_numbers = true,
-                'E' => extended = true,
-                'F' => fixed = true,
-                'H' => {}
+                'r' | 'R' if grep => argv.recursive = true,
+                'E' if grep => argv.extended = true,
+                'H' if grep => {}
+                'n' => argv.line_numbers = true,
+                'F' => argv.fixed = true,
                 'e' => {
                     let rest: &str = &cluster[pos + 1..];
                     if rest.is_empty() {
@@ -314,112 +321,57 @@ fn parse_grep(args: &[OsString]) -> Option<SymSearch> {
             }
         }
     }
-    if !recursive || !line_numbers || (extended && fixed) {
+    argv.pattern = match pattern {
+        Some(p) => p,
+        None if !argv.operands.is_empty() => argv.operands.remove(0),
+        None => return None,
+    };
+    if argv.pattern.is_empty() || argv.pattern.contains('\n') || argv.operands.is_empty() {
         return None;
     }
-    if pattern.is_none() {
-        if positionals.is_empty() {
-            return None;
-        }
-        pattern = Some(positionals.remove(0));
+    Some(argv)
+}
+
+/// grep's argv as a sym search: recursive and line-numbered (the only shape
+/// that prints `path:line:text`), one matching mode, and a literal pattern
+/// -- grep's BRE and ERE are not Rust regex, but a literal means the same
+/// to both.
+fn parse_grep(args: &[OsString]) -> Option<SymSearch> {
+    let argv: ToolArgv = read_argv(Tool::Grep, args)?;
+    if !argv.recursive || !argv.line_numbers || (argv.extended && argv.fixed) {
+        return None;
     }
-    let pattern: String = pattern?;
-    // Only literals mean the same to grep (BRE or ERE) and to sym.
-    let special: &[char] = if fixed {
+    let special: &[char] = if argv.fixed {
         &[]
-    } else if extended {
+    } else if argv.extended {
         &[
             '\\', '.', '[', ']', '*', '^', '$', '+', '?', '(', ')', '{', '}', '|',
         ]
     } else {
         &['\\', '.', '[', '*', '^', '$']
     };
-    if pattern.is_empty() || pattern.contains('\n') || pattern.contains(special) {
-        return None;
-    }
-    if positionals.is_empty() {
+    if argv.pattern.contains(special) {
         return None;
     }
     Some(SymSearch {
-        pattern,
+        pattern: argv.pattern,
         fixed_strings: true,
-        operands: positionals,
+        operands: argv.operands,
     })
 }
 
-/// Parse rg's argv into a sym search, or `None` for any form outside the
-/// accepted set. rg reads options anywhere before `--`, and its regex is the
-/// engine sym's matcher is built on, so a regex pattern is accepted as-is.
+/// rg's argv as a sym search: line-numbered (piped rg prints no line
+/// numbers otherwise). rg's regex is the engine sym's matcher is built on,
+/// so a regex pattern is taken as-is.
 fn parse_rg(args: &[OsString]) -> Option<SymSearch> {
-    let args: Vec<&str> = args.iter().map(|a| a.to_str()).collect::<Option<_>>()?;
-    let mut line_numbers = false;
-    let mut fixed = false;
-    let mut pattern: Option<String> = None;
-    let mut positionals: Vec<String> = Vec::new();
-    let mut i: usize = 0;
-    let mut options_done = false;
-    while i < args.len() {
-        let arg: &str = args[i];
-        i += 1;
-        if options_done || !arg.starts_with('-') || arg == "-" {
-            positionals.push(arg.to_string());
-            continue;
-        }
-        if arg == "--" {
-            options_done = true;
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            match long {
-                "line-number" => line_numbers = true,
-                "fixed-strings" => fixed = true,
-                "regexp" => {
-                    set_once(&mut pattern, args.get(i)?)?;
-                    i += 1;
-                }
-                other => {
-                    let value: &str = other.strip_prefix("regexp=")?;
-                    set_once(&mut pattern, value)?;
-                }
-            }
-            continue;
-        }
-        let cluster: &str = &arg[1..];
-        for (pos, flag) in cluster.char_indices() {
-            match flag {
-                'n' => line_numbers = true,
-                'F' => fixed = true,
-                'e' => {
-                    let rest: &str = &cluster[pos + 1..];
-                    if rest.is_empty() {
-                        set_once(&mut pattern, args.get(i)?)?;
-                        i += 1;
-                    } else {
-                        set_once(&mut pattern, rest)?;
-                    }
-                    break;
-                }
-                _ => return None,
-            }
-        }
-    }
-    if !line_numbers {
-        return None;
-    }
-    if pattern.is_none() {
-        if positionals.is_empty() {
-            return None;
-        }
-        pattern = Some(positionals.remove(0));
-    }
-    let pattern: String = pattern?;
-    if pattern.is_empty() || pattern.contains('\n') || positionals.is_empty() {
+    let argv: ToolArgv = read_argv(Tool::Rg, args)?;
+    if !argv.line_numbers {
         return None;
     }
     Some(SymSearch {
-        pattern,
-        fixed_strings: fixed,
-        operands: positionals,
+        pattern: argv.pattern,
+        fixed_strings: argv.fixed,
+        operands: argv.operands,
     })
 }
 
@@ -437,28 +389,19 @@ fn set_once(slot: &mut Option<String>, value: &str) -> Option<()> {
 /// matched. A closed pipe (`legion grep ... | head -1`) ends quietly with
 /// the status a SIGPIPE-killed tool reports, instead of an error.
 fn print_answer(lines: &[String]) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for line in lines {
-        match writeln!(out, "{line}") {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                return Err(LegionError::ExitWith(141));
-            }
-            Err(e) => return Err(LegionError::Io(e)),
+    let written: std::io::Result<()> = (|| {
+        let mut out = std::io::stdout().lock();
+        for line in lines {
+            writeln!(out, "{line}")?;
         }
+        out.flush()
+    })();
+    match written {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Err(LegionError::ExitWith(141)),
+        Err(e) => Err(LegionError::Io(e)),
+        Ok(()) if lines.is_empty() => Err(LegionError::ExitWith(1)),
+        Ok(()) => Ok(()),
     }
-    match out.flush() {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-            return Err(LegionError::ExitWith(141));
-        }
-        Err(e) => return Err(LegionError::Io(e)),
-    }
-    if lines.is_empty() {
-        return Err(LegionError::ExitWith(1));
-    }
-    Ok(())
 }
 
 /// Run the real tool with the arguments untouched and stdio inherited, and

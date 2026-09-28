@@ -362,6 +362,28 @@ fn grep_reads_standard_input_through_the_tool() {
 }
 
 #[test]
+fn a_sym_error_on_an_answerable_form_runs_the_tool() {
+    let fx = fixture();
+    // `-n PATTERN DIR` is a form sym takes, but "(" is not a valid regex:
+    // the sym error becomes the real rg's run, never legion's own error.
+    let out: Output = stub_run(&fx, "rg", &["-n", "(", "src"], "", "2");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(stub_args(&out), vec!["-n", "(", "src"]);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "stub-stderr\n");
+}
+
+#[test]
+fn a_scan_that_could_differ_from_the_tool_runs_the_tool() {
+    let fx = fixture();
+    // A binary file is one sym skips and grep reports: sym's answer could
+    // differ, so the real grep runs with the argv untouched.
+    std::fs::write(fx.repo.path().join("src/blob.bin"), b"needle\0\n").expect("write");
+    let out: Output = stub_run(&fx, "grep", &["-rn", "needle", "src"], "", "0");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(stub_args(&out), vec!["-rn", "needle", "src"]);
+}
+
+#[test]
 fn rg_fallback_hands_rg_the_argv_untouched() {
     let fx = fixture();
     let cases: [&[&str]; 3] = [&["-V"], &["needle", "src"], &["-nv", "--", "-x", "src"]];
