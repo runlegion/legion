@@ -219,6 +219,9 @@ enum PushEffect {
     Delete,
     All,
     Mirror,
+    /// `--tags`: git adds `refs/tags/*` as the refspec, so a push with no
+    /// other refspec updates tags only, never the current branch.
+    Tags,
     SetUpstream,
     Other,
 }
@@ -237,7 +240,7 @@ const PUSH_LONG: [(&str, ArgKind, PushEffect); 29] = [
     ("branches", ArgKind::None, PushEffect::All),
     ("mirror", ArgKind::None, PushEffect::Mirror),
     ("delete", ArgKind::None, PushEffect::Delete),
-    ("tags", ArgKind::None, PushEffect::Other),
+    ("tags", ArgKind::None, PushEffect::Tags),
     ("dry-run", ArgKind::None, PushEffect::Other),
     ("porcelain", ArgKind::None, PushEffect::Other),
     ("force", ArgKind::None, PushEffect::Force),
@@ -270,6 +273,7 @@ struct PushArgs {
     /// `--all` or `--branches`.
     all: bool,
     mirror: bool,
+    tags: bool,
     /// Any option other than `-u`/`--set-upstream`, a `--`, or a malformed
     /// option: the audited path cannot express it.
     other: bool,
@@ -425,6 +429,10 @@ fn apply_push_effect(push: &mut PushArgs, effect: PushEffect, malformed: bool) {
         }
         PushEffect::Mirror => {
             push.mirror = true;
+            push.other = true;
+        }
+        PushEffect::Tags => {
+            push.tags = true;
             push.other = true;
         }
         PushEffect::Force | PushEffect::Other => push.other = true,
@@ -591,6 +599,9 @@ fn main_master_ref(push: &PushArgs, facts: &dyn RepoFacts) -> Option<String> {
     }
     let refspecs: &[String] = push.refspecs();
     if refspecs.is_empty() {
+        if push.tags {
+            return None;
+        }
         return facts.current_branch().filter(|b| is_protected(b));
     }
     let mut i: usize = 0;
@@ -1021,6 +1032,20 @@ mod tests {
         };
         assert!(refusal(&[], &facts).is_some());
         assert!(refusal(&["origin", "HEAD"], &facts).is_some());
+        // --follow-tags adds no refspec: the current branch is still pushed.
+        assert!(refusal(&["--follow-tags"], &facts).is_some());
+    }
+
+    #[test]
+    fn tags_push_on_main_updates_tags_only_and_is_not_refused() {
+        let facts = FakeFacts {
+            current: Some("main".to_string()),
+            branches: strings(&["main"]),
+            ..FakeFacts::default()
+        };
+        assert_eq!(refusal(&["--tags"], &facts), None);
+        assert_eq!(refusal(&["origin", "--tags"], &facts), None);
+        assert!(refusal(&["origin", "--tags", "main"], &facts).is_some());
     }
 
     #[test]

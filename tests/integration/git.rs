@@ -796,12 +796,20 @@ fn git_push_of_unchecked_out_branch_runs_real_git() {
 #[test]
 fn git_push_tags_runs_real_git() {
     let _guard = RealRepoConfigGuard::new();
+    // On main, with main ahead of origin: `--tags` updates tags only, so the
+    // main/master rule does not apply and main stays where it was.
     let fx = Fixture::new();
+    run_git_fixture(fx.lp(), &["checkout", "-q", "main"]);
+    run_git_fixture(fx.lp(), &["merge", "-q", "--ff-only", "feat"]);
     run_git_fixture(fx.lp(), &["tag", "v9"]);
+    let main_before = bare_ref(fx.remote.path(), "refs/heads/main");
     run_ok(&mut fx.legion_git(&["push", "--tags"]));
     assert!(bare_ref(fx.remote.path(), "refs/tags/v9").is_some());
+    assert_eq!(bare_ref(fx.remote.path(), "refs/heads/main"), main_before);
     let rows = fx.rows();
-    assert_real_git_row(one_row(&rows), "push", &["push", "--tags"], 0);
+    let row = one_row(&rows);
+    assert_real_git_row(row, "push", &["push", "--tags"], 0);
+    assert_eq!(row["target_ref"], "main");
 }
 
 /// Other subcommands produce git's output and exit code, with no row.
