@@ -49,6 +49,8 @@ fn fixture() -> Fixture {
     write(repo.path(), "src/.hidden.txt", "needle hidden\n");
     write(repo.path(), "src/ignored.log", "needle ignored\n");
     write(repo.path(), "src/c.md", "f(x)+ needle -v\n");
+    write(repo.path(), "src/d.txt", "NEEDLE upper\nxneedle_y\n");
+    write(repo.path(), "src/empty.txt", "");
     std::fs::write(
         data.path().join("watch.toml"),
         format!(
@@ -123,38 +125,84 @@ fn assert_same(label: &str, ours: &Output, theirs: &Output) {
 
 /// Forms sym claims to answer. Each runs three ways: legion with the real
 /// tool on PATH, the real tool, and legion with no tool on PATH at all.
-const GREP_SYM_FORMS: [&[&str]; 6] = [
+/// Only forms GNU and BSD grep answer alike are listed for grep.
+const GREP_SYM_FORMS: [&[&str]; 25] = [
     &["-rn", "needle", "src"],
     &["-r", "-n", "needle", "./src"],
     &["-rnF", "f(x)+", "src"],
     &["-rn", "f(x)+", "src"],
     &["-rn", "-e", "-v", "src"],
     &["-rn", "absent-pattern", "src"],
+    &["-r", "needle", "src"],
+    &["-rl", "needle", "src"],
+    &["-rln", "needle", "src"],
+    &["-r", "--files-with-matches", "needle", "src"],
+    &["-rc", "needle", "src"],
+    &["-r", "--count", "needle", "src"],
+    &["-rc", "absent-pattern", "src"],
+    &["-ri", "NEEDLE", "src"],
+    &["-r", "--ignore-case", "-n", "Needle", "src"],
+    &["-rE", "needle", "src"],
+    &["-rF", "f(x)+", "src"],
+    &["-rw", "needle", "src"],
+    &["-r", "--word-regexp", "-e", "-v", "src"],
+    &["-rwi", "NEEDLE", "src"],
+    &["-rwF", "f(x)+", "src"],
+    &["-rci", "needle", "src"],
+    &["-rn", "--include=*.rs", "needle", "src"],
+    &["-rc", "--include=*.txt", "--include=c.md", "needle", "src"],
+    &["-rl", "needle", "src", "./src"],
 ];
 
-const RG_SYM_FORMS: [&[&str]; 6] = [
+const RG_SYM_FORMS: [&[&str]; 30] = [
     &["-n", "needle", "src"],
     &["-n", "needle", "./src"],
     &["-n", r"ne+dle \w+", "src"],
     &["-nF", "f(x)+", "src"],
     &["needle", "src", "-n"],
     &["-n", "absent-pattern", "src"],
+    &["needle", "src"],
+    &["-l", "needle", "src"],
+    &["--files-with-matches", "-n", "needle", "src"],
+    &["-c", "needle", "src"],
+    &["--count", "needle", "src"],
+    &["-c", "absent-pattern", "src"],
+    &["-i", "NEEDLE", "src"],
+    &["--ignore-case", "-n", "Needle", "src"],
+    &["-F", "f(x)+", "src"],
+    &["--fixed-strings", "-n", "f(x)+", "src"],
+    &["-w", "needle", "src"],
+    &["--word-regexp", "-e", "-v", "src"],
+    &["-w", "-e", "needle)|(?:NEEDLE", "src"],
+    &["-iwc", "NEEDLE", "src"],
+    &["-iF", "F(X)+", "src"],
+    &["--hidden", "needle", "src"],
+    &["--no-ignore", "-l", "needle", "src"],
+    &["--hidden", "--no-ignore", "-c", "needle", "src"],
+    &["-g", "*.rs", "needle", "src"],
+    &["--glob=!sub", "-n", "needle", "src"],
+    &["-g", "*.log", "needle", "src"],
+    &["-t", "rust", "-n", "needle", "src"],
+    &["--type=md", "-c", "needle", "src"],
+    &["-l", "-g", "*.txt", "-i", "NEEDLE", "src", "./src"],
 ];
 
 /// Forms sym declines: each must still give the tool's exact answer.
-const GREP_TOOL_FORMS: [&[&str]; 6] = [
+const GREP_TOOL_FORMS: [&[&str]; 8] = [
     &["-rnv", "needle", "src"],
     &["-rn", "ne.dle", "src"],
-    &["-rni", "NEEDLE", "src"],
     &["-rn", "needle", "."],
     &["-n", "needle", "src/a.rs"],
     &["-rn", "needle", "src/"],
+    &["-n", "needle", "src"],
+    &["-rlc", "needle", "src"],
+    &["-r", "--include=s*", "needle", "src"],
 ];
 
 const RG_TOOL_FORMS: [&[&str]; 4] = [
-    &["needle", "src"],
-    &["-n", "-i", "NEEDLE", "src"],
-    &["-n", "--hidden", "needle", "src"],
+    &["-n", "-S", "NEEDLE", "src"],
+    &["-nv", "needle", "src"],
+    &["-lc", "needle", "src"],
     &["-n", "needle", "src/a.rs"],
 ];
 
@@ -230,9 +278,172 @@ fn grep_sym_answer_prints_path_line_text() {
             "src/a.rs:2:let needle = 1;",
             "src/a.rs:3:// needle again",
             "src/c.md:1:f(x)+ needle -v",
+            "src/d.txt:2:xneedle_y",
             "src/ignored.log:1:needle ignored",
             "src/sub/b.txt:2:needle",
         ]
+    );
+}
+
+/// sym's answer (no tool on PATH) for `args`, against the lines the tool
+/// prints (sorted) and its exit code. The expected lines were taken from
+/// rg 15.2 and grep over this fixture; they pin each shape where the real
+/// tool is not installed.
+fn assert_sym_prints(tool: &str, args: &[&str], expected: &[&str], code: i32) {
+    let fx = fixture();
+    let no_tools = empty_path();
+    let out: Output = legion(
+        &fx,
+        fx.repo.path(),
+        &no_tools.path().display().to_string(),
+        tool,
+        args,
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "{tool} {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut want: Vec<String> = expected.iter().map(|l| l.to_string()).collect();
+    want.sort();
+    assert_eq!(sorted_lines(&out), want, "{tool} {args:?}");
+}
+
+#[test]
+fn rg_sym_answers_print_what_rg_prints() {
+    let cases: [(&[&str], &[&str], i32); 11] = [
+        (
+            &["needle", "src"],
+            &[
+                "src/a.rs:let needle = 1;",
+                "src/a.rs:// needle again",
+                "src/c.md:f(x)+ needle -v",
+                "src/d.txt:xneedle_y",
+                "src/sub/b.txt:needle",
+            ],
+            0,
+        ),
+        (
+            &["-c", "needle", "src"],
+            &["src/a.rs:2", "src/c.md:1", "src/d.txt:1", "src/sub/b.txt:1"],
+            0,
+        ),
+        (
+            &["-ln", "needle", "src"],
+            &["src/a.rs", "src/c.md", "src/d.txt", "src/sub/b.txt"],
+            0,
+        ),
+        (
+            &["-i", "NEEDLE", "src"],
+            &[
+                "src/a.rs:let needle = 1;",
+                "src/a.rs:// needle again",
+                "src/c.md:f(x)+ needle -v",
+                "src/d.txt:NEEDLE upper",
+                "src/d.txt:xneedle_y",
+                "src/sub/b.txt:needle",
+            ],
+            0,
+        ),
+        (
+            &["-w", "needle", "src"],
+            &[
+                "src/a.rs:let needle = 1;",
+                "src/a.rs:// needle again",
+                "src/c.md:f(x)+ needle -v",
+                "src/sub/b.txt:needle",
+            ],
+            0,
+        ),
+        (
+            &["-iwc", "NEEDLE", "src"],
+            &["src/a.rs:2", "src/c.md:1", "src/d.txt:1", "src/sub/b.txt:1"],
+            0,
+        ),
+        (
+            &["-g", "*.log", "needle", "src"],
+            &["src/ignored.log:needle ignored"],
+            0,
+        ),
+        (
+            &["-t", "md", "-n", "needle", "src"],
+            &["src/c.md:1:f(x)+ needle -v"],
+            0,
+        ),
+        (
+            &["--hidden", "-c", "needle", "src"],
+            &[
+                "src/.hidden.txt:1",
+                "src/a.rs:2",
+                "src/c.md:1",
+                "src/d.txt:1",
+                "src/sub/b.txt:1",
+            ],
+            0,
+        ),
+        (
+            &["--no-ignore", "-l", "needle", "src"],
+            &[
+                "src/a.rs",
+                "src/c.md",
+                "src/d.txt",
+                "src/ignored.log",
+                "src/sub/b.txt",
+            ],
+            0,
+        ),
+        (&["-c", "absent-pattern", "src"], &[], 1),
+    ];
+    for (args, expected, code) in cases {
+        assert_sym_prints("rg", args, expected, code);
+    }
+}
+
+#[test]
+fn grep_count_lists_every_file_with_zero_counts() {
+    assert_sym_prints(
+        "grep",
+        &["-rc", "needle", "src"],
+        &[
+            "src/.hidden.txt:1",
+            "src/a.rs:2",
+            "src/c.md:1",
+            "src/d.txt:1",
+            "src/empty.txt:0",
+            "src/ignored.log:1",
+            "src/sub/b.txt:1",
+        ],
+        0,
+    );
+    // Every count zero: grep still prints them, and exits 1.
+    assert_sym_prints(
+        "grep",
+        &["-rc", "absent-pattern", "src"],
+        &[
+            "src/.hidden.txt:0",
+            "src/a.rs:0",
+            "src/c.md:0",
+            "src/d.txt:0",
+            "src/empty.txt:0",
+            "src/ignored.log:0",
+            "src/sub/b.txt:0",
+        ],
+        1,
+    );
+    assert_sym_prints(
+        "grep",
+        &["-rwi", "NEEDLE", "src"],
+        &[
+            "src/.hidden.txt:needle hidden",
+            "src/a.rs:let needle = 1;",
+            "src/a.rs:// needle again",
+            "src/c.md:f(x)+ needle -v",
+            "src/d.txt:NEEDLE upper",
+            "src/ignored.log:needle ignored",
+            "src/sub/b.txt:needle",
+        ],
+        0,
     );
 }
 
@@ -368,7 +579,11 @@ fn a_scan_that_could_differ_from_the_tool_runs_the_tool() {
 #[test]
 fn rg_fallback_hands_rg_the_argv_untouched() {
     let fx = fixture();
-    let cases: [&[&str]; 3] = [&["-V"], &["needle", "src"], &["-nv", "--", "-x", "src"]];
+    let cases: [&[&str]; 3] = [
+        &["-V"],
+        &["-S", "needle", "src"],
+        &["-nv", "--", "-x", "src"],
+    ];
     for args in cases {
         let out: Output = stub_run(&fx, "rg", args, "", "2");
         assert_eq!(out.status.code(), Some(2), "{args:?}");
