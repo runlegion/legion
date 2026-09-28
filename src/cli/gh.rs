@@ -3,8 +3,8 @@
 //! A write whose arguments translate losslessly runs through the existing
 //! `legion pr` / `legion issue` / `legion comment` handlers, so their gates
 //! hold. A read runs the real gh untouched and records nothing. Any other
-//! write runs the real gh after the gate its legion verb would enforce, and
-//! records one `gh-passthrough` audit row.
+//! write runs the real gh untouched and records one `gh-passthrough` audit
+//! row.
 //!
 //! `plan` is pure: it classifies from argv alone. Everything that touches
 //! disk, network, or config happens in `handle`, after `plan` has decided.
@@ -14,8 +14,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::cli::issue::{self, IssueAction};
 use crate::cli::pr::{self, PrAction};
-use crate::cli::util::{audit, git_head_commit_and_branch, open_db};
-use crate::verify::GateResult;
+use crate::cli::util::{audit, open_db};
 use crate::{db, error, worksource};
 
 /// What `legion gh` does with an argv, decided from the argv alone.
@@ -1099,16 +1098,14 @@ fn passthrough_positionals(args: &[String]) -> Vec<String> {
     parse(args.get(2..).unwrap_or(&[]), table).positionals
 }
 
-/// Run real gh for an untranslated write: the legion gate first, then gh,
-/// then one `gh-passthrough` audit row.
+/// Run real gh for an untranslated write, untouched, then write one
+/// `gh-passthrough` audit row.
 fn passthrough(
     args: &[String],
     target: Option<String>,
     legion_repo: Option<String>,
 ) -> error::Result<()> {
     let positionals: Vec<String> = passthrough_positionals(args);
-    gate_passthrough(args, &positionals, legion_repo.as_deref())?;
-
     let code: i32 = run_gh(args)?;
 
     let group: &str = args.first().map(String::as_str).unwrap_or("");
@@ -1142,122 +1139,6 @@ fn passthrough(
         Err(e) => eprintln!("[legion] warning: audit log failed: {e}"),
     }
     exit_with(code)
-}
-
-/// The gate a gated write's legion verb enforces, applied before real gh
-/// runs: `pr create` needs clean simplify and pr-write gates on HEAD; `pr
-/// merge` needs check runs, none failing, and no changes-requested review;
-/// `issue close` needs the verify verdict. The merge and close gates read
-/// the work source, so they apply only when a legion repo resolved; with
-/// one resolved but no number to check, the gate refuses rather than guess.
-fn gate_passthrough(
-    args: &[String],
-    positionals: &[String],
-    legion_repo: Option<&str>,
-) -> error::Result<()> {
-    let group: &str = args.first().map(String::as_str).unwrap_or("");
-    let sub: &str = args.get(1).map(String::as_str).unwrap_or("");
-    match (group, sub) {
-        ("pr", "create") => gate_pr_create(),
-        ("pr", "merge") | ("issue", "close") => {
-            let Some(repo) = legion_repo else {
-                return Ok(());
-            };
-            let (plugin, source_repo, _workdir) = worksource::require_worksource(repo)?;
-            let number: Option<u64> = match positionals {
-                [] if group == "pr" => current_branch_pr(&plugin, &source_repo),
-                [n] => digits(n),
-                _ => None,
-            };
-            let Some(number) = number else {
-                return Err(error::LegionError::WorkSource(format!(
-                    "cannot evaluate the legion gate for gh {group} {sub}: no {group} number \
-                     could be determined from the arguments"
-                )));
-            };
-            if group == "pr" {
-                gate_pr_merge(&plugin, &source_repo, number)
-            } else {
-                let database = open_db()?;
-                issue::check_verify_before_close(
-                    &database,
-                    &plugin,
-                    &source_repo,
-                    number,
-                    false,
-                    None,
-                )
-                .map(|_| ())
-            }
-        }
-        _ => Ok(()),
-    }
-}
-
-/// `legion pr create`'s gate: clean legion-simplify and legion-pr-write on
-/// HEAD, with the same refusals.
-fn gate_pr_create() -> error::Result<()> {
-    let database = open_db()?;
-    let (commit_hash, _branch) = git_head_commit_and_branch()?;
-    let short_hash: &str = &commit_hash[..commit_hash.len().min(8)];
-    for (skill, run_hint) in [
-        ("legion-simplify", "/legion:legion-simplify"),
-        ("legion-pr-write", "/legion:legion-pr-write"),
-    ] {
-        match database.get_quality_gate(&commit_hash, skill)? {
-            None => {
-                eprintln!(
-                    "[legion] error: no clean {skill} gate on HEAD ({short_hash}). \
-                     Run {run_hint} before creating the PR."
-                );
-                return Err(error::LegionError::ExitWith(1));
-            }
-            Some(gate) if gate.result != GateResult::Clean => {
-                eprintln!(
-                    "[legion] error: {skill} recorded issues on HEAD ({short_hash}), \
-                     {} findings. Fix them and re-run the skill before creating the PR.",
-                    gate.findings_count
-                );
-                return Err(error::LegionError::ExitWith(1));
-            }
-            Some(_) => {}
-        }
-    }
-    Ok(())
-}
-
-/// `legion pr merge`'s gate: the zero-runs and failing-checks refusals with
-/// the verb's wording, then the plugin's changes-requested review refusal.
-fn gate_pr_merge(plugin: &str, source_repo: &str, number: u64) -> error::Result<()> {
-    let checks = worksource::pr_checks(plugin, source_repo, number)?;
-    if checks.checks.is_empty() {
-        return Err(error::LegionError::WorkSource(format!(
-            "no runs for head {}: PR #{number} on {source_repo} has zero check runs \
-             for its head commit (not the branch's last suite)",
-            checks.head_sha
-        )));
-    }
-    let failed: Vec<&str> = checks
-        .checks
-        .iter()
-        .filter(|c| c.is_failing())
-        .map(|c| c.name.as_str())
-        .collect();
-    if !failed.is_empty() {
-        return Err(error::LegionError::WorkSource(format!(
-            "{} check(s) failed on PR #{}: {}",
-            failed.len(),
-            number,
-            failed.join(", ")
-        )));
-    }
-    let details = worksource::view_pr(plugin, source_repo, number)?;
-    if details.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
-        return Err(error::LegionError::WorkSource(format!(
-            "PR #{number} has changes requested -- address the review before merging"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

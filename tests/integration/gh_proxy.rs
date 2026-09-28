@@ -36,9 +36,8 @@ struct World {
 }
 
 impl World {
-    /// A world whose stub worksource answers `pr-checks` with `checks_json`,
-    /// `pr-list` with `pr_list_json`, and `view-issue` with an issue whose
-    /// body carries acceptance criteria.
+    /// A world whose stub worksource answers `pr-checks` with `checks_json`
+    /// and `pr-list` with `pr_list_json`.
     fn new(checks_json: &str, pr_list_json: &str) -> World {
         let world = World {
             data: tempfile::tempdir().unwrap(),
@@ -61,7 +60,7 @@ impl World {
         write_exec(
             &worksources.join("github"),
             &format!(
-                r###"#!/bin/bash
+                r#"#!/bin/bash
 echo "$1 repo=${{LEGION_WS_REPO:-}} pr=${{LEGION_WS_PR_NUMBER:-}} number=${{LEGION_WS_NUMBER:-}} strategy=${{LEGION_WS_STRATEGY:-}} delete=${{LEGION_WS_DELETE_BRANCH:-}} body=${{LEGION_WS_BODY:-}}" >> "{log}"
 case "$1" in
   pr-checks)
@@ -74,16 +73,6 @@ BODY
 {pr_list_json}
 BODY
     ;;
-  view-issue)
-    cat <<'BODY'
-{{"url":"https://github.com/owner/stub/issues/7","number":7,"title":"t","body":"## Acceptance criteria\n- [ ] it works","labels":[],"assignees":[],"state":"OPEN"}}
-BODY
-    ;;
-  view-pr)
-    cat <<'BODY'
-{{"number":5,"title":"t","state":"OPEN","author":"a","createdAt":"t","updatedAt":"t","body":"b","headRefName":"feat-x","headSha":"abc","baseRefName":"main","isDraft":false,"reviewDecision":"APPROVED","mergeable":"MERGEABLE"}}
-BODY
-    ;;
   merge)
     echo '{{"queued":false}}'
     ;;
@@ -94,7 +83,7 @@ BODY
     exit 2
     ;;
 esac
-"###,
+"#,
                 log = world.plugin_log().display()
             ),
         );
@@ -230,7 +219,9 @@ fn argv_survives_byte_for_byte() {
 
 #[test]
 fn untranslatable_write_runs_gh_and_writes_one_audit_row() {
-    let w = World::new(CHECKS_PASSING, "[]");
+    // Failing checks on the plugin: a passthrough runs gh untouched, with no
+    // legion gate in front of it.
+    let w = World::new(CHECKS_FAILING, "[]");
     let args = ["pr", "merge", "5", "-s", "--auto", "-R", "owner/stub"];
     let out = w.gh(&args);
     assert_eq!(out.status.code(), Some(3));
@@ -341,41 +332,6 @@ fn current_branch_pr_resolves() {
         calls.contains("comment repo=owner/stub pr= number=11 strategy= delete= body=hi"),
         "plugin calls: {calls}"
     );
-}
-
-#[test]
-fn gated_passthrough_is_refused() {
-    let w = World::new(CHECKS_FAILING, "[]");
-    let out = w.gh(&["pr", "merge", "5", "-s", "--auto", "-R", "owner/stub"]);
-    assert!(!out.status.success());
-    let gh_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(w.gh_calls().is_empty(), "stub gh ran: {:?}", w.gh_calls());
-
-    // The refusal is `legion pr merge`'s own, word for word.
-    let (_stdout, verb_stderr) = run_fail(
-        w.legion(w.data.path())
-            .args(["pr", "merge", "--repo", "stub", "--number", "5"]),
-    );
-    assert_eq!(gh_stderr, verb_stderr);
-    assert!(gh_stderr.contains("check(s) failed on PR #5"));
-
-    let out = w.gh(&[
-        "issue",
-        "close",
-        "7",
-        "-r",
-        "not planned",
-        "-R",
-        "owner/stub",
-    ]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("no verify verdict exists"),
-        "stderr: {stderr}"
-    );
-    assert!(w.gh_calls().is_empty(), "stub gh ran: {:?}", w.gh_calls());
-    assert!(w.audit_rows("gh-passthrough").is_empty());
 }
 
 #[test]
