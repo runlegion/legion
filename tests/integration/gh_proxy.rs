@@ -390,3 +390,33 @@ fn unmatched_repo_passes_through() {
     assert_eq!(rows[0]["agent"], "other/repo");
     assert_eq!(rows[0]["target_ref"], "7");
 }
+
+#[test]
+fn gh_target_matches_watch_toml_case_insensitively() {
+    let w = World::new(CHECKS_PASSING, "[]");
+    let out = w.gh(&["pr", "merge", "5", "-s", "-R", "OWNER/Stub"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(w.gh_calls().is_empty(), "stub gh ran: {:?}", w.gh_calls());
+    assert_eq!(w.audit_rows("merge").len(), 1);
+}
+
+#[test]
+fn entry_without_workdir_is_no_match() {
+    let w = World::new(CHECKS_PASSING, "[]");
+    let watch = w.data.path().join("watch.toml");
+    let mut text = std::fs::read_to_string(&watch).unwrap();
+    text.push_str("\n[[repos]]\nname = \"half\"\ngithub = \"owner/half\"\n");
+    std::fs::write(&watch, text).unwrap();
+
+    let args = ["issue", "close", "7", "-R", "owner/half"];
+    let out = w.gh(&args);
+    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(w.gh_calls(), vec![argv(&args)]);
+    let rows = w.audit_rows("gh-passthrough");
+    assert_eq!(rows.len(), 1, "rows: {rows:?}");
+    assert_eq!(rows[0]["agent"], "owner/half");
+}
