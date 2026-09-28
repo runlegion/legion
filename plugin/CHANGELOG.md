@@ -1,5 +1,120 @@
 # Legion Changelog
 
+## 0.43.0
+
+The router-refactor release. Through 0.42.1 the PreToolUse router translated `git` and `gh`
+arguments into legion flags one at a time. It denied any argument it could not translate,
+and it refused `grep`, `rg` and the harness Grep and Glob tools with a message naming a sym
+command, so the agent had to make a second call without its own pattern. Legion now takes
+each tool's own arguments. `legion git`, `legion gh`, `legion grep` and `legion rg` accept
+exactly what the real tool accepts. Each handles the call itself when it can express it
+(git and gh through the audited push, commit and work-source paths, grep and rg through
+sym), and otherwise runs the real tool with its output and exit code unchanged. The
+router puts `legion ` in front of each typed `git`, `gh`, `grep` and `rg` and lets the
+result run. It denies only the never-run list, asks about the ask list and
+the power switches, and runs everything else byte for byte with no note. A harness Grep or
+Glob call that legion can answer fully gets that answer in the same response. Read is no
+longer refused by size.
+
+Minor release. It adds four top-level subcommands (`legion git`, `legion gh`, `legion grep`,
+`legion rg`) and replaces the router behind them. No wire-format change and no schema
+migration. The router policy format does change, and it breaks compatibility:
+`plugin/legion-cmd/policy.json` now holds only `proxy`, `never_run`, `ask`,
+`power_switches` and `tools`, and any other top-level key fails to parse. A custom policy
+written for 0.42.1 (`route`, `no_go`, `sym_jobs`, `wrappers`, `interpreters`, Bash rule
+families, `positional`/`reshape`/`deny_flags`) has to be rewritten into those lists.
+
+### New
+
+- **`legion grep` and `legion rg` answer through sym or run the real tool** (PR #1340,
+  #1334). These are two subcommands that take their tool's argv untouched. `main.rs`
+  dispatches them before clap, so legion's global `-v`, `-h` and `--` handling never
+  changes grep's arguments, and `legion grep -v` means invert-match. Both tools read their
+  arguments through one reader (`read_argv` in `src/cli/grep.rs`), each with its own flag
+  set. Sym answers when the search is recursive and line-numbered over directory operands
+  inside a watched repo, and when its walk, matcher and output provably equal the tool's.
+  The answer prints each matched line's text with its path and line number, as `grep -n`
+  does. Every other case runs the real `grep` or `rg` with its stdout, stderr and exit code
+  (1 for no match, 2 for an error) passed through. That covers other forms, standard input,
+  a path outside every watched repo, a sym error, and any scan that could differ from the
+  tool's. Neither subcommand refuses a search. Test threads now get the same 8 MiB stack the
+  binary's main thread has (`RUST_MIN_STACK` in `.cargo/config.toml`), because building the
+  larger clap tree overflowed the 2 MiB test-harness default on Linux and Windows CI.
+
+- **`legion git`, a proxy that takes git's own arguments** (PR #1341, #1335). Everything
+  after `legion git` is git's, and no legion flag is parsed from it. The subcommand reads
+  git's global options as `man git` defines them (`-C`, `-c`, `--git-dir`, `--work-tree`
+  and the rest, in both separate and `=` forms) to find the subcommand. It then takes one
+  of four routes. A `push` or `commit` that the audited path can express runs through
+  `handle_push` / `handle_commit`, the same code as `legion push` and `legion commit`. Any
+  force variant, or any push that would update `main` or `master` on the remote, is refused
+  before git runs. That includes the bare matching refspec `:` when a local main or master
+  exists, and a glob refspec whose destination matches main or master. `git push --tags`
+  from main is allowed, because it updates tags only, while `--follow-tags` on main is
+  still refused. Any other `push` or `commit` runs as real git and writes an audit row.
+  Every other subcommand runs as real git, unaudited. Every check that could make the
+  audited path fail on its own precondition runs before that path is called, so once it
+  runs there is no fallback to real git. `legion push` and `legion commit` are unchanged.
+
+- **`legion gh`, a proxy that takes gh's own arguments** (PR #1339, #1336). A pure
+  classifier (`plan` in `src/cli/gh.rs`) sorts gh's argv into a read, a translatable write,
+  or a passthrough. A read runs the real gh untouched and writes no audit row. A write
+  whose arguments translate losslessly (`pr create/edit/merge/close/review/comment`,
+  `issue create/edit/close/reopen/comment`) runs through the existing `legion pr`,
+  `legion issue` or `legion comment` handler, so their gates still apply. A write that does
+  not translate runs the real gh untouched with no legion gate in front of it, and then
+  writes one `gh-passthrough` audit row with the argv, the target and the exit status.
+  Whenever the real gh runs, its output and exit code are kept. To call a verb, the
+  proxy finds the legion repo whose watch.toml `github` field matches gh's `-R owner/name`,
+  compared case-insensitively (`repo_for_github` in `src/worksource/mod.rs`). An entry
+  with no `workdir` does not match.
+
+### Changed
+
+- **The router puts `legion` before `git`, `gh`, `grep` and `rg`; its policy is four
+  lists** (PR #1342, #1337). A Bash command is parsed once. A never-run command is denied
+  with its reason. An ask or power-switch command goes through the `legion cmd confirm`
+  flow and then the operator's prompt. Each simple command named `git`, `gh`, `grep` or
+  `rg` gets `legion ` inserted before its name. That happens at top level, in pipelines,
+  lists, subshells, substitutions, loop/`if`/`case` bodies and function bodies, and after
+  assignment prefixes. It does not happen for paths, arguments, text already behind
+  `legion`, or quoted, heredoc and interpreter text. Insertion
+  (`crates/legion-cmd/src/insert.rs`) recovers each name's start from its span's end, so
+  a name after a backslash line continuation is placed correctly. It then re-parses the result. If the new parse does not
+  equal the original plus one `legion` word per name, the command is denied and never runs.
+  The insertion response carries `updatedInput` and no `permissionDecision`, so it grants
+  nothing the operator's own rules would not. The never-run list keeps the built-in no-go
+  entries plus `sqlite3-legion-db` and `rm-recursive-force`, and it is still checked inside
+  `sh -c`, `bash -c`, `zsh -c` and `eval` payloads and behind `sudo`, `env`, `nice` and
+  `xargs`. The ask list is `curl-network`. The power switches are `push-force`,
+  `push-force-refspec`, `merge-despite-failures` and `issue-close-force`, matched after
+  insertion, so `git push --force` is asked. The following are removed: sym-job detection,
+  wrapper and interpreter re-entry, every Bash family rule, the rewrite spec with its
+  `reshape`/`positional`/`deny_flags` machinery, the default-allow note and
+  `src/cmd/config.rs`. The deadline is now the constant `ROUTE_DEADLINE`, 7000 ms. No Bash
+  deny names a command to run instead. Non-test router lines in `crates/legion-cmd` fall
+  from 5953 to 4170.
+
+- **Harness Grep and Glob are answered in the same response; Read is never refused by
+  size** (PR #1343, #1338). After the router lets a Grep or Glob call run, the call is
+  offered to legion (`src/cmd/answer.rs`). If legion can answer it fully, the hook sends no
+  `permissionDecision` and carries the answer as `additionalContext`. For Grep it also sets
+  `head_limit: 1`, so the tool's own result is next to nothing. A Grep call is answered
+  from sym's content scan, plus the repo's reflections that the pattern matches, only if
+  all of these hold: every input key is one sym honours (`glob`, `type`, `multiline`,
+  context lines, `-o` and `offset` are declined); the root is a real directory in a watched
+  git repo; no `.rgignore` applies; the scan skipped nothing; and no matched line exceeds
+  the tool's 500-column cut. A Glob call is answered from the file inventory only if the
+  inventory is fresh (every matching file git sees is in it, and every match still exists)
+  and full. Full means no `.git` entry could match, in every mode, and no ignored path
+  could match unless `CLAUDE_CODE_GLOB_NO_IGNORE=false`, which lifts only that second
+  condition. An answer over 200 lines is not injected. In every
+  other case, and whenever sym, recall or the inventory fails or passes its 3 s budget, the
+  tool runs as sent. The Read size rules are removed from `policy.json`. A legion failure
+  on a Grep, Glob or Read call runs the call as sent instead of denying it. That covers an
+  unreadable policy, the store, the deadline, a panic, a malformed payload, and a missing
+  binary in `plugin/hooks/legion-cmd.sh`.
+
 ## 0.42.1
 
 The carried-arguments release. In 0.42.0 the shipped policy built no Bash rewrite: every
