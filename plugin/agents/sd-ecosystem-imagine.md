@@ -59,6 +59,13 @@ the specific questions this intent raises under each:
 - **Governance.** Credentials, boundaries, audit, who may see what.
 - **Failure.** Where does it break, who notices, what do they see, how do they recover?
 
+**The committed direction is a given.** Settled proposals, the intent's `boundaries`, and
+`what_it_is` are the operator's bet: the passes design how they happen, and take their need as
+settled.
+
+**The map is in the right tense.** It names as existing only what the intent's
+`current_state.real` carries, and labels the rest planned.
+
 **The customer may be an agent.** When an agent chooses and uses the product, the agent is
 the primary actor: it picks tools from help text, docs, and predictable output, and the
 moments of truth happen with it. The human behind it is a beneficiary and risk-holder with no

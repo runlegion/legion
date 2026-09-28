@@ -38,9 +38,8 @@ twice). A missing or invalid document, or an actor absent from the Ecosystem, re
 
 - **Evidence lives in the Discovery.** Each statement traces to a Discovery insight or an
   intent field; the persona cites insight ids and carries no evidence of its own.
-- **Usable insights are `supported` and `bounded`**, a bounded one within its recorded limits.
-  Check each insight's `status`: contradicted, blocked, and saturated-unevidenced insights
-  stay out of the persona.
+- **Usable insights are `supported` and `bounded`** (bounded within its limits); check each
+  `status`, and leave contradicted, blocked, and saturated-unevidenced insights out.
 - **Each frustration carries the id of a supported or bounded Discovery insight** in its
   `insight` field (`pain_theme` is the deprecated old field).
 - **Behavior over demographics.** The persona holds what the actor does and believes, as the
@@ -80,8 +79,9 @@ twice). A missing or invalid document, or an actor absent from the Ecosystem, re
   no read-back, so check the command line against the id the create printed. Emission is
   non-blocking: log a failure in the return and still return `done`.
 - **Parking.** When the step cannot finish, land the persona as far as it got at `draft`,
-  with the blocked items named inside it, and return `parked`. The conductor stores the
-  checkpoint and arms the wake.
+  with the blocked items named inside it, and return `parked`. A question the world can
+  answer goes back as a question for real people on a named lens; an operator question
+  carries a recommended answer and its reasoning. The conductor checkpoints and arms the wake.
 
 ## Steps
 

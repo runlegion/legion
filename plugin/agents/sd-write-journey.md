@@ -69,8 +69,9 @@ twice). A missing or invalid document, the persona's included, returns `stopped`
   no read-back, so check the command line against the id the create printed. Emission is
   non-blocking: log a failure in the return and still return `done`.
 - **Parking.** When the step cannot finish, land the journey as far as it got at `draft`,
-  with the blocked items named inside it, and return `parked`. The conductor stores the
-  checkpoint and arms the wake.
+  with the blocked items named inside it, and return `parked`. A question the world can
+  answer goes back as a question for real people on a named lens; an operator question
+  carries a recommended answer and its reasoning. The conductor checkpoints and arms the wake.
 
 ## Steps
 

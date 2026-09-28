@@ -230,6 +230,10 @@ none.
   hypothesis held, `0.0` if refuted, and the held fraction of its claims when mixed, taken
   from the document's `provenance.verification` counts.
 
+**Parking.** This step parks on nothing: a missing or invalid input returns `stopped`, and
+every gap inside a landed input goes up in a `done` return. The `parked` form stays in the
+shared return shape unused.
+
 **Emit mechanics.**
 
 - Pass `--session-id "$CLAUDE_CODE_SESSION_ID"` and leave out `--model`: the engine resolves
