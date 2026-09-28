@@ -8,6 +8,8 @@ pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
 pub(crate) mod gh;
+pub(crate) mod git;
+pub(crate) mod grep;
 pub(crate) mod inbox;
 pub(crate) mod index_cmd;
 pub(crate) mod issue;
@@ -22,6 +24,7 @@ pub(crate) mod util;
 pub(crate) mod verify;
 pub(crate) mod watch;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -1002,6 +1005,21 @@ pub(crate) enum Commands {
         dir: Option<std::path::PathBuf>,
     },
 
+    /// Run git with its own arguments; push and commit go through the audited paths.
+    ///
+    /// Every argument after `git` is git's: no legion flag is parsed from it,
+    /// including `-v`, `-h`, `--help`, `--version`, `--repo`, and `--` (#1335).
+    /// A push or commit the audited path can express runs through `legion
+    /// push` / `legion commit`; a force push, or a push that would update
+    /// `main`/`master` on the remote, is refused; any other push or commit
+    /// runs as real git with an audit row; every other subcommand runs as
+    /// real git.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<std::ffi::OsString>,
+    },
+
     /// View the audit log of work source actions
     Audit {
         /// Filter by agent name
@@ -1280,6 +1298,30 @@ pub(crate) enum Commands {
         /// about text above describe the single argument instead.
         #[arg(last = true, value_name = "COMMAND", hide = true)]
         command: Vec<String>,
+    },
+
+    /// grep, answered from sym when sym can answer the search fully,
+    /// otherwise by running grep with the arguments untouched (#1334).
+    ///
+    /// Takes grep's own arguments with grep's flag meanings: `-v` is
+    /// invert-match. The output and exit code are the ones grep gives.
+    #[command(disable_help_flag = true)]
+    Grep {
+        /// grep's arguments, exactly as typed for grep.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<OsString>,
+    },
+
+    /// rg, answered from sym when sym can answer the search fully,
+    /// otherwise by running rg with the arguments untouched (#1334).
+    ///
+    /// Takes rg's own arguments with rg's flag meanings. The output and
+    /// exit code are the ones rg gives.
+    #[command(disable_help_flag = true)]
+    Rg {
+        /// rg's arguments, exactly as typed for rg.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<OsString>,
     },
 
     /// legion-cmd verbs an agent runs itself (#1237): `legion cmd confirm`
