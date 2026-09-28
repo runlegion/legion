@@ -107,6 +107,10 @@ down.
   `done`.
 - sd-discover scores these predictions at its authoritative pass. You report each id and stop.
 
+**Parking.** When the step cannot finish, write the agenda file as far as it got, with the
+open items named, and return `parked` with its path, the prediction ids emitted, and what it
+waits on. The conductor stores them in the checkpoint and arms the wake.
+
 ## Steps
 
 1. Validate the intent (Inputs) and read it. The fields that feed the agenda: `what_it_is`
