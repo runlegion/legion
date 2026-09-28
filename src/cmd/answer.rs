@@ -701,6 +701,12 @@ mod tests {
         }
     }
 
+    /// A repo path as an answer prints it: joined onto the canonical root,
+    /// so on Windows (a verbatim `\\?\` root) the separators are native.
+    fn shown(repo: &Repo, rel: &str) -> String {
+        repo.root.join(rel).display().to_string()
+    }
+
     fn no_recall(_: &str) -> Result<Vec<String>, ()> {
         Ok(Vec::new())
     }
@@ -745,8 +751,12 @@ mod tests {
         repo.write(".github/ci.yml", "needle\n");
         repo.write("target/out.rs", "needle\n");
         let answer = grep(&repo, json!({"pattern": "needle"})).expect("sym answers");
-        assert!(answer.text.contains(".github/ci.yml:1:needle"));
-        assert!(!answer.text.contains("target/out.rs"));
+        assert!(
+            answer
+                .text
+                .contains(&format!("{}:1:needle", shown(&repo, ".github/ci.yml")))
+        );
+        assert!(!answer.text.contains(&shown(&repo, "target/out.rs")));
     }
 
     #[test]
@@ -820,7 +830,11 @@ mod tests {
         );
         // A subdirectory is answered, and only its lines.
         let answer = grep(&repo, json!({"pattern": "needle", "path": "sub"})).expect("answers");
-        assert!(answer.text.contains("sub/b.txt:1:needle"));
+        assert!(
+            answer
+                .text
+                .contains(&format!("{}:1:needle", shown(&repo, "sub/b.txt")))
+        );
         assert!(!answer.text.contains("a.txt"));
     }
 
@@ -958,7 +972,7 @@ mod tests {
         // Once indexed again, the new file is in the answer.
         repo.index(&db);
         let answer = glob(&repo, &db, json!({"pattern": "src/*.rs"}), true).expect("answers");
-        assert!(answer.text.contains("src/new.rs"));
+        assert!(answer.text.contains(&shown(&repo, "src/new.rs")));
     }
 
     #[test]
@@ -986,8 +1000,8 @@ mod tests {
         assert!(glob(&repo, &db, json!({"pattern": "src/**/*.rs"}), true).is_some());
         // With the tool set to respect ignore files, the inventory is full.
         let answer = glob(&repo, &db, json!({"pattern": "**/*.rs"}), false).expect("answers");
-        assert!(answer.text.contains("src/a.rs"));
-        assert!(!answer.text.contains("target/gen.rs"));
+        assert!(answer.text.contains(&shown(&repo, "src/a.rs")));
+        assert!(!answer.text.contains(&shown(&repo, "target/gen.rs")));
         // The tool lists `.git` in both modes: a pattern that matches a
         // file there is the tool's, one that matches nothing there is not.
         for reads_ignored in [true, false] {
