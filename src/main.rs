@@ -109,6 +109,13 @@ fn main() {
 
 fn run() -> error::Result<()> {
     raise_fd_limit();
+    // `legion git <args>` (#1335): every argument after `git` is git's. Handed
+    // over before clap parses, because clap would still take legion's global
+    // `-v`/`--verbose` and a leading `--` out of the trailing arguments.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if argv.get(1).is_some_and(|first| first == "git") {
+        return cli::git::handle_git(argv.get(2..).unwrap_or(&[]).to_vec());
+    }
     let cli = Cli::parse();
     VERBOSE.store(cli.verbose, Ordering::Relaxed);
 
@@ -315,6 +322,7 @@ fn run() -> error::Result<()> {
             card,
             dir,
         } => cli::commit::handle_commit(repo, message, message_file, card, dir)?,
+        Commands::Git { args } => cli::git::handle_git(args)?,
         Commands::Comment { repo, number, body } => cli::issue::handle_comment(repo, number, body)?,
         Commands::Audit {
             repo,
