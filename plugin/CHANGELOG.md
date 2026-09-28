@@ -1,5 +1,43 @@
 # Legion Changelog
 
+## 0.43.1
+
+The grep-coverage release. In 0.43.0, `legion rg` and `legion grep` answered from sym only
+for the line-numbered `path:line:text` form. A plain search, `-l`, `-c`, `-i` and the rest
+went to the real tool. On a machine with no `rg` on PATH, where the operator's settings deny
+bare `rg` and `grep`, those calls printed `rg: command not found` and left the agent with no
+other route. Sym now answers every output shape its matches determine, over the same files
+the tool would search. The real tool still runs only for forms sym cannot answer exactly.
+
+Patch release: a fix within the existing `legion grep` / `legion rg` surface. No CLI change,
+no router or policy change, no wire-format change and no schema migration.
+
+### Fixed
+
+- **`legion rg` and `legion grep` answer plain, `-l`, `-c`, `-i` and `-w` searches from
+  sym** (PR #1355, #1354). The output shape now follows the flags: `path:line:text` with
+  `-n`, `path:text` with no flag (rg prints no line numbers when piped), each matching path
+  once with `-l`, and `path:count` with `-c`. grep's `-c` lists every file it searched,
+  including zero counts, and still exits 1 when nothing matched, while rg lists only the
+  files that matched. The file set now comes from each tool's own walk (`tool_files` in
+  `src/cli/grep.rs`), and sym scans exactly that list. For rg that is ripgrep's walk,
+  configured the way rg configures it: `-g` / `--glob` globs rooted at the working
+  directory, `-t` types, `--hidden` and `--no-ignore`, so a gitignored file that a glob
+  admits is searched as rg would search it. For grep it is `-r`'s unfiltered
+  walk, narrowed by `--include` to a literal name or a `*`-plus-literal-suffix glob, the
+  two forms GNU and BSD grep read alike. For rg, `-i` and `-w` become the regex rg builds
+  for them (case-insensitive, and half word boundaries as ripgrep 14 does). grep's BRE and
+  ERE are not Rust regex, so grep is answered only for a literal pattern, and its `-i` and
+  `-w` also need an ASCII pattern and ASCII candidate lines. The proxies now scan without
+  find-content's 500-hit and 2 MB output caps, so a large result is printed in full rather
+  than handed to the real tool. The real tool still runs, with its output and exit code
+  unchanged, in every case sym cannot match exactly. That includes a `.git` entry the
+  walk reaches (grep reads `.git`, sym never does), a symlink or special file, an rg operand
+  outside a git work tree or with an `.rgignore` at, above or below it, a skipped or binary
+  file, a matched file with a CR or non-UTF-8 bytes, and rg's `-l` combined with
+  `-c`. Output paths use the platform separator at every level, so nested paths on Windows
+  print as `src\sub\b.rs`, as rg prints them.
+
 ## 0.43.0
 
 The router-refactor release. Through 0.42.1 the PreToolUse router translated `git` and `gh`
