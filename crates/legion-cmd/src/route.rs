@@ -82,49 +82,29 @@ fn route_bash(policy: &Policy, command: &str, ctx: &Context) -> Routed {
     let typed: Scan = match splitter::scan(command) {
         Ok(scan) => scan,
         Err(err) => {
-            return Routed {
-                decision: Decision::refuse(format!(
-                    "the shell parser rejected this command: {err}"
-                )),
-                facts: Facts::default(),
-                deciding: Deciding::ParseError,
-                confirmed: false,
-            };
+            return refused(
+                format!("the shell parser rejected this command: {err}"),
+                None,
+                Deciding::ParseError,
+            );
         }
     };
 
     // The never-run list, built-ins first, over the command as typed. No
     // confirmation, operator prompt or other entry can override a match.
     if let Some(entry) = first_match(&policy.never_run_entries(), &typed) {
-        return Routed {
-            decision: Decision::refuse(entry.reason.clone()),
-            facts: Facts {
-                command_key,
-                rewritten: None,
-            },
-            deciding: Deciding::NoGo {
+        return refused(
+            entry.reason.clone(),
+            command_key,
+            Deciding::NoGo {
                 id: entry.id.clone(),
             },
-            confirmed: false,
-        };
+        );
     }
 
     let rewritten: Option<String> = match insert::proxy_insertion(command, &policy.proxy) {
         Ok(rewritten) => rewritten,
-        Err(err) => {
-            return Routed {
-                decision: Decision::refuse(err.to_string()),
-                facts: Facts {
-                    command_key,
-                    rewritten: None,
-                },
-                deciding: Deciding::Rule {
-                    id: PROXY_ID.to_string(),
-                    needs_operator: false,
-                },
-                confirmed: false,
-            };
-        }
+        Err(err) => return refused(err.to_string(), command_key, proxy_rule()),
     };
 
     // The ask list over the command as typed; the power switches over the
@@ -132,28 +112,16 @@ fn route_bash(policy: &Policy, command: &str, ctx: &Context) -> Routed {
     // git push --force`.
     let asked: Option<NoGoEntry> = match first_match(&policy.ask, &typed) {
         Some(entry) => Some(entry.clone()),
-        None => {
-            let runs: &str = rewritten.as_deref().unwrap_or(command);
-            match splitter::scan(runs) {
-                Ok(scan) => first_match(&policy.power_switches, &scan).cloned(),
-                Err(err) => {
-                    return Routed {
-                        decision: Decision::refuse(format!(
-                            "the rewritten command did not parse: {err}"
-                        )),
-                        facts: Facts {
-                            command_key,
-                            rewritten: None,
-                        },
-                        deciding: Deciding::Rule {
-                            id: PROXY_ID.to_string(),
-                            needs_operator: false,
-                        },
-                        confirmed: false,
-                    };
-                }
+        None => match splitter::scan(rewritten.as_deref().unwrap_or(command)) {
+            Ok(scan) => first_match(&policy.power_switches, &scan).cloned(),
+            Err(err) => {
+                return refused(
+                    format!("the rewritten command did not parse: {err}"),
+                    command_key,
+                    proxy_rule(),
+                );
             }
-        }
+        },
     };
 
     if let Some(entry) = asked {
@@ -169,13 +137,36 @@ fn route_bash(policy: &Policy, command: &str, ctx: &Context) -> Routed {
                 command_key,
                 rewritten: Some(rewritten),
             },
-            deciding: Deciding::Rule {
-                id: PROXY_ID.to_string(),
-                needs_operator: false,
-            },
+            deciding: proxy_rule(),
             confirmed: false,
         },
         None => untouched(command_key),
+    }
+}
+
+/// A refused Bash command: a deny with `reason` and no command to run
+/// instead, decided by `deciding`.
+fn refused(
+    reason: impl Into<String>,
+    command_key: Option<CommandKey>,
+    deciding: Deciding,
+) -> Routed {
+    Routed {
+        decision: Decision::refuse(reason),
+        facts: Facts {
+            command_key,
+            rewritten: None,
+        },
+        deciding,
+        confirmed: false,
+    }
+}
+
+/// The deciding entry of an insertion, or of a refused one: the `proxy` list.
+fn proxy_rule() -> Deciding {
+    Deciding::Rule {
+        id: PROXY_ID.to_string(),
+        needs_operator: false,
     }
 }
 

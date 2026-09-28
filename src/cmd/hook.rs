@@ -1328,11 +1328,6 @@ mod tests {
         }
     }"#;
 
-    /// [`apply`] over a hand-built `Routed`.
-    fn apply_routed(routed: &Routed, payload: &HookPayload) -> Applied {
-        apply(routed, payload)
-    }
-
     /// A WebFetch payload: the tool whose test rule needs both lookups.
     fn fetch_payload(url: &str, cwd: Option<&str>) -> String {
         let mut value = json!({
@@ -1524,7 +1519,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply_routed(&routed, &parsed_payload("ls")).response;
+        let response = apply(&routed, &parsed_payload("ls")).response;
         assert!(output(&response).get("additionalContext").is_none());
     }
 
@@ -1551,7 +1546,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let response = apply_routed(&routed, &payload).response;
+        let response = apply(&routed, &payload).response;
         assert_denied(&response);
         assert!(reason(&response).contains("replacement:"));
     }
@@ -1579,7 +1574,7 @@ mod tests {
             "cwd": REPO_CWD
         }))
         .expect("valid payload");
-        let out = apply_routed(&routed, &payload).response["hookSpecificOutput"].clone();
+        let out = apply(&routed, &payload).response["hookSpecificOutput"].clone();
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(
             out["updatedInput"],
@@ -1652,7 +1647,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let applied = apply_routed(&routed, &parsed_payload("git status"));
+        let applied = apply(&routed, &parsed_payload("git status"));
         assert!(
             applied.rewrite.is_none(),
             "a refused rewrite yields no prediction"
@@ -1695,7 +1690,7 @@ mod tests {
 
     #[test]
     fn an_unmarked_ask_never_prompts_the_operator() {
-        let response = apply_routed(&ask_routed(false), &parsed_payload("gh pr merge 7")).response;
+        let response = apply(&ask_routed(false), &parsed_payload("gh pr merge 7")).response;
         assert_denied(&response);
         assert!(reason(&response).contains("merge it?"));
     }
@@ -1704,7 +1699,7 @@ mod tests {
     fn a_marked_ask_prompts_the_operator_through_the_harness_with_the_reason() {
         // The only path that prompts the operator: the harness's own
         // permission prompt, carrying the reason.
-        let response = apply_routed(&ask_routed(true), &parsed_payload("gh pr merge 7")).response;
+        let response = apply(&ask_routed(true), &parsed_payload("gh pr merge 7")).response;
         let out = output(&response);
         assert_eq!(out["permissionDecision"], "ask");
         assert_eq!(out["permissionDecisionReason"], "the agent said: hotfix");
@@ -1713,7 +1708,7 @@ mod tests {
         // With a rewritten command, the operator's ask carries it.
         let mut rewritten = ask_routed(true);
         rewritten.facts.rewritten = Some("legion gh pr merge 7".to_string());
-        let response = apply_routed(&rewritten, &parsed_payload("gh pr merge 7")).response;
+        let response = apply(&rewritten, &parsed_payload("gh pr merge 7")).response;
         let out = output(&response);
         assert_eq!(out["permissionDecision"], "ask");
         assert_eq!(out["updatedInput"]["command"], "legion gh pr merge 7");
@@ -1729,7 +1724,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let response = apply_routed(&routed, &parsed_payload("forbidden")).response;
+        let response = apply(&routed, &parsed_payload("forbidden")).response;
         assert_denied(&response);
         assert!(!reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
         assert_eq!(reason(&response), format!("never. {RECORDED_NOTE}"));
@@ -2407,7 +2402,7 @@ mod tests {
             },
             confirmed: false,
         };
-        let applied = apply_routed(&routed, &parsed_payload("git status"));
+        let applied = apply(&routed, &parsed_payload("git status"));
         assert_denied(&applied.response);
         assert!(applied.rewrite.is_none());
     }
