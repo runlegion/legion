@@ -608,7 +608,13 @@ fn respond_with(
 ) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(payload) => payload,
-        Err(e) => return deny_for_error(&AdapterError::Payload(e.to_string())).into(),
+        Err(e) => {
+            return failure_response(
+                tool_named_in(input).as_deref(),
+                &AdapterError::Payload(e.to_string()),
+            )
+            .into();
+        }
     };
     let call = ToolCall {
         tool: payload.tool_name.clone(),
@@ -2964,7 +2970,10 @@ mod tests {
             )
             .response;
             let from_panic = guarded(&tool_payload(tool, input), || panic!("adapter bug"));
-            for response in [from_policy, from_store, from_panic] {
+            // A payload that names its tool but is otherwise malformed.
+            let malformed: String = json!({"tool_name": tool, "cwd": 7}).to_string();
+            let from_payload = respond_answering(&malformed, POLICY, no_answers());
+            for response in [from_policy, from_store, from_panic, from_payload] {
                 assert_eq!(
                     response,
                     json!({"hookSpecificOutput": {"hookEventName": "PreToolUse"}}),

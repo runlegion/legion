@@ -22,8 +22,9 @@
 //!   hold what they return.
 //! - Glob (Claude Code runs `rg --files --glob <pattern> --hidden
 //!   --no-ignore` by default): the answer comes from the file inventory,
-//!   which respects `.gitignore`. It is full only when no ignored path, and
-//!   no `.git` entry, could match the pattern; it is fresh only when every
+//!   which respects `.gitignore`. It is full only when no `.git` entry (the
+//!   tool lists `.git` in every mode) and, by default, no ignored path could
+//!   match the pattern; it is fresh only when every
 //!   file git sees under the root that matches the pattern is in the
 //!   inventory, and every inventory match still exists on disk.
 //!
@@ -51,6 +52,10 @@ use crate::watch::WatchRepoConfig;
 
 /// The most lines an injected answer may carry, recall section included.
 pub(crate) const MAX_ANSWER_LINES: usize = 200;
+
+/// The Grep tool's `--max-columns`: it omits a longer matched line, so an
+/// answer holding one is declined rather than injected.
+const MAX_COLUMNS: usize = 500;
 
 /// How long an answer may take before the tool runs as normal. The answer
 /// runs after the decision, so this is added to the decision's own time;
@@ -278,6 +283,12 @@ fn grep_answer(
     {
         return None;
     }
+    // The tool omits a line longer than its --max-columns; injecting one
+    // (a minified bundle, a lockfile) is the answer size this cap exists to
+    // stop.
+    if result.hits.iter().any(|hit| hit.text.len() > MAX_COLUMNS) {
+        return None;
+    }
     let lines: Vec<String> = result
         .hits
         .iter()
@@ -439,18 +450,17 @@ fn glob_answer(
         }
     }
 
-    // Full: the tool also reads ignored files and `.git`, which the
-    // inventory never holds. Any of them that could match is a decline.
+    // Full: the tool lists `.git` in both modes (`--hidden`, and nothing
+    // excludes it), and by default ignored files too; the inventory holds
+    // neither. Any of them that could match is a decline.
+    if git_entry_could_match(&root, pattern, &matches)? {
+        return None;
+    }
     if reads_ignored {
-        let mut ignored: Vec<String> = git_paths(
+        let ignored: Vec<String> = git_paths(
             &root,
             &["--others", "--ignored", "--exclude-standard", "--directory"],
         )?;
-        match std::fs::symlink_metadata(root.join(".git")) {
-            Ok(meta) if meta.is_dir() => ignored.push(".git/".to_string()),
-            Ok(_) => ignored.push(".git".to_string()),
-            Err(_) => {}
-        }
         for rel in &ignored {
             let blocked: bool = match rel.strip_suffix('/') {
                 Some(dir) => could_match_under(pattern, dir),
@@ -498,6 +508,38 @@ fn could_match_under(pattern: &str, dir: &str) -> bool {
         .iter()
         .zip(dir.split('/'))
         .all(|(want, have)| want == &have)
+}
+
+/// Whether the Glob tool would list something from `root/.git` for
+/// `pattern`: the `.git` file of a linked worktree when it matches, or any
+/// file under a `.git` directory that matches. The directory is walked only
+/// when the pattern could reach it; it is small next to the tree. `None`
+/// when the walk fails.
+fn git_entry_could_match(
+    root: &Path,
+    pattern: &str,
+    matches: &dyn Fn(&Path) -> bool,
+) -> Option<bool> {
+    let git: PathBuf = root.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&git) else {
+        return Some(false);
+    };
+    if !meta.is_dir() {
+        return Some(matches(&git));
+    }
+    if !could_match_under(pattern, ".git") {
+        return Some(false);
+    }
+    for entry in ignore::WalkBuilder::new(&git)
+        .standard_filters(false)
+        .build()
+    {
+        let entry: ignore::DirEntry = entry.ok()?;
+        if entry.file_type().is_some_and(|t| t.is_file()) && matches(entry.path()) {
+            return Some(true);
+        }
+    }
+    Some(false)
 }
 
 /// Whether `root` is outside every ignore rule (`git check-ignore`): `true`
@@ -813,6 +855,17 @@ mod tests {
     }
 
     #[test]
+    fn a_grep_matching_a_line_the_tool_would_omit_is_not_injected() {
+        let repo = Repo::new();
+        let long: String = format!("needle{}\n", "x".repeat(MAX_COLUMNS));
+        repo.write("bundle.min.js", &long);
+        assert_eq!(grep(&repo, json!({"pattern": "needle"})), None);
+        let short: String = format!("needle{}\n", "x".repeat(MAX_COLUMNS - 6));
+        repo.write("bundle.min.js", &short);
+        assert!(grep(&repo, json!({"pattern": "needle"})).is_some());
+    }
+
+    #[test]
     fn recall_is_added_only_when_reflections_match_and_its_failure_declines() {
         let repo = Repo::new();
         repo.write("a.txt", "needle\n");
@@ -935,6 +988,12 @@ mod tests {
         let answer = glob(&repo, &db, json!({"pattern": "**/*.rs"}), false).expect("answers");
         assert!(answer.text.contains("src/a.rs"));
         assert!(!answer.text.contains("target/gen.rs"));
+        // The tool lists `.git` in both modes: a pattern that matches a
+        // file there is the tool's, one that matches nothing there is not.
+        for reads_ignored in [true, false] {
+            let input = json!({"pattern": "**/HEAD"});
+            assert_eq!(glob(&repo, &db, input, reads_ignored), None);
+        }
         // An ignored search root: the tool lists what is under it either
         // way, and the inventory never walked it.
         for reads_ignored in [true, false] {
