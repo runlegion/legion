@@ -29,6 +29,8 @@ fn the_shipped_file_has_exactly_the_four_lists_and_tools() {
     for bash_only in ["Bash", "Grep", "Glob"] {
         assert!(!tools.contains_key(bash_only), "tools carries {bash_only}");
     }
+    // The Read size refusal is gone (#1338): a Read runs whatever its size.
+    assert!(!tools.contains_key("Read"), "tools carries Read");
 }
 
 #[test]
