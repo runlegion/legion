@@ -98,6 +98,12 @@ impl Database {
         let payload_value: serde_json::Value = serde_json::from_str(&payload)
             .map_err(|e| LegionError::WorkSource(format!("payload is not valid JSON: {e}")))?;
         self.validate_document_payload(meta.doc_type, &payload_value)?;
+        // #1367: a reference's slug is unique among hot references. Runs
+        // after schema validation so a payload missing `slug` is reported
+        // as the schema violation it is, not as a slug error.
+        if meta.doc_type == REFERENCE_DOC_TYPE {
+            self.refuse_held_reference_slug(&payload_value, None)?;
+        }
 
         self.conn.execute(
             "INSERT INTO documents (id, type, surface, status, priority, owner, payload, created_at, updated_at) \
@@ -186,6 +192,11 @@ impl Database {
         let payload_value: serde_json::Value = serde_json::from_str(&normalized_payload)
             .map_err(|e| LegionError::WorkSource(format!("payload is not valid JSON: {e}")))?;
         self.validate_document_payload(&existing.doc_type, &payload_value)?;
+        // #1367: the revised slug may be the one this document already
+        // holds, but not one another hot reference carries.
+        if existing.doc_type == REFERENCE_DOC_TYPE {
+            self.refuse_held_reference_slug(&payload_value, Some(id))?;
+        }
 
         let rows = self.conn.execute(
             "UPDATE documents SET payload = ?1, revision = revision + 1, updated_at = ?2 \
@@ -887,6 +898,91 @@ impl Database {
                 schema_id: type_schema.schema_id,
                 errors,
             })
+        }
+    }
+}
+
+/// The one document type whose payload `slug` is a lookup key (#1367).
+/// Agent definitions name a reference by slug rather than id, so the slug
+/// must resolve to exactly one hot reference -- the store enforces that,
+/// since a JSON Schema cannot see other rows.
+pub(crate) const REFERENCE_DOC_TYPE: &str = "reference";
+
+/// Status a reference must carry to be served by slug (#1367 amendment,
+/// Sean 2026-09-29: "refer docs need to ratified"). `adopted` is the
+/// store's existing in-force status, set through the operator's
+/// `set-status` gate, so a draft cannot reach agents before it is ratified.
+pub(crate) const RATIFIED_STATUS: &str = "adopted";
+
+/// The top-level `slug` string of a payload, when it carries one.
+fn payload_slug(payload: &serde_json::Value) -> Option<&str> {
+    payload.get("slug").and_then(|v| v.as_str())
+}
+
+impl Database {
+    /// Hot (non-archived) references whose payload `slug` equals `slug`,
+    /// most recently updated first. Filters in Rust rather than with
+    /// `json_extract` so one malformed payload cannot fail the whole query.
+    fn references_with_slug(&self, slug: &str) -> Result<Vec<Document>> {
+        let references = self.list_documents(&DocumentFilter {
+            doc_type: Some(REFERENCE_DOC_TYPE),
+            ..Default::default()
+        })?;
+        Ok(references
+            .into_iter()
+            .filter(|doc| {
+                serde_json::from_str::<serde_json::Value>(&doc.payload)
+                    .ok()
+                    .as_ref()
+                    .and_then(payload_slug)
+                    == Some(slug)
+            })
+            .collect())
+    }
+
+    /// Refuse `payload` when its `slug` is already carried by a hot
+    /// reference other than `own_id` (#1367). `own_id` is the document
+    /// being revised, so a revise that keeps its own slug passes; a draft
+    /// holds its slug the same as an adopted reference does.
+    fn refuse_held_reference_slug(
+        &self,
+        payload: &serde_json::Value,
+        own_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(slug) = payload_slug(payload) else {
+            return Ok(());
+        };
+        let holder: Option<Document> = self
+            .references_with_slug(slug)?
+            .into_iter()
+            .find(|doc| Some(doc.id.as_str()) != own_id);
+        match holder {
+            Some(doc) => Err(LegionError::WorkSource(format!(
+                "reference slug '{slug}' is already held by document '{}' -- archive that \
+                 reference or choose another slug",
+                doc.id
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Resolve `slug` to the ratified reference that carries it (#1367),
+    /// backing `legion document view --slug`. A slug with no hot match is
+    /// an error, never an empty read; a match that is not yet `adopted` is
+    /// refused naming its id and status, so the caller learns the text
+    /// exists but has not been ratified.
+    pub(crate) fn reference_by_slug(&self, slug: &str) -> Result<Document> {
+        match self.references_with_slug(slug)?.into_iter().next() {
+            None => Err(LegionError::WorkSource(format!(
+                "no reference document with slug '{slug}'"
+            ))),
+            Some(doc) if doc.status == RATIFIED_STATUS => Ok(doc),
+            Some(doc) => Err(LegionError::WorkSource(format!(
+                "reference slug '{slug}' is held by document '{}' with status '{}', which is \
+                 not ratified -- a reference is served only once its status is \
+                 '{RATIFIED_STATUS}' (legion document set-status {} --to {RATIFIED_STATUS})",
+                doc.id, doc.status, doc.id
+            ))),
         }
     }
 }
@@ -2725,5 +2821,119 @@ mod tests {
             ids.contains(&"FR-ARCHIVED-1"),
             "reindex must not silently drop archived documents"
         );
+    }
+
+    // -- reference slugs (#1367) --
+
+    /// Insert a hot reference carrying `slug`, with the given id and
+    /// status, over a stub `reference` schema.
+    fn insert_reference(db: &Database, id: &str, slug: &str, status: &str) -> Document {
+        crate::db::testutil::seed_type_schema(db, REFERENCE_DOC_TYPE);
+        let mut meta = sample_meta(REFERENCE_DOC_TYPE, "smugglr");
+        meta.id = Some(id);
+        meta.status = Some(status);
+        db.insert_document(&meta, &serde_json::json!({"slug": slug}).to_string())
+            .expect("insert reference")
+    }
+
+    #[test]
+    fn reference_by_slug_returns_the_adopted_reference() {
+        let db = test_db();
+        insert_reference(&db, "REF-PRIMER", "sd-primer", RATIFIED_STATUS);
+        insert_reference(&db, "REF-OTHER", "other-guide", RATIFIED_STATUS);
+
+        let doc = db.reference_by_slug("sd-primer").expect("resolves");
+        assert_eq!(doc.id, "REF-PRIMER");
+    }
+
+    #[test]
+    fn reference_by_slug_with_no_match_names_the_slug() {
+        let db = test_db();
+        let err = db.reference_by_slug("no-such-slug").unwrap_err();
+        assert!(
+            matches!(&err, LegionError::WorkSource(msg) if msg.contains("no-such-slug")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Amendment: a reference that is not `adopted` is refused, naming its
+    /// id and status, and served once set to `adopted`.
+    #[test]
+    fn reference_by_slug_refuses_a_draft_until_adopted() {
+        let db = test_db();
+        insert_reference(&db, "REF-DRAFT", "sd-primer", "draft");
+
+        let err = db.reference_by_slug("sd-primer").unwrap_err();
+        let msg: String = err.to_string();
+        assert!(msg.contains("sd-primer"), "got: {msg}");
+        assert!(msg.contains("REF-DRAFT"), "got: {msg}");
+        assert!(msg.contains("'draft'"), "got: {msg}");
+        assert!(msg.contains("not ratified"), "got: {msg}");
+
+        db.set_document_status("REF-DRAFT", RATIFIED_STATUS)
+            .expect("adopt");
+        assert_eq!(db.reference_by_slug("sd-primer").unwrap().id, "REF-DRAFT");
+    }
+
+    #[test]
+    fn insert_reference_refuses_a_slug_held_by_a_draft_naming_the_holder() {
+        let db = test_db();
+        insert_reference(&db, "REF-FIRST", "sd-primer", "draft");
+
+        let mut meta = sample_meta(REFERENCE_DOC_TYPE, "smugglr");
+        meta.id = Some("REF-SECOND");
+        let err = db
+            .insert_document(&meta, r#"{"slug":"sd-primer"}"#)
+            .unwrap_err();
+        let msg: String = err.to_string();
+        assert!(msg.contains("sd-primer"), "got: {msg}");
+        assert!(msg.contains("REF-FIRST"), "got: {msg}");
+        assert!(db.get_document("REF-SECOND").unwrap().is_none());
+    }
+
+    #[test]
+    fn revise_reference_refuses_a_slug_another_reference_holds() {
+        let db = test_db();
+        insert_reference(&db, "REF-FIRST", "sd-primer", RATIFIED_STATUS);
+        insert_reference(&db, "REF-SECOND", "other-guide", RATIFIED_STATUS);
+
+        let err = db
+            .revise_document("REF-SECOND", r#"{"slug":"sd-primer"}"#)
+            .unwrap_err();
+        let msg: String = err.to_string();
+        assert!(msg.contains("sd-primer"), "got: {msg}");
+        assert!(msg.contains("REF-FIRST"), "got: {msg}");
+        assert_eq!(db.document_revision("REF-SECOND").unwrap(), 1);
+    }
+
+    #[test]
+    fn revise_reference_keeping_its_own_slug_succeeds() {
+        let db = test_db();
+        insert_reference(&db, "REF-FIRST", "sd-primer", RATIFIED_STATUS);
+
+        db.revise_document("REF-FIRST", r#"{"slug":"sd-primer","title":"v2"}"#)
+            .expect("a reference may keep its own slug");
+        assert_eq!(db.document_revision("REF-FIRST").unwrap(), 2);
+    }
+
+    #[test]
+    fn archiving_a_reference_frees_its_slug() {
+        let db = test_db();
+        insert_reference(&db, "REF-OLD", "sd-primer", RATIFIED_STATUS);
+        db.archive_document("REF-OLD").expect("archive");
+
+        insert_reference(&db, "REF-NEW", "sd-primer", RATIFIED_STATUS);
+        assert_eq!(db.reference_by_slug("sd-primer").unwrap().id, "REF-NEW");
+    }
+
+    /// Out of scope: slugs on other document types are not enforced.
+    #[test]
+    fn non_reference_documents_may_share_a_slug() {
+        let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "musing");
+        let meta = sample_meta("musing", "legion");
+        db.insert_document(&meta, r#"{"slug":"same"}"#).unwrap();
+        db.insert_document(&meta, r#"{"slug":"same"}"#)
+            .expect("a non-reference slug is not unique");
     }
 }

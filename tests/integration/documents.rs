@@ -587,3 +587,152 @@ fn document_validate_refuses_non_schema_document() {
         "must refuse a non-schema document as the schema argument"
     );
 }
+
+// --- Documents: reference lookup by slug (#1367) ---
+
+/// Create a `reference` document carrying `slug` through the CLI and
+/// return the raw output; the caller asserts success or refusal.
+fn create_reference(dir: &std::path::Path, slug: &str) -> std::process::Output {
+    let payload = serde_json::json!({"title": "Primer", "slug": slug}).to_string();
+    run_with_stdin(
+        legion_cmd(dir).args([
+            "document",
+            "create",
+            "--doc-type",
+            "reference",
+            "--owner",
+            "smugglr",
+        ]),
+        payload.as_bytes(),
+    )
+}
+
+/// Create a reference, require success, and return its id.
+fn create_reference_ok(dir: &std::path::Path, slug: &str) -> String {
+    let out = create_reference(dir, slug);
+    assert!(
+        out.status.success(),
+        "reference create failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn adopt(dir: &std::path::Path, id: &str) {
+    run_ok(legion_cmd(dir).args(["document", "set-status", id, "--to", "adopted"]));
+}
+
+#[test]
+fn document_view_by_slug_returns_the_adopted_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "reference");
+    let id = create_reference_ok(dir.path(), "sd-primer");
+    adopt(dir.path(), &id);
+
+    let view =
+        run_ok(legion_cmd(dir.path()).args(["document", "view", "--slug", "sd-primer", "--json"]));
+    let doc: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    assert_eq!(doc["id"], id.as_str());
+    assert_eq!(doc["doc_type"], "reference");
+
+    let human = run_ok(legion_cmd(dir.path()).args(["document", "view", "--slug", "sd-primer"]));
+    assert!(human.contains(&id), "human view must show the id: {human}");
+}
+
+#[test]
+fn document_view_by_unknown_slug_fails_naming_the_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["document", "view", "--slug", "no-such-primer"]));
+    assert!(
+        stderr.contains("no-such-primer"),
+        "error must name the slug, got: {stderr}"
+    );
+}
+
+#[test]
+fn document_view_refuses_both_id_and_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    run_fail(legion_cmd(dir.path()).args(["document", "view", "some-id", "--slug", "sd-primer"]));
+}
+
+/// Amendment: a draft reference is refused by `view --slug`, naming its id
+/// and status, and returned once set to `adopted`.
+#[test]
+fn document_view_by_slug_refuses_a_draft_until_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "reference");
+    let id = create_reference_ok(dir.path(), "sd-primer");
+
+    let (_, stderr) =
+        run_fail(legion_cmd(dir.path()).args(["document", "view", "--slug", "sd-primer"]));
+    assert!(stderr.contains("sd-primer"), "got: {stderr}");
+    assert!(
+        stderr.contains(&id),
+        "error must name the id, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("draft"),
+        "error must name the status, got: {stderr}"
+    );
+    assert!(stderr.contains("not ratified"), "got: {stderr}");
+
+    adopt(dir.path(), &id);
+    let view =
+        run_ok(legion_cmd(dir.path()).args(["document", "view", "--slug", "sd-primer", "--json"]));
+    let doc: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    assert_eq!(doc["id"], id.as_str());
+}
+
+#[test]
+fn reference_slug_conflict_is_refused_at_create_and_revise_naming_the_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "reference");
+    let holder = create_reference_ok(dir.path(), "sd-primer");
+
+    // Create: a second reference with the held slug is refused.
+    let out = create_reference(dir.path(), "sd-primer");
+    assert!(
+        !out.status.success(),
+        "duplicate slug must be refused at create"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sd-primer"), "got: {stderr}");
+    assert!(
+        stderr.contains(&holder),
+        "error must name the holder, got: {stderr}"
+    );
+
+    // Revise: another reference may not take the held slug.
+    let other = create_reference_ok(dir.path(), "other-guide");
+    let payload = serde_json::json!({"title": "Primer", "slug": "sd-primer"}).to_string();
+    let out = run_with_stdin(
+        legion_cmd(dir.path()).args(["document", "revise", &other]),
+        payload.as_bytes(),
+    );
+    assert!(
+        !out.status.success(),
+        "duplicate slug must be refused at revise"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sd-primer"), "got: {stderr}");
+    assert!(
+        stderr.contains(&holder),
+        "error must name the holder, got: {stderr}"
+    );
+}
+
+#[test]
+fn archiving_a_reference_frees_its_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_doc_type_schema(dir.path(), "reference");
+    let old = create_reference_ok(dir.path(), "sd-primer");
+    run_ok(legion_cmd(dir.path()).args(["document", "archive", &old]));
+
+    let new = create_reference_ok(dir.path(), "sd-primer");
+    adopt(dir.path(), &new);
+    let view =
+        run_ok(legion_cmd(dir.path()).args(["document", "view", "--slug", "sd-primer", "--json"]));
+    let doc: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    assert_eq!(doc["id"], new.as_str());
+}
