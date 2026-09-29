@@ -236,7 +236,8 @@ pub(crate) fn command_in(tool_input: &Value) -> Option<&str> {
 /// `.claude/worktrees/agent-<id>`, the folder the harness creates for an
 /// agent spawned with worktree isolation.
 fn in_agent_worktree(cwd: &str) -> bool {
-    let parts: Vec<&str> = cwd.split('/').collect();
+    // Both separators: the harness reports a Windows cwd with `\`.
+    let parts: Vec<&str> = cwd.split(['/', '\\']).collect();
     parts.windows(3).any(|window| {
         window[0] == ".claude"
             && window[1] == "worktrees"
@@ -2818,7 +2819,12 @@ mod tests {
     fn a_worktree_isolated_agent_gets_git_and_gh_as_typed() {
         // #1358: Claude Code's worktree guard refuses `legion git ...` in an
         // isolated agent, so no form with `legion` inserted is returned.
-        for cwd in [ISOLATED_CWD, &format!("{ISOLATED_CWD}/crates/legion-cmd")] {
+        for cwd in [
+            ISOLATED_CWD,
+            &format!("{ISOLATED_CWD}/crates/legion-cmd"),
+            // A Windows cwd, as the harness reports it there.
+            r"C:\repo\legion\.claude\worktrees\agent-a6875e266df3b6908",
+        ] {
             for command in ["git status --short", "gh pr view 1"] {
                 let response = shipped_input(&agent_payload(command, cwd));
                 assert_eq!(
@@ -2948,6 +2954,8 @@ mod tests {
         for cwd in [
             ISOLATED_CWD,
             "/repo/legion/.claude/worktrees/agent-a1b2c3d/src",
+            r"C:\repo\legion\.claude\worktrees\agent-a1b2c3d",
+            r"C:\repo\legion\.claude\worktrees\agent-a1b2c3d\src",
         ] {
             assert!(in_agent_worktree(cwd), "{cwd}");
         }
@@ -2957,6 +2965,8 @@ mod tests {
             "/repo/legion/.claude/worktrees/agent-",
             "/repo/legion/worktrees/agent-a1b2c3d",
             "/repo/legion/.claude/agent-a1b2c3d",
+            r"C:\repo\legion",
+            r"C:\repo\legion\.claude\worktrees\spec-writer",
         ] {
             assert!(!in_agent_worktree(cwd), "{cwd}");
         }
