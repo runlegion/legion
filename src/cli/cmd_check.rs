@@ -86,7 +86,8 @@ fn check_with(
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         // No session work: a dry run never records, notifies, or uses up a
         // confirmation (#1237).
-        let routed = route_call(policy_text, call, lookups, legion_repo, cwd, None)?;
+        // An operator's dry run comes from no agent, so no worktree isolation.
+        let routed = route_call(policy_text, call, lookups, legion_repo, cwd, false, None)?;
         let replacement = replacement_for(&routed, &original)?;
         Ok((routed, replacement))
     }))

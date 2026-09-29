@@ -4,7 +4,8 @@
 //! and put through four lists: a command on the never-run list is denied; a
 //! command on the ask list, or one whose rewritten form uses a power switch,
 //! is asked about; each `git`, `gh`, `grep` and `rg` (the proxy list) gets
-//! `legion ` inserted before its name; everything else runs as typed. A
+//! `legion ` inserted before its name, except the `worktree_agent_passthrough`
+//! names in a worktree-isolated agent (#1358); everything else runs as typed. A
 //! command matching more than one gets the strictest outcome: deny, then
 //! ask, then insertion, then untouched. No job is recognized and no
 //! interpreter body is inspected. A call to any other tool is decided by its
@@ -102,7 +103,7 @@ fn route_bash(policy: &Policy, command: &str, ctx: &Context) -> Routed {
         );
     }
 
-    let rewritten: Option<String> = match insert::proxy_insertion(command, &policy.proxy) {
+    let rewritten: Option<String> = match insert::proxy_insertion(command, &proxied(policy, ctx)) {
         Ok(rewritten) => rewritten,
         Err(err) => return refused(err.to_string(), command_key, proxy_rule()),
     };
@@ -142,6 +143,21 @@ fn route_bash(policy: &Policy, command: &str, ctx: &Context) -> Routed {
         },
         None => untouched(command_key),
     }
+}
+
+/// The names that get `legion ` inserted for this call: the policy's proxy
+/// list, less its `worktree_agent_passthrough` names when the call comes from
+/// a worktree-isolated agent (#1358). Claude Code's worktree guard refuses
+/// `legion git ...` there, so the typed command is the form that runs. Only
+/// insertion reads this: the never-run, ask and power-switch lists are
+/// matched the same in every agent.
+fn proxied(policy: &Policy, ctx: &Context) -> Vec<String> {
+    policy
+        .proxy
+        .iter()
+        .filter(|name| !ctx.worktree_isolated || !policy.worktree_agent_passthrough.contains(name))
+        .cloned()
+        .collect()
 }
 
 /// A refused Bash command: a deny with `reason` and no command to run
@@ -632,6 +648,102 @@ mod tests {
                 .as_deref(),
             Some("cd x && legion grep -rn foo src | legion rg bar")
         );
+    }
+
+    /// The shipped policy with `worktree_agent_passthrough` set as #1358's
+    /// second release ships it.
+    fn passthrough_policy() -> Policy {
+        Policy {
+            worktree_agent_passthrough: vec!["git".to_string(), "gh".to_string()],
+            ..policy()
+        }
+    }
+
+    fn decide_isolated(command: &str) -> Routed {
+        let ctx = Context {
+            worktree_isolated: true,
+            ..Context::default()
+        };
+        route(&passthrough_policy(), &bash(command), &ctx)
+    }
+
+    #[test]
+    fn with_no_passthrough_list_a_worktree_isolated_agent_gets_every_insertion() {
+        let ctx = Context {
+            worktree_isolated: true,
+            ..Context::default()
+        };
+        let routed = route(
+            &Policy {
+                worktree_agent_passthrough: Vec::new(),
+                ..policy()
+            },
+            &bash("git status"),
+            &ctx,
+        );
+        assert_eq!(routed.facts.rewritten.as_deref(), Some("legion git status"));
+    }
+
+    #[test]
+    fn a_worktree_isolated_agent_runs_git_and_gh_as_typed() {
+        for command in [
+            "git status --short",
+            "gh pr view 1",
+            "cd x && git log --oneline -3",
+        ] {
+            let routed = decide_isolated(command);
+            assert_eq!(routed.decision, Decision::Allow { note: None }, "{command}");
+            assert_eq!(routed.facts.rewritten, None, "{command}");
+            assert_eq!(routed.deciding, Deciding::Default, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_worktree_isolated_agent_still_gets_legion_grep_and_rg() {
+        assert_eq!(
+            decide_isolated("git status && grep -rn foo src | rg bar")
+                .facts
+                .rewritten
+                .as_deref(),
+            Some("git status && legion grep -rn foo src | legion rg bar")
+        );
+    }
+
+    #[test]
+    fn a_worktree_isolated_agent_is_denied_and_asked_as_elsewhere() {
+        assert_eq!(
+            decide_isolated("rm -rf /").deciding,
+            Deciding::NoGo {
+                id: "rm-recursive-force-root".to_string()
+            }
+        );
+        for (command, id) in [
+            ("git push --force", "push-force"),
+            ("git push origin +feature", "push-force-refspec"),
+            (
+                "gh pr merge 5 --merge-despite-failures",
+                "merge-despite-failures",
+            ),
+            ("gh issue close 5 --force", "issue-close-force"),
+            ("curl https://example.com", "curl-network"),
+        ] {
+            let routed = decide_isolated(command);
+            assert_eq!(asked_id(&routed).as_deref(), Some(id), "{command}");
+            // The operator is asked about the command as typed: nothing is
+            // inserted into it.
+            assert_eq!(routed.facts.rewritten, None, "{command}");
+        }
+    }
+
+    #[test]
+    fn outside_a_worktree_isolated_agent_git_still_gets_legion() {
+        for (command, rewritten) in [
+            ("git status", "legion git status"),
+            ("gh pr view 1", "legion gh pr view 1"),
+        ] {
+            let routed = route(&passthrough_policy(), &bash(command), &Context::default());
+            assert_eq!(routed.facts.rewritten.as_deref(), Some(rewritten));
+        }
     }
 
     #[test]

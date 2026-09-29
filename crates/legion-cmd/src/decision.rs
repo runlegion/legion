@@ -265,6 +265,11 @@ pub struct Context {
     /// gave. The adapter reads them from the confirmation store; route decides
     /// what one does (FR-CMD-011).
     pub confirmations: HashMap<CommandKey, String>,
+    /// The call comes from an agent Claude Code isolated in its own worktree
+    /// (#1358). The adapter reads it from the payload; route leaves the
+    /// policy's `worktree_agent_passthrough` names as typed when it is set,
+    /// and nothing else changes.
+    pub worktree_isolated: bool,
 }
 
 /// The complete command: the tool name and its inputs. A Bash call carries

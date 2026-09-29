@@ -172,7 +172,8 @@ pub(crate) const ROUTE_DEADLINE: Duration = Duration::from_millis(7000);
 /// confirmations the adapter reads and the incident records it writes to the
 /// session (#1237). `tool_use_id`, `transcript_path` and `session_id` also
 /// serve the rewrite prediction and its witness (#1272), which no decision
-/// reads.
+/// reads. `agent_id`, which the harness sends only from a subagent, and
+/// `cwd` together tell a worktree-isolated agent (#1358).
 #[derive(Debug, Deserialize)]
 struct HookPayload {
     tool_name: String,
@@ -180,6 +181,8 @@ struct HookPayload {
     tool_input: Value,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
     #[serde(default)]
     tool_use_id: Option<String>,
     #[serde(default)]
@@ -193,6 +196,18 @@ impl HookPayload {
     /// names the command back to the agent goes through here.
     fn command(&self) -> Option<&str> {
         command_in(&self.tool_input)
+    }
+
+    /// True when the call comes from a subagent Claude Code isolated in its
+    /// own worktree (#1358): the payload names a subagent (`agent_id`) and
+    /// its `cwd` lies inside one of the harness's agent worktrees,
+    /// `.claude/worktrees/agent-<id>`. A nested subagent carries its own
+    /// `agent_id` but runs in its parent's worktree, so any agent worktree
+    /// counts, not only one named after this agent. The harness's worktree
+    /// guard refuses `legion git ...` in such an agent.
+    fn worktree_isolated(&self) -> bool {
+        let is_subagent: bool = self.agent_id.as_deref().is_some_and(|id| !id.is_empty());
+        is_subagent && self.cwd.as_deref().is_some_and(in_agent_worktree)
     }
 
     /// The value a rewrite replaces -- the Bash command, or an Agent/Task
@@ -216,6 +231,23 @@ pub(crate) fn command_in(tool_input: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty())
 }
+
+/// True when `cwd` is inside a Claude Code agent worktree: a path holding
+/// `.claude/worktrees/agent-<id>`, the folder the harness creates for an
+/// agent spawned with worktree isolation.
+fn in_agent_worktree(cwd: &str) -> bool {
+    let parts: Vec<&str> = cwd.split('/').collect();
+    parts.windows(3).any(|window| {
+        window[0] == ".claude"
+            && window[1] == "worktrees"
+            && window[2].len() > AGENT_WORKTREE_PREFIX.len()
+            && window[2].starts_with(AGENT_WORKTREE_PREFIX)
+    })
+}
+
+/// The prefix of the folder name the harness gives an isolated agent's
+/// worktree.
+const AGENT_WORKTREE_PREFIX: &str = "agent-";
 
 /// Every way the adapter itself fails, each closed (FR-CMD-009). The deny
 /// the agent sees names the variant and its detail.
@@ -634,6 +666,7 @@ fn respond_with(
         lookups,
         legion_repo.clone(),
         payload.cwd.clone(),
+        payload.worktree_isolated(),
         Some(session),
     ) {
         Ok(routed) => match answered(&routed, &payload, legion_repo, answers) {
@@ -684,14 +717,18 @@ fn answer_response(answer: Answer) -> Value {
 /// (the text is a local file, read outside the deadline), then runs repo
 /// derivation, the lookup pre-pass, and route on a worker thread under
 /// [`ROUTE_DEADLINE`]. Returns route's result. Every failure is an [`AdapterError`], which each mode turns into a deny
-/// (FR-CMD-009, FR-CMD-016). `session` is the hook mode's [`SessionWork`],
-/// run inside the same deadline; the operator mode passes `None`.
+/// (FR-CMD-009, FR-CMD-016). `worktree_isolated` is whether the call comes
+/// from a worktree-isolated agent (#1358), which only the hook payload can
+/// say; the operator mode passes `false`. `session` is the hook mode's
+/// [`SessionWork`], run inside the same deadline; the operator mode passes
+/// `None`.
 pub(crate) fn route_call(
     policy_text: Result<String, AdapterError>,
     call: ToolCall,
     lookups: Arc<dyn LookupRunner>,
     legion_repo: Option<String>,
     cwd: Option<String>,
+    worktree_isolated: bool,
     session: Option<SessionWork>,
 ) -> Result<Routed, AdapterError> {
     // A policy file that cannot be read still leaves the built-in no-go list
@@ -730,6 +767,7 @@ pub(crate) fn route_call(
 
         let mut ctx: Context =
             fetch_context(&worker_policy, &call, repo.clone(), lookups.as_ref())?;
+        ctx.worktree_isolated = worktree_isolated;
         if let (Some(work), Some(db)) = (&session, &db)
             && let Some(session) = &work.session
         {
@@ -2743,6 +2781,185 @@ mod tests {
             no_answers(),
         )
         .response
+    }
+
+    /// A worktree-isolated agent's cwd, as the harness lays it out.
+    const ISOLATED_CWD: &str = "/repo/legion/.claude/worktrees/agent-a6875e266df3b6908";
+
+    /// A Bash payload from a subagent (`agent_id` set) whose cwd is `cwd`.
+    fn agent_payload(command: &str, cwd: &str) -> String {
+        json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "session_id": "s1",
+            "tool_use_id": "t1",
+            "cwd": cwd,
+            "agent_id": "a6875e266df3b6908",
+            "agent_type": "rust"
+        })
+        .to_string()
+    }
+
+    /// The shipped policy with `"worktree_agent_passthrough": ["git", "gh"]`
+    /// added, as #1358's second release ships it.
+    fn passthrough_policy() -> String {
+        let mut root: Value = serde_json::from_str(SHIPPED_POLICY).expect("valid JSON");
+        root["worktree_agent_passthrough"] = json!(["git", "gh"]);
+        root.to_string()
+    }
+
+    /// The adapter's response to `input` under the shipped policy plus the
+    /// passthrough list.
+    fn shipped_input(input: &str) -> Value {
+        shipped_input_with(&passthrough_policy(), input)
+    }
+
+    #[test]
+    fn a_worktree_isolated_agent_gets_git_and_gh_as_typed() {
+        // #1358: Claude Code's worktree guard refuses `legion git ...` in an
+        // isolated agent, so no form with `legion` inserted is returned.
+        for cwd in [ISOLATED_CWD, &format!("{ISOLATED_CWD}/crates/legion-cmd")] {
+            for command in ["git status --short", "gh pr view 1"] {
+                let response = shipped_input(&agent_payload(command, cwd));
+                assert_eq!(
+                    response,
+                    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse"}}),
+                    "`{command}` in {cwd}"
+                );
+            }
+        }
+        // grep and rg still reach their legion proxies there.
+        let response = shipped_input(&agent_payload("git log | grep x", ISOLATED_CWD));
+        assert_eq!(
+            output(&response)["updatedInput"]["command"],
+            "git log | legion grep x"
+        );
+    }
+
+    #[test]
+    fn a_worktree_isolated_agent_is_denied_and_asked_as_elsewhere() {
+        let denied = shipped_input(&agent_payload("rm -rf /", ISOLATED_CWD));
+        assert_denied(&denied);
+
+        // An unconfirmed power switch asks the agent to drop or confirm it,
+        // exactly as it does for any other caller.
+        let asked = shipped_input(&agent_payload("git push --force", ISOLATED_CWD));
+        assert_denied(&asked);
+        assert!(
+            reason(&asked).starts_with(
+                "this command needs the operator's approval: drop it or confirm it -- \
+                 a forced push discards commits"
+            ),
+            "the push-force entry's ask: {asked}"
+        );
+        assert_eq!(asked, shipped("git push --force"));
+
+        // Once the agent confirms, the operator is asked about the command as
+        // typed: nothing is inserted into it.
+        let store = temp_store();
+        agent_confirms(&store, "git push --force", "s1", Utc::now());
+        let confirmed = respond_with(
+            &agent_payload("git push --force", ISOLATED_CWD),
+            Ok(passthrough_policy()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            store,
+            Some("legion".to_string()),
+            no_answers(),
+        )
+        .response;
+        let out = output(&confirmed);
+        assert_eq!(out["permissionDecision"], "ask", "{confirmed}");
+        assert!(out.get("updatedInput").is_none(), "{confirmed}");
+    }
+
+    #[test]
+    fn outside_a_worktree_isolated_agent_git_still_gets_legion() {
+        let main_session = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "session_id": "s1",
+            "tool_use_id": "t1",
+            "cwd": ISOLATED_CWD
+        })
+        .to_string();
+        for input in [
+            // The main thread, even in an agent worktree: no `agent_id`.
+            main_session,
+            // A subagent in the main checkout.
+            agent_payload("git status", REPO_CWD),
+            // A subagent in a worktree the harness did not make for an agent.
+            agent_payload("git status", "/repo/legion/.claude/worktrees/spec-writer"),
+            // The operator's own payloads, no agent at all.
+            payload("git status"),
+        ] {
+            let response = shipped_input(&input);
+            assert_eq!(
+                rewritten_command(&response),
+                Some("legion git status"),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_policy_without_the_passthrough_list_still_inserts_in_an_isolated_agent() {
+        // #1358 release one: the binary knows the key, the shipped file does
+        // not carry it yet, and an absent list means every proxied name is
+        // inserted, as in 0.43.1.
+        let response = shipped_input_with(
+            SHIPPED_POLICY,
+            &agent_payload("git status --short", ISOLATED_CWD),
+        );
+        assert_eq!(
+            rewritten_command(&response),
+            Some("legion git status --short")
+        );
+    }
+
+    fn shipped_input_with(policy: &str, input: &str) -> Value {
+        respond_with(
+            input,
+            Ok(policy.to_string()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            temp_store(),
+            Some("legion".to_string()),
+            no_answers(),
+        )
+        .response
+    }
+
+    #[test]
+    fn an_empty_agent_id_is_not_a_subagent() {
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "git status"},
+            "cwd": ISOLATED_CWD,
+            "agent_id": ""
+        })
+        .to_string();
+        assert_eq!(
+            rewritten_command(&shipped_input(&input)),
+            Some("legion git status")
+        );
+    }
+
+    #[test]
+    fn an_agent_worktree_is_a_named_folder_under_claude_worktrees() {
+        for cwd in [
+            ISOLATED_CWD,
+            "/repo/legion/.claude/worktrees/agent-a1b2c3d/src",
+        ] {
+            assert!(in_agent_worktree(cwd), "{cwd}");
+        }
+        for cwd in [
+            "/repo/legion",
+            "/repo/legion/.claude/worktrees/spec-writer",
+            "/repo/legion/.claude/worktrees/agent-",
+            "/repo/legion/worktrees/agent-a1b2c3d",
+            "/repo/legion/.claude/agent-a1b2c3d",
+        ] {
+            assert!(!in_agent_worktree(cwd), "{cwd}");
+        }
     }
 
     /// The command an insertion response runs in place of the agent's.
