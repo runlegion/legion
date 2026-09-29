@@ -1164,4 +1164,41 @@ mod tests {
             VerifyDecision::Proceed
         );
     }
+
+    // -- #1369: an amendment's added criteria are required ------------------
+
+    /// #1367's shape: five `## Done When` checkboxes plus one under an
+    /// amendment's `Done When, added:` line. A verdict set covering only the
+    /// five was recorded clean before #1369 -- the gate counted five.
+    const AMENDED_BODY: &str = "## Done When\n\n\
+        - [ ] A test creates a reference with slug sd-primer\n\
+        - [ ] A test shows an unknown slug exits non-zero\n\
+        - [ ] A test shows a duplicate slug is refused\n\
+        - [ ] A test shows archiving frees its slug\n\
+        - [ ] All tests pass\n\n\
+        ## Amendment -- current choice (Sean, 2026-09-29; revisable): ratified only\n\n\
+        Required:\n\
+        - view --slug returns only an adopted reference.\n\n\
+        Done When, added:\n\
+        - [ ] A test shows a draft reference is refused until set to adopted\n";
+
+    #[test]
+    fn verdicts_omitting_the_amendment_criterion_are_not_clean() {
+        let acceptance: Vec<String> = crate::card_parse::parse_issue_body(AMENDED_BODY).acceptance;
+        assert_eq!(acceptance.len(), 6, "got {acceptance:?}");
+
+        let five: Vec<AcResult> = acceptance[..5]
+            .iter()
+            .map(|c| res(c, AcVerdict::Pass, "tests::slug_view passed, src/x.rs:10"))
+            .collect();
+        let decision: VerifyDecision = decide(&acceptance, &five);
+        assert_eq!(decision, VerifyDecision::Incomplete { unaddressed: 1 });
+        assert!(!decision.allows_done(), "must not record a clean gate");
+
+        let six: Vec<AcResult> = acceptance
+            .iter()
+            .map(|c| res(c, AcVerdict::Pass, "tests::slug_view passed, src/x.rs:10"))
+            .collect();
+        assert_eq!(decide(&acceptance, &six), VerifyDecision::Proceed);
+    }
 }
