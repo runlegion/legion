@@ -1,5 +1,44 @@
 # Legion Changelog
 
+## 0.43.4
+
+The reference-slug release. Agents can now read a reference document by its slug.
+`legion document view --slug sd-primer` returns the reference whose payload `slug` is
+`sd-primer`, so an agent definition can name a slug instead of a vault path or a document id.
+The store now keeps each slug unique among live references: a second reference with a slug
+that another one already holds is refused. A reference is served by slug only after it is
+ratified, meaning its status is `adopted`. A draft cannot reach agents before the operator
+sets that status.
+
+Patch release: additive behavior within the existing `legion document` surface. `view`
+gains one flag, and `create` and `revise` of a `reference` refuse a slug another reference
+holds. No wire-format change and no schema migration.
+
+### New
+
+- **`legion document view --slug <slug>`** (PR #1368, #1367). `view` now takes either the
+  positional id or `--slug`, not both, and `--json` works the same way with either. The
+  slug lookup reads the non-archived documents of type `reference` and matches the
+  top-level `slug` in each payload. The match is done in Rust rather than with SQL
+  `json_extract`, so one malformed payload cannot fail the lookup. A matching reference is
+  returned only when its status is `adopted`. If no reference has the slug, the command
+  exits non-zero with an error naming the slug; it never returns an empty result. If the
+  matching reference is not yet adopted, the command exits non-zero with an error that
+  names the slug, the document id and its status, says it is not ratified, and gives the
+  `legion document set-status <id> --to adopted` command that would ratify it.
+- **One live reference per slug** (PR #1368, #1367). `legion document create --doc-type
+  reference` refuses a payload whose `slug` a non-archived reference already carries.
+  `legion document revise` of a reference refuses a change to a slug another non-archived
+  reference carries. Both errors name the slug and the id of the document that holds it.
+  A revise that keeps the document's own slug passes. A draft holds its slug the same way
+  an adopted reference does, so a slug is claimed when the reference is created, not when
+  it is ratified. Archiving a reference frees its slug. The check runs after schema
+  validation, so a payload with no `slug` is reported as a schema error. Uniqueness is
+  enforced in the store because a JSON Schema cannot see other rows. Slugs on other
+  document types are not checked. The rule applies only when a reference is created or
+  revised, so any duplicates already in a store stay there. If such duplicates exist,
+  `view --slug` looks at the most recently updated one.
+
 ## 0.43.3
 
 The worktree-agent release, part two. 0.43.2 shipped a binary that can leave named commands
