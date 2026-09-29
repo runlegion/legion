@@ -1,5 +1,39 @@
 # Legion Changelog
 
+## 0.43.2
+
+The worktree-agent release, part one. Since 0.43.0 the router has put `legion ` in front of
+every typed `git` and `gh`. In a subagent Claude Code runs isolated in its own worktree, the
+harness's worktree guard refuses `legion` with a git command among its operands, because it
+cannot see what `legion git` runs. So every `git status` such an agent typed was refused,
+and every builder agent launched with `isolation: "worktree"` is such an agent. This binary
+can now leave named commands as typed in those agents. The names come from the policy, and
+the shipped `plugin/legion-cmd/policy.json` does not name any yet. Behavior is therefore
+unchanged from 0.43.1 until 0.43.3 adds `"worktree_agent_passthrough": ["git", "gh"]` to it.
+The change ships in two releases because a binary that does not know a policy key rejects
+the whole policy and denies every Bash call, and the installed binary lags the plugin until
+the next SessionStart. The binary that reads the key has to be installed before a policy
+that uses it.
+
+Patch release: a fix within the existing router surface. The policy format gains one optional
+key that the previous format did not allow. No CLI change, no wire-format change and no
+schema migration.
+
+### Fixed
+
+- **The router can leave `git` and `gh` as typed in worktree-isolated agents** (PR #1360,
+  #1358). The policy accepts an optional fifth top-level list, `worktree_agent_passthrough`,
+  validated like `proxy`. When the key is absent the list is empty. The hook adapter now
+  reads `agent_id` from the PreToolUse payload. A call counts as worktree-isolated when
+  `agent_id` is non-empty, which Claude Code sends only from a subagent, and `cwd` lies in a
+  `.claude/worktrees/agent-<id>` directory. Both `/` and `\` count as path separators, so a
+  Windows cwd matches too. For such a call, route (`Context.worktree_isolated`) leaves the
+  names on that list out of proxy insertion and changes nothing else. grep and rg still
+  become `legion grep` and `legion rg` in every agent, because the operator denies the bare
+  names. The never-run list, the ask list and the power switches apply in isolated agents
+  exactly as they do elsewhere, so `rm -rf /` is still denied and `git push --force` is
+  still asked. Outside an isolated agent, `git status` still becomes `legion git status`.
+
 ## 0.43.1
 
 The grep-coverage release. In 0.43.0, `legion rg` and `legion grep` answered from sym only
