@@ -43,9 +43,16 @@ pub(crate) enum DocumentAction {
         #[arg(long)]
         from: Option<PathBuf>,
     },
-    /// View a document by id.
+    /// View a document by id, or a ratified reference by its slug.
     View {
-        id: String,
+        /// Document id.
+        #[arg(required_unless_present = "slug")]
+        id: Option<String>,
+        /// Look up the `reference` document whose payload `slug` matches
+        /// (#1367). Only a non-archived reference with status `adopted` is
+        /// served; no match, or a match not yet adopted, exits non-zero.
+        #[arg(long, conflicts_with = "id")]
+        slug: Option<String>,
         /// Emit full row as JSON (default: human-friendly summary).
         #[arg(long)]
         json: bool,
@@ -198,10 +205,19 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             }
             println!("{}", doc.id);
         }
-        DocumentAction::View { id, json } => {
-            let doc = database.get_document(&id)?.ok_or_else(|| {
-                error::LegionError::WorkSource(format!("document '{id}' not found"))
-            })?;
+        DocumentAction::View { id, slug, json } => {
+            // clap guarantees exactly one of `id` / `slug` is present.
+            let doc: documents::Document = match (id, slug) {
+                (_, Some(slug)) => database.reference_by_slug(&slug)?,
+                (Some(id), None) => database.get_document(&id)?.ok_or_else(|| {
+                    error::LegionError::WorkSource(format!("document '{id}' not found"))
+                })?,
+                (None, None) => {
+                    return Err(error::LegionError::WorkSource(
+                        "document view needs an id or --slug".to_string(),
+                    ));
+                }
+            };
             if json {
                 println!("{}", serde_json::to_string(&doc)?);
             } else {
