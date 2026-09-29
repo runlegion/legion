@@ -1,5 +1,33 @@
 # Legion Changelog
 
+## 0.43.5
+
+The amendment-criteria release. `legion verify` now requires a verdict for every
+acceptance checkbox an issue's `## Amendment` section adds, not only the ones under the
+issue's own `## Done When`. Amendments are how the operator adds work to an issue after
+its build has started. Before this release, the checkbox an amendment added under its own
+`Done When, added:` line was not counted. On #1367 the gate parsed five criteria when the
+issue carried six, so a verdict set that skipped the amendment's criterion was recorded
+clean. The criterion it skipped was that a draft reference is refused until it is adopted.
+
+Patch release: a fix within the existing `legion verify` surface. No CLI change, no
+wire-format change and no schema migration.
+
+### Fixed
+
+- **An amendment's added Done When checkboxes are acceptance criteria** (PR #1375, #1369).
+  `card_parse::parse_issue_body` now treats any section whose heading starts with
+  `Amendment` as a possible source of criteria. The checkboxes (`- [ ]`, `- [x]`, `- [X]`)
+  that follow the amendment's own `Done When` line are appended to the issue's acceptance
+  list. The amendment's plain `- ` bullets stay prose, because they state requirements
+  rather than checks. An amendment with no `Done When` line adds no criteria, so a
+  checkbox elsewhere in its text is not counted. The amendment is still kept as an
+  ordinary section, so tools that read it as text see it unchanged. `legion verify
+  --issue`, `legion pr write-check` and `legion issue close` all read this one acceptance
+  list, so all three now include amendment criteria. On an issue shaped like #1367, five
+  verdicts now fail with `1 of 6 criteria have no verdict` instead of passing, and six
+  verdicts pass.
+
 ## 0.43.4
 
 The reference-slug release. Agents can now read a reference document by its slug.
