@@ -1,6 +1,7 @@
 //! The shipped artifact (`plugin/legion-cmd/policy.json`, #1337): exactly
-//! the four Bash lists and the rules for tools other than Bash, with today's
-//! never-run and ask coverage and the three power switches.
+//! the four Bash lists, the names a worktree-isolated agent runs as typed
+//! (#1358), and the rules for tools other than Bash, with today's never-run
+//! and ask coverage and the three power switches.
 
 use legion_cmd::{PolicyError, builtin_no_go, parse_policy};
 use serde_json::Value;
@@ -12,7 +13,7 @@ fn shipped() -> legion_cmd::Policy {
 }
 
 #[test]
-fn the_shipped_file_has_exactly_the_four_lists_and_tools() {
+fn the_shipped_file_has_exactly_the_four_lists_the_passthrough_list_and_tools() {
     let root: Value = serde_json::from_str(SHIPPED_POLICY_JSON).expect("valid JSON");
     let mut keys: Vec<&str> = root
         .as_object()
@@ -23,7 +24,14 @@ fn the_shipped_file_has_exactly_the_four_lists_and_tools() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["ask", "never_run", "power_switches", "proxy", "tools"]
+        vec![
+            "ask",
+            "never_run",
+            "power_switches",
+            "proxy",
+            "tools",
+            "worktree_agent_passthrough"
+        ]
     );
     let tools = root["tools"].as_object().expect("tools is an object");
     for bash_only in ["Bash", "Grep", "Glob"] {
@@ -36,6 +44,12 @@ fn the_shipped_file_has_exactly_the_four_lists_and_tools() {
 #[test]
 fn the_proxy_list_is_git_gh_grep_and_rg() {
     assert_eq!(shipped().proxy, vec!["git", "gh", "grep", "rg"]);
+}
+
+#[test]
+fn a_worktree_isolated_agent_runs_git_and_gh_as_typed() {
+    // #1358: grep and rg stay proxied in every agent.
+    assert_eq!(shipped().worktree_agent_passthrough, vec!["git", "gh"]);
 }
 
 #[test]

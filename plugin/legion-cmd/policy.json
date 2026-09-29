@@ -5,6 +5,10 @@
     "grep",
     "rg"
   ],
+  "worktree_agent_passthrough": [
+    "git",
+    "gh"
+  ],
   "never_run": [
     {
       "id": "sqlite3-legion-db",

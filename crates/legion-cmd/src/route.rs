@@ -650,21 +650,12 @@ mod tests {
         );
     }
 
-    /// The shipped policy with `worktree_agent_passthrough` set as #1358's
-    /// second release ships it.
-    fn passthrough_policy() -> Policy {
-        Policy {
-            worktree_agent_passthrough: vec!["git".to_string(), "gh".to_string()],
-            ..policy()
-        }
-    }
-
     fn decide_isolated(command: &str) -> Routed {
         let ctx = Context {
             worktree_isolated: true,
             ..Context::default()
         };
-        route(&passthrough_policy(), &bash(command), &ctx)
+        route(&policy(), &bash(command), &ctx)
     }
 
     #[test]
@@ -741,7 +732,7 @@ mod tests {
             ("git status", "legion git status"),
             ("gh pr view 1", "legion gh pr view 1"),
         ] {
-            let routed = route(&passthrough_policy(), &bash(command), &Context::default());
+            let routed = route(&policy(), &bash(command), &Context::default());
             assert_eq!(routed.facts.rewritten.as_deref(), Some(rewritten));
         }
     }

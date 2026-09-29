@@ -2801,18 +2801,9 @@ mod tests {
         .to_string()
     }
 
-    /// The shipped policy with `"worktree_agent_passthrough": ["git", "gh"]`
-    /// added, as #1358's second release ships it.
-    fn passthrough_policy() -> String {
-        let mut root: Value = serde_json::from_str(SHIPPED_POLICY).expect("valid JSON");
-        root["worktree_agent_passthrough"] = json!(["git", "gh"]);
-        root.to_string()
-    }
-
-    /// The adapter's response to `input` under the shipped policy plus the
-    /// passthrough list.
+    /// The adapter's response to `input` under the shipped policy.
     fn shipped_input(input: &str) -> Value {
-        shipped_input_with(&passthrough_policy(), input)
+        shipped_input_with(SHIPPED_POLICY, input)
     }
 
     #[test]
@@ -2866,7 +2857,7 @@ mod tests {
         agent_confirms(&store, "git push --force", "s1", Utc::now());
         let confirmed = respond_with(
             &agent_payload("git push --force", ISOLATED_CWD),
-            Ok(passthrough_policy()),
+            Ok(SHIPPED_POLICY.to_string()),
             Arc::new(StubLookups(Lookup::Empty)),
             store,
             Some("legion".to_string()),
@@ -2908,12 +2899,15 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_policy_without_the_passthrough_list_still_inserts_in_an_isolated_agent() {
-        // #1358 release one: the binary knows the key, the shipped file does
-        // not carry it yet, and an absent list means every proxied name is
-        // inserted, as in 0.43.1.
+    fn a_policy_without_the_passthrough_list_still_inserts_in_an_isolated_agent() {
+        // An absent list is an empty one: every proxied name is inserted, as
+        // in 0.43.1.
+        let mut root: Value = serde_json::from_str(SHIPPED_POLICY).expect("valid JSON");
+        root.as_object_mut()
+            .expect("an object")
+            .remove("worktree_agent_passthrough");
         let response = shipped_input_with(
-            SHIPPED_POLICY,
+            &root.to_string(),
             &agent_payload("git status --short", ISOLATED_CWD),
         );
         assert_eq!(
