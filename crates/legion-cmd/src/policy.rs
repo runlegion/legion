@@ -3,7 +3,9 @@
 //! For Bash the policy holds exactly four lists: the names that go to a
 //! legion proxy (`proxy`), the commands that never run (`never_run`), the
 //! commands the operator is asked about (`ask`), and the three power
-//! switches that also need the operator (`power_switches`). Every entry in
+//! switches that also need the operator (`power_switches`). One more name
+//! list, `worktree_agent_passthrough`, names the proxied names left as typed
+//! in a worktree-isolated agent (#1358). Every entry in
 //! the last three is data -- a name set and argument predicates -- never a
 //! branch in Rust code. The `tools` section holds the rules for tools other
 //! than Bash, matched on the call's own input fields. [`parse_policy`] reads
@@ -145,6 +147,11 @@ pub enum RuleOutcome {
 pub struct Policy {
     /// Command names that get `legion ` inserted before them.
     pub proxy: Vec<String>,
+    /// Proxied names that run as typed, with nothing inserted, in a
+    /// worktree-isolated agent (#1358): Claude Code's worktree guard refuses
+    /// `legion` with a git command among its operands, so there the typed
+    /// command is the only form that runs.
+    pub worktree_agent_passthrough: Vec<String>,
     /// Never-run entries the policy file adds (FR-CMD-025). They extend the
     /// built-in list and can never remove or weaken it: see
     /// [`Policy::never_run_entries`].
@@ -225,9 +232,17 @@ pub enum PolicyError {
     },
 }
 
-/// The top-level keys a policy file may carry: the four Bash lists and the
-/// rules for other tools. Anything else fails to parse.
-const TOP_LEVEL_KEYS: [&str; 5] = ["proxy", "never_run", "ask", "power_switches", "tools"];
+/// The top-level keys a policy file may carry: the four Bash lists, the
+/// proxied names a worktree-isolated agent runs as typed, and the rules for
+/// other tools. Anything else fails to parse.
+const TOP_LEVEL_KEYS: [&str; 6] = [
+    "proxy",
+    "worktree_agent_passthrough",
+    "never_run",
+    "ask",
+    "power_switches",
+    "tools",
+];
 
 /// Parses policy text into a [`Policy`] (FR-CMD-011). Pure: the caller reads
 /// the file and passes its contents; route never opens it.
@@ -250,6 +265,10 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
         Some(value) => parse_names(value, "/proxy")?,
         None => Vec::new(),
     };
+    let worktree_agent_passthrough: Vec<String> = match root.get("worktree_agent_passthrough") {
+        Some(value) => parse_names(value, "/worktree_agent_passthrough")?,
+        None => Vec::new(),
+    };
     let mut entries = |key: &str| -> Result<Vec<NoGoEntry>, PolicyError> {
         match root.get(key) {
             Some(value) => parse_entries(value, &format!("/{key}"), &mut seen_ids),
@@ -266,6 +285,7 @@ pub fn parse_policy(text: &str) -> Result<Policy, PolicyError> {
 
     Ok(Policy {
         proxy,
+        worktree_agent_passthrough,
         never_run,
         ask,
         power_switches,
@@ -845,6 +865,7 @@ mod tests {
         let policy = parse(
             r#"{
             "proxy": ["git", "gh"],
+            "worktree_agent_passthrough": ["gh"],
             "never_run": [{"id": "n1", "names": ["sqlite3"], "reason": "raw store access",
                 "predicates": [{"kind": "operand", "equals": ["legion.db"]}]}],
             "ask": [{"id": "a1", "names": ["curl"], "reason": "reaches the network"}],
@@ -856,6 +877,7 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(policy.proxy, vec!["git".to_string(), "gh".to_string()]);
+        assert_eq!(policy.worktree_agent_passthrough, vec!["gh".to_string()]);
         assert_eq!(policy.never_run[0].id, "n1");
         assert_eq!(policy.never_run[0].reason, "raw store access");
         assert_eq!(policy.ask[0].names, vec!["curl".to_string()]);
@@ -924,6 +946,17 @@ mod tests {
             parse(r#"{"proxy": ["git", ""]}"#),
             Err(PolicyError::WrongType { .. })
         ));
+    }
+
+    #[test]
+    fn an_empty_worktree_agent_passthrough_name_fails_to_parse() {
+        assert_eq!(
+            parse(r#"{"worktree_agent_passthrough": ["git", ""]}"#),
+            Err(PolicyError::WrongType {
+                pointer: "/worktree_agent_passthrough/1".to_string(),
+                expected: "a non-empty command name".to_string(),
+            })
+        );
     }
 
     #[test]
