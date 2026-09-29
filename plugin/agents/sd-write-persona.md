@@ -37,6 +37,8 @@ The format below follows these. Where they add a section the Discovery can fill,
 - The Discovery id: `legion document view <id> --json`.
 - The persona group id in it (P<n>).
 
+The intent comes through the Discovery: read it with `legion document view <meta.intent> --json` for what exists and what is planned. The service surface is the Discovery row's `surface`.
+
 Validate the Discovery against the schema whose payload carries `"x-doc-type": "discovery"`, resolved from `legion document list --doc-type schema --json` (the `payload` is a JSON string; parse it twice). A missing or invalid Discovery, or a group absent from its `persona_groups`, returns `stopped` naming it. A group with stories from fewer than three independent authors returns `stopped` naming the group.
 
 ## Rules
@@ -69,12 +71,12 @@ Resolve the persona schema by `"x-doc-type": "persona"`; its `required` and `pro
 | What they need: each need as a consequence the stories show, cited | `needs[]` |
 | The moment that changes their mind, cited, or empty | `changed_their_mind` |
 | Relationship to the service: the adoption stages the stories show, from first hearing of a tool like this to relying on it or recommending it; what the person does and what they need at each, cited; the service's part marked `(planned)` | `relationship_stages[]`: `{stage, they_do, service_provides}` |
-| What they don't care about: concerns the stories show these people lack, cited, so nobody designs for them | `doesnt_care_about[]` |
+| "What they don't care about": concerns the stories show these people lack, cited, so nobody designs for them | `doesnt_care_about[]` |
 | What would make them leave: what made people in these stories leave or give up, cited | `would_leave_if[]` |
 | More quotes in their voice, verbatim, cited | `quotes[]` |
 | Open questions: each empty item with the question discovery raised for it | `open_questions[]`: `{item, question}` |
 
-Where the group's journey material records a moment of truth, carry it into `moment_of_truth` (`description`, `success`, `failure`, each cited). `meta` carries `title`, `set` (the intent's service surface), `actor` (the group id), `status` (`draft`), `date`, and `author` (you, the same value as `--owner`). `built_from`, `needs`, `changed_their_mind`, and `open_questions` ride beside the schema's own fields.
+Where the group's journey material records a moment of truth, carry it into `moment_of_truth` (`description`, `success`, `failure`, each cited). `meta` carries `title`, `set` (the service surface), `actor` (the group id), `status` (`draft`), `date`, and `author` (you, the same value as `--owner`). `built_from`, `needs`, `changed_their_mind`, and `open_questions` ride beside the schema's own fields.
 
 ## Steps
 
@@ -89,7 +91,7 @@ Where the group's journey material records a moment of truth, carry it into `mom
    legion document create --doc-type persona --owner <agent> --surface <surface> --from persona.json
    ```
 
-   `--surface` is the intent's service surface (the product name).
+   `--surface` is the Discovery row's `surface`, the service surface; `meta.set` carries the same value.
 6. Emit the prediction (below).
 
 ## Prediction

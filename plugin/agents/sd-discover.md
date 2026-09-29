@@ -113,7 +113,7 @@ Discovery also produces the material the persona and journey writers build from.
 - their frustrations, as verbatim quotes;
 - the moment that changed their mind, where a story shows one;
 - their relationship to tools like this over time: first hearing, trying, adopting, relying, recommending or leaving, where the stories show it;
-- what they don't care about, where the stories show it;
+- the concerns they lack (`doesnt_care_about`), where the stories show it;
 - what made them leave or give up, where a story shows it;
 - quotes that carry their voice, verbatim.
 
@@ -153,7 +153,7 @@ The emotion at each stage comes from what the stories say, with its citations. E
     legion document create --doc-type discovery --owner <agent> --surface <surface> --from <working file>
     ```
 
-    `--surface` is the intent's service surface (the product name); `meta.author` is you, the same value as `--owner`; `meta.intent` is the intent id. `meta.status` is `done` when no open people question waits on a direct ask, and `draft` otherwise.
+    `--surface` is the intent's service surface (the product name); `meta.author` is you, the same value as `--owner`; `meta.intent` is the intent id. `meta.status` is `done` when no open people question waits on a direct ask, and `draft` otherwise. The final `notes` holds only what the operator needs to decide; the round line goes.
 15. Emit the predictions (below).
 
 ## Predictions
