@@ -26,8 +26,9 @@ use crate::error;
 
 /// The environment variable Claude Code sets in every Bash tool subprocess to
 /// the session id -- the same session the hook payload's `session_id` names.
-/// legion's shipped skills already read it for `legion uncertainty emit
-/// --session-id` (plugin/skills/sd-*).
+/// legion's shipped service-design surfaces already read it for `legion
+/// uncertainty emit --session-id` (plugin/skills/sd-service-design,
+/// plugin/agents/sd-*).
 const SESSION_ENV: &str = "CLAUDE_CODE_SESSION_ID";
 
 #[derive(Subcommand)]

@@ -1,0 +1,302 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "discovery",
+  "title": "Discovery",
+  "description": "The Discovery: the record sd-discover produces for one intent. The intent raises questions for people; each question carries where it could be answered, the search trail, the first-hand evidence found, the evidence against, and a status. What the rounds taught becomes learnings; the citations become stories, persona groups, and journey material, which the persona, journey, and blueprint writers build from. Rev 2026-09-29 (legion #1376): replaces the insight-and-verdict shape (weights, scores, the 0.40 bar) with question-driven discovery.",
+  "type": "object",
+  "definitions": {
+    "cited": {
+      "type": "object",
+      "description": "A statement and the citation ids behind it. An empty text means the evidence leaves the item unsupported.",
+      "properties": {
+        "text": { "type": "string" },
+        "citations": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["text", "citations"]
+    },
+    "cited_list": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/cited" }
+    },
+    "felt": {
+      "type": "array",
+      "description": "Feelings in the words the evidence uses, each with its citations.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "words": { "type": "string" },
+          "citations": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["words", "citations"]
+      }
+    },
+    "quoted": {
+      "type": "array",
+      "description": "Verbatim quotes, each with the one citation it comes from.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "quote": { "type": "string" },
+          "citation": { "type": "string" }
+        },
+        "required": ["quote", "citation"]
+      }
+    }
+  },
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "review", "done"] },
+        "date": { "type": "string", "description": "The run date. Every answer is a finding as of this date." },
+        "author": { "type": "string" },
+        "intent": { "type": "string", "description": "Id of the intent document this Discovery was raised from." },
+        "rounds": { "type": "integer", "minimum": 0, "description": "Rounds of questions run." }
+      },
+      "required": ["title", "status", "date", "author", "intent"]
+    },
+    "sources": {
+      "type": "array",
+      "description": "Each source checked before round one, with the defects its sample showed. Each defect is a known limit on everything that source supplies.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "sampled": { "type": "integer", "minimum": 0, "description": "Results read from the sample." },
+          "defects": { "type": "array", "items": { "type": "string" }, "description": "Each defect and how often it appeared." }
+        },
+        "required": ["name", "sampled", "defects"]
+      }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Q<n> for a people question, D<n> for a design question." },
+          "round": { "type": "integer", "minimum": 1 },
+          "kind": {
+            "type": "string",
+            "enum": ["people", "design"],
+            "description": "people: asks people about their own experience. design: asks whether the service should respond a particular way; answered through the people questions it spawns."
+          },
+          "raised_by": { "type": "string", "description": "What raised the question: an intent field path, a learning id, an action the person takes, or a design question id." },
+          "question": { "type": "string" },
+          "places": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "url": { "type": "string" },
+                "in_lens": { "type": "boolean", "description": "True when the eavesdrop lens already crawls this place." }
+              },
+              "required": ["name", "url", "in_lens"]
+            }
+          },
+          "trail": {
+            "type": "object",
+            "description": "How the evidence was found. A reader weighs an answer by what was searched and what stayed out of reach.",
+            "properties": {
+              "searches": { "type": "array", "items": { "type": "string" }, "description": "Each search run and where." },
+              "read": { "type": "integer", "minimum": 0 },
+              "on_question": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["searches", "read", "on_question"]
+          },
+          "evidence": { "type": "array", "items": { "type": "string" }, "description": "Citation ids that answer the question." },
+          "contradicting": { "type": "array", "items": { "type": "string" }, "description": "Citation ids that point the other way, held to the same standard." },
+          "status": {
+            "type": "string",
+            "enum": ["answered", "contested", "open"],
+            "description": "answered: three or more independent first-hand accounts from two or more source families, and no citation-worthy evidence against. contested: citation-worthy evidence points both ways. open: otherwise. A design question stays open; its people questions carry the answers."
+          },
+          "few_voices": { "type": "boolean", "description": "True when fewer than six independent voices stand behind the question." },
+          "expert_only": { "type": "boolean", "description": "True when the answer rests only on accounts from people with a stake." },
+          "answer": { "type": "string", "description": "What the evidence says as of the run date, citing each item. Present when answered or contested." },
+          "authors": { "type": "integer", "minimum": 0, "description": "Independent authors behind the answer." },
+          "families": { "type": "integer", "minimum": 0, "description": "Source families behind the answer." },
+          "family_names": { "type": "array", "items": { "type": "string" } },
+          "people_answers": { "type": "string", "description": "Design questions: the people answers that bear on it, with their question ids." },
+          "ask": {
+            "type": "array",
+            "description": "Open people questions: a direct-ask wording per place, phrased for that place's audience and norms.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "place": { "type": "string" },
+                "wording": { "type": "string" }
+              },
+              "required": ["place", "wording"]
+            }
+          },
+          "spawned": { "type": "array", "items": { "type": "string" }, "description": "Question ids raised from this one." }
+        },
+        "required": ["id", "round", "kind", "raised_by", "question", "evidence", "status"]
+      }
+    },
+    "citations": {
+      "type": "array",
+      "description": "Citation-worthy evidence: first-hand, locatable, stake declared, on the question, specific, current enough, genuine.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "C<n>." },
+          "url": { "type": "string" },
+          "date": { "type": "string" },
+          "date_from": { "type": "string", "enum": ["post", "thread"], "description": "thread when only the thread's date is known." },
+          "author": { "type": "string" },
+          "family": { "type": "string", "description": "The source family: one forum, one issue tracker, one subreddit, one blog." },
+          "thread": { "type": "string", "description": "The thread URL, when the account is a reply." },
+          "text": { "type": "string", "description": "Verbatim quote; following the URL finds the same words." },
+          "stake": {
+            "type": "string",
+            "enum": ["user", "maintainer", "vendor", "competitor", "promoter", "unknown"],
+            "description": "The author's relationship to what they describe."
+          },
+          "qualifies": { "type": "string", "description": "Which evidence rules it meets and how, in one line." },
+          "stale": { "type": "boolean" }
+        },
+        "required": ["id", "url", "date", "author", "family", "text", "stake", "stale"]
+      }
+    },
+    "learnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "L<n>." },
+          "round": { "type": "integer", "minimum": 1 },
+          "from": { "type": "array", "items": { "type": "string" }, "description": "Question or citation ids that taught it." },
+          "learning": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "spawned": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["id", "round", "from", "learning", "evidence"]
+      }
+    },
+    "stories": {
+      "type": "array",
+      "description": "One author's first-hand account read as a sequence, built from that author's citations only.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "S<n>." },
+          "author": { "type": "string" },
+          "situation": { "$ref": "#/definitions/cited" },
+          "trying_to": { "$ref": "#/definitions/cited" },
+          "did": { "$ref": "#/definitions/cited_list" },
+          "happened": { "$ref": "#/definitions/cited_list" },
+          "felt": { "$ref": "#/definitions/felt" },
+          "next": { "$ref": "#/definitions/cited" }
+        },
+        "required": ["id", "author", "situation", "trying_to", "did", "happened", "felt", "next"]
+      }
+    },
+    "persona_groups": {
+      "type": "array",
+      "description": "Stories that share a situation and a way of behaving. A group needs stories from three or more independent authors to stand as a persona.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "P<n>." },
+          "name": { "type": "string" },
+          "stories": { "type": "array", "items": { "type": "string" } },
+          "authors": { "type": "integer", "minimum": 0 },
+          "who": { "$ref": "#/definitions/cited" },
+          "goals": { "$ref": "#/definitions/cited_list" },
+          "behaviors": { "$ref": "#/definitions/cited_list" },
+          "mental_model": { "$ref": "#/definitions/cited" },
+          "frustrations": { "$ref": "#/definitions/quoted" },
+          "changed_their_mind": { "$ref": "#/definitions/cited" },
+          "relationship": {
+            "type": "array",
+            "description": "The relationship to tools like this over time: first hearing, trying, adopting, relying, recommending or leaving, where the stories show it.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage": { "type": "string" },
+                "text": { "type": "string" },
+                "citations": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["stage", "text", "citations"]
+            }
+          },
+          "doesnt_care_about": { "$ref": "#/definitions/cited_list" },
+          "left_because": { "$ref": "#/definitions/cited_list" },
+          "quotes": { "$ref": "#/definitions/quoted" },
+          "empty": {
+            "type": "array",
+            "description": "Items no story supports, each with the question raised for it.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "item": { "type": "string" },
+                "question": { "type": "string" }
+              },
+              "required": ["item", "question"]
+            }
+          }
+        },
+        "required": ["id", "stories", "authors", "who", "goals", "behaviors", "frustrations", "empty"]
+      }
+    },
+    "journeys": {
+      "type": "array",
+      "description": "Journey material: per persona group, the stories aligned into stages in the order people went through them.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "persona": { "type": "string", "description": "The persona group id." },
+          "stages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "duration": { "type": "string", "description": "How long the stage took, where a story says." },
+                "stories": { "type": "integer", "minimum": 0, "description": "Stories that reached the stage; one story means the stage is thin." },
+                "did": { "$ref": "#/definitions/cited_list" },
+                "thought": { "$ref": "#/definitions/cited_list" },
+                "felt": { "$ref": "#/definitions/felt" },
+                "touchpoints": { "$ref": "#/definitions/cited_list" },
+                "hurt": { "$ref": "#/definitions/cited_list" },
+                "could_help": { "$ref": "#/definitions/cited_list" }
+              },
+              "required": ["name", "stories", "did", "thought", "felt", "touchpoints", "hurt", "could_help"]
+            }
+          },
+          "moments_of_truth": {
+            "type": "array",
+            "description": "Moments where stories show people deciding to stay or leave.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "moment": { "type": "string" },
+                "success": { "$ref": "#/definitions/cited" },
+                "failure": { "$ref": "#/definitions/cited" }
+              },
+              "required": ["moment", "success", "failure"]
+            }
+          }
+        },
+        "required": ["persona", "stages"]
+      }
+    },
+    "crawl_list": {
+      "type": "array",
+      "description": "Places found that the eavesdrop lens does not crawl yet.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "url": { "type": "string" }
+        },
+        "required": ["url"]
+      }
+    },
+    "notes": { "type": "string", "description": "What the operator needs to decide." }
+  },
+  "required": ["meta", "sources", "questions", "citations", "learnings", "stories", "persona_groups", "journeys"]
+}
