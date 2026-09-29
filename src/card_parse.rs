@@ -108,6 +108,16 @@ pub fn parse_issue_body(body: &str) -> ParsedIssue {
             "traces to" => {
                 parsed.trace = parse_trace_bullets(content);
             }
+            // #1369: an amendment is how operator-added work reaches an issue
+            // once its build has started, and its `Done When, added:` list is
+            // acceptance the verdict set must cover. The section stays a
+            // generic section too -- only its added checkboxes are criteria.
+            amendment if amendment.starts_with("amendment") => {
+                parsed
+                    .acceptance
+                    .extend(extract_amendment_criteria(content));
+                parsed.sections.push((heading.clone(), content.to_string()));
+            }
             _ => {
                 parsed.sections.push((heading.clone(), content.to_string()));
             }
@@ -219,6 +229,33 @@ fn extract_checklist(text: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Extract the checkboxes an `## Amendment` section adds under its own
+/// `Done When` line (#1369).
+///
+/// Only checkboxes after that line count: an amendment's prose requirements
+/// are plain `- ` bullets, and `extract_checklist` would read those as
+/// criteria too. An amendment with no `Done When` line adds none.
+fn extract_amendment_criteria(text: &str) -> Vec<String> {
+    let mut in_done_when = false;
+    let mut criteria: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !in_done_when {
+            let label = trimmed.trim_start_matches(['*', '#', ' ']).to_lowercase();
+            in_done_when = label.starts_with("done when");
+            continue;
+        }
+        let item = trimmed
+            .strip_prefix("- [ ] ")
+            .or_else(|| trimmed.strip_prefix("- [x] "))
+            .or_else(|| trimmed.strip_prefix("- [X] "));
+        if let Some(item) = item {
+            criteria.push(item.to_string());
+        }
+    }
+    criteria
 }
 
 /// Parse the bullets under a `## Traces to` section (#933 trace format
@@ -677,6 +714,62 @@ mod tests {
             "both headings' criteria must be present, got {:?}",
             parsed.acceptance
         );
+    }
+
+    // -- #1369: an amendment's added Done When checkboxes are criteria -------
+
+    /// #1367's shape: five `## Done When` checkboxes, then an amendment whose
+    /// prose requirements are plain bullets and whose `Done When, added:` line
+    /// carries one more checkbox. Verify parsed five before #1369.
+    const AMENDED_BODY: &str = "## Goal\n\nServe references by slug.\n\n\
+        ## Done When\n\n\
+        - [ ] A test creates a reference with slug sd-primer\n\
+        - [ ] A test shows an unknown slug exits non-zero\n\
+        - [ ] A test shows a duplicate slug is refused\n\
+        - [ ] A test shows archiving frees its slug\n\
+        - [ ] All tests pass\n\n\
+        ## Amendment -- current choice (Sean, 2026-09-29; revisable): a reference is served only once ratified\n\n\
+        Required, in addition to the Behavior above:\n\
+        - view --slug returns only an adopted reference.\n\
+        - A non-adopted reference is not returned.\n\
+        - Slug uniqueness is unchanged.\n\n\
+        Done When, added:\n\
+        - [ ] A test shows a draft reference is refused until set to adopted\n";
+
+    #[test]
+    fn amendment_done_when_checkboxes_are_acceptance_criteria() {
+        let parsed = parse_issue_body(AMENDED_BODY);
+        assert_eq!(
+            parsed.acceptance.len(),
+            6,
+            "five Done When checkboxes plus the amendment's one, and none of its \
+             plain Required bullets, got {:?}",
+            parsed.acceptance
+        );
+        assert_eq!(
+            parsed.acceptance[5],
+            "A test shows a draft reference is refused until set to adopted"
+        );
+        assert!(
+            parsed
+                .sections
+                .iter()
+                .any(|(heading, _)| heading.starts_with("Amendment")),
+            "the amendment stays readable as a section"
+        );
+    }
+
+    /// #1358's shape: an amendment with prose and a numbered list but no
+    /// Done When line adds no criteria.
+    #[test]
+    fn amendment_without_done_when_adds_no_criteria() {
+        let body = "## Done When\n\n- [ ] All tests pass\n\n\
+            ## Amendment -- current choice (2026-09-28): two-release rollout\n\n\
+            **Rollout.** Two releases:\n\
+            1. First PR parses the key.\n\
+            - [ ] not under a Done When line\n";
+        let parsed = parse_issue_body(body);
+        assert_eq!(parsed.acceptance, vec!["All tests pass".to_owned()]);
     }
 
     // -- #961: `split_body_lossless` byte-exact round trip -------------------

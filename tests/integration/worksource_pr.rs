@@ -3791,6 +3791,91 @@ fn verify_requires_a_target() {
     );
 }
 
+// -- #1369: an amendment's added Done When checkboxes are required ----------
+
+/// A `view-issue` stub carrying #1367's shape: five `## Done When`
+/// checkboxes, then an `## Amendment` whose plain Required bullets are prose
+/// and whose `Done When, added:` line carries a sixth checkbox.
+#[cfg(unix)]
+const AMENDED_ISSUE_STUB: &str = r###"#!/bin/bash
+set -e
+case "${1:-}" in
+  view-issue)
+    cat <<'BODY'
+{"url":"https://example.com/issues/7","number":7,"title":"amended issue","body":"## Done When\n\n- [ ] A test creates a reference with slug sd-primer\n- [ ] A test shows an unknown slug exits non-zero\n- [ ] A test shows a duplicate slug is refused\n- [ ] A test shows archiving frees its slug\n- [ ] All tests pass\n\n## Amendment -- current choice (2026-09-29; revisable): ratified only\n\nRequired:\n- view --slug returns only an adopted reference.\n\nDone When, added:\n- [ ] A test shows a draft reference is refused until set to adopted\n","labels":[],"assignees":null,"state":"OPEN"}
+BODY
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"###;
+
+#[cfg(unix)]
+fn amended_verdicts(count: usize) -> String {
+    let criteria = [
+        "A test creates a reference with slug sd-primer",
+        "A test shows an unknown slug exits non-zero",
+        "A test shows a duplicate slug is refused",
+        "A test shows archiving frees its slug",
+        "All tests pass",
+        "A test shows a draft reference is refused until set to adopted",
+    ];
+    let verdicts: Vec<serde_json::Value> = criteria[..count]
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "criterion": c,
+                "verdict": "pass",
+                "evidence": "tests::slug_view passed, src/x.rs:10",
+            })
+        })
+        .collect();
+    serde_json::Value::Array(verdicts).to_string()
+}
+
+/// `verify --issue` on an amended issue requires six criteria: five verdicts
+/// are refused as incomplete (not recorded clean), six pass.
+#[cfg(unix)]
+#[test]
+fn verify_issue_requires_amendment_done_when_criteria() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), AMENDED_ISSUE_STUB);
+
+    let verdicts = data_dir.path().join("verdicts.json");
+    std::fs::write(&verdicts, amended_verdicts(5)).unwrap();
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "7",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("1 of 6 criteria have no verdict"),
+        "five verdicts must leave the amendment criterion unaddressed, got: {stderr}"
+    );
+
+    std::fs::write(&verdicts, amended_verdicts(6)).unwrap();
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "7",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stdout.contains("verify PASS") && stdout.contains("(6 criteria"),
+        "six verdicts must pass against six criteria, got: {stdout}"
+    );
+}
+
 // -- #933: issues trace to their requirement --------------------------------
 
 /// A `view-issue` stub whose body carries a `## Traces to` bullet naming
