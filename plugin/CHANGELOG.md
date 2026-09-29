@@ -1,5 +1,35 @@
 # Legion Changelog
 
+## 0.43.3
+
+The worktree-agent release, part two. 0.43.2 shipped a binary that can leave named commands
+as typed in a subagent Claude Code isolates in its own worktree. This release names them.
+The shipped `plugin/legion-cmd/policy.json` now lists `git` and `gh` under
+`worktree_agent_passthrough`. A builder agent launched with `isolation: "worktree"` that
+types `git status` now runs `git status`. It no longer gets a `legion git status` that the
+harness's worktree guard refuses. The binary that reads the key went out in 0.43.2, ahead
+of this policy. A binary that does not know a policy key rejects the whole policy and
+denies every Bash call, so that binary had to be installed first.
+
+Patch release: a fix within the existing router surface. The shipped policy file gains one
+key, which 0.43.2 already accepts. No binary behavior change, no CLI change, no wire-format
+change and no schema migration.
+
+### Fixed
+
+- **The shipped policy leaves `git` and `gh` as typed in worktree-isolated agents** (PR
+  #1364, #1358). `plugin/legion-cmd/policy.json` now carries
+  `"worktree_agent_passthrough": ["git", "gh"]`. Worktree-isolated means the same as in
+  0.43.2: a non-empty `agent_id` and a `cwd` inside `.claude/worktrees/agent-<id>`. For such
+  a call the router skips `legion` insertion for those two names. grep and rg still become
+  `legion grep` and `legion rg` in every agent, because the operator denies the bare names.
+  The never-run list, the ask list and the power switches match in isolated agents exactly
+  as elsewhere, so `git push --force` is still asked. Outside an isolated agent,
+  `git status` still becomes `legion git status`. The shipped-policy test
+  (`crates/legion-cmd/tests/shipped_policy.rs`) pins the new key and its contents. The
+  router and hook tests now run over the shipped file itself rather than adding the list in
+  a test fixture. A policy without the key still means an empty list, as in 0.43.1.
+
 ## 0.43.2
 
 The worktree-agent release, part one. Since 0.43.0 the router has put `legion ` in front of
