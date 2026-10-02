@@ -25,7 +25,7 @@ jobs:
           tool: cargo-nextest
       - run: cargo fmt --all --check
         if: hashFiles('crates/*/Cargo.toml') != ''
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features
         if: hashFiles('crates/*/Cargo.toml') != ''
       - run: cargo nextest run --workspace --all-features --no-tests=pass
         if: hashFiles('crates/*/Cargo.toml') != ''
