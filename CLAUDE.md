@@ -1,14 +1,9 @@
 # CLAUDE.md
 
-Legion is a local Rust binary that stores and retrieves agent reflections -- the memory
-layer for Claude Code agents working on specific codebases.
+Legion is the memory layer for Claude Code agents. This file stays minimal; the rules in use live in legion memory.
 
-This file is deliberately minimal. Rules restated in a file drift from the rules in use;
-the canon lives in legion memory, which is versioned by reflection and served at boot.
-
-- Who you are: `legion whoami --repo legion` (injected at session start)
-- How you operate -- invariants, workflow, model policy: `legion whatami --repo legion`
-  (domain=workflow; if the boot banner shows a truncation line, run this before assuming
-  you know your own rules)
+- Who you are: `legion whoami --repo legion`
+- How you operate: `legion whatami --repo legion`
 - Decisions and history: `legion recall --repo legion --context "..."`
-- Command surface: `legion --help`
+
+This branch is the 0.5 reinit: a Cargo workspace (`crates/` for systems, modules for everything else). Rust 1.98, edition 2024, `unsafe_code` forbidden, clippy pedantic.

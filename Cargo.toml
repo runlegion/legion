@@ -1,138 +1,30 @@
 [workspace]
-members = ["crates/legion-cmd"]
+resolver = "3"
+members = ["crates/*"]
 
-[package]
-name = "legion"
-version = "0.43.5"
+[workspace.package]
+version = "0.50.0"
 edition = "2024"
-description = "Agent specialization through deliberate practice"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/runlegion/legion"
+authors = ["Sean Silvius"]
 
-[dependencies]
-legion-cmd = { path = "crates/legion-cmd" }
-tantivy = "0.22"
-rusqlite = { version = "0.34", features = ["bundled"] }
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+[workspace.dependencies]
 
-# JSON Schema validation for `legion document` writes (#1062). Draft-07 and
-# 2020-12, $ref/definitions, structured per-instance errors with a JSON
-# pointer per violation -- replaces the hand-rolled five-keyword subset
-# validator that silently skipped $ref/definitions.
-#
-# Default features disabled: the crate's `resolve-http`/`resolve-file`
-# defaults make a schema's `$ref`/`$schema` a live network fetch (blocking,
-# via reqwest) or an arbitrary local-file read whenever the crate does not
-# already recognize the URI. `POST /api/documents` accepts a caller-supplied
-# schema over HTTP -- leaving either on turns compiling that payload into an
-# SSRF/file-disclosure primitive, and the blocking fetch also panics when
-# triggered from inside axum's async handler ("cannot drop a runtime in a
-# context where blocking is not allowed"), discovered when a test schema's
-# `$schema` used an unrecognized URI variant. This issue's scope is $ref to
-# same-document `definitions` only (no external schema loading), which
-# needs neither feature -- an external $ref now fails compilation cleanly
-# instead of fetching or panicking. `idna` stays on for internationalized
-# domain names in $id/$ref URIs; dropping resolve-http also drops the whole
-# reqwest/rustls dependency chain.
-jsonschema = { version = "0.52", default-features = false, features = ["idna"] }
-uuid = { version = "1", features = ["v7"] }
-chrono = { version = "0.4", features = ["serde"] }
-thiserror = "2"
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
 
-# Date-only parsing for --since/--until/--on (#786). jiff's civil::Date is
-# the calendar-date type the issue's TimeRange interface specifies; its
-# TimeZone::system()/to_zoned() give panic-free local<->UTC conversion for
-# turning a boundary date into the UTC instant `created_at` is compared
-# against, without hand-rolling DST-aware arithmetic on top of chrono.
-jiff = "0.2"
-directories = "5"
-dirs = "5"
-model2vec-rs = "0.1"
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-tower-http = { version = "0.6", features = ["cors"] }
-tokio-stream = "0.1"
-async-stream = "0.3"
-toml = "0.8"
-sysinfo = { version = "0.34", default-features = false, features = ["system", "component"] }
-rlimit = "0.11"
-wait-timeout = "0.2"
-
-# SCIP code intelligence (#278+).
-sha2 = "0.10"
-scip = "0.7"
-protobuf = "3"
-
-# Multi-node sync via LAN broadcast. Published crate (not the git source):
-# 0.4.0 carries the masterless multicast Gossip API + protocol v2. The old
-# unpinned git dep was frozen at 0.2.1 (TCP-era) by the lockfile.
-smugglr-core = { version = "0.4.0", default-features = false, features = ["native"] }
-rand = "0.9"
-hex = "0.4"
-hostname = "0.4"
-
-# PTY spawning for watch auto-wake (#486+). Subscription billing requires
-# an interactive TTY -- portable-pty wraps native PTY on unix and ConPTY
-# on Windows.
-portable-pty = "0.9"
-
-# sym etc find-content (#707): the ripgrep engine crates, in-process. Exact
-# content search over watched repos with gitignore + binary handling -- a
-# direct disk scan, deliberately NOT an index (tokenized indexes destroy
-# punctuation-heavy literals and go stale on git operations).
-grep-regex = "0.1"
-grep-searcher = "0.1"
-
-# File inventory walk (#705): gitignore-aware recursive walk over watched
-# workdirs. The same crate powers the ripgrep engine used by find-content.
-ignore = "0.4"
-
-# sym etc extract (#708): YAML support. serde_yaml is archived and
-# unmaintained (RUSTSEC-2024-0320) -- do not reintroduce it. serde_yaml_ng is
-# a maintained, API-compatible fork: same Value/Deserializer shape, so a
-# parsed document converts into serde_json::Value the same way TOML's does
-# (one dotted-path walker shared across json/toml/yaml/frontmatter).
-serde_yaml_ng = "0.10"
-
-# Module-graph engine (#710): parse js/ts/jsx/tsx imports and resolve each
-# specifier against the referrer. oxc_parser's ModuleRecord already collects
-# every static import/export/re-export specifier (deduped, source-order) as
-# part of parsing -- no hand-rolled AST visitor needed. oxc_resolver mirrors
-# Node + bundler resolution (tsconfig `paths`, node_modules, package.json
-# `exports`/`imports`) and is the same resolution engine Rolldown/Rspack
-# embed. Headless: legion INDEXES, it does not bundle or emit code, so the
-# runtime dependency is these crates, not the Rolldown binary.
-oxc_parser = "0.138.0"
-oxc_resolver = "11.23.0"
-oxc_allocator = "0.138.0"
-oxc_span = "0.138.0"
-
-# CSS symbol extraction (#711): parse compiled stylesheets into class-selector
-# and custom-property definitions. lightningcss, not oxc-css-parser -- see
-# src/css.rs module docs for why. Default features pull in nodejs/bundler/
-# sourcemap extras (serde-content, dashmap, rayon, parcel_sourcemap) this
-# binary never uses -- disabled for a lean dependency footprint.
-lightningcss = { version = "1.0.0-alpha.71", default-features = false }
-
-# libc pulls in only on unix for killpg in call_plugin_inner's timeout arm.
-# Must stay AFTER all platform-independent deps -- TOML tables consume
-# every key until the next header, so listing it mid-file would leak the
-# cfg(unix) gate onto later deps and they would vanish on Windows.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[dev-dependencies]
-tempfile = "3"
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
 
 [profile.release]
-# thin LTO + parallel codegen: fat LTO (`lto = true`) with `codegen-units = 1`
-# made the release build both slow to link and single-threaded in codegen --
-# the MSVC link was the long pole at ~15 min on windows-latest vs ~6 on linux
-# (v0.37.7 release CI). Thin LTO keeps nearly all of fat LTO's runtime benefit
-# while parallelizing the link, and it already does the cross-unit optimization
-# that `codegen-units = 1` was there for, so raising codegen-units lets codegen
-# run in parallel again. legion is an I/O/SQLite/network daemon, not a hot
-# compute loop, so the tiny runtime cost is not worth the serialized build.
 lto = "thin"
-codegen-units = 16
+codegen-units = 1
 strip = true
