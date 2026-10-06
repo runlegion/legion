@@ -10,7 +10,7 @@ agent's input and output. Do this well, and then there will be code.
 | 2. Stories | `agents/sd-stories.md` |
 | 3. Personas, journeys, blueprints | `agents/sd-write-persona.md`, `sd-write-journey.md`, `sd-write-blueprint.md` |
 | 4. Ecosystem, written last | `agents/sd-ecosystem-imagine.md` |
-| Conductor | `skills/sd-service-design/SKILL.md` |
+| Conductor | `skills/workshop/SKILL.md` |
 
 `references/` holds the documents the agents read by slug (`double-diamond`, `sd-primer`); `schemas/`
 holds the question-based Discovery schema; `toys/not-hotdog/` holds the measurements behind not-hotdog.

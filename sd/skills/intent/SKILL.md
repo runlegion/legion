@@ -82,4 +82,4 @@ Ask what is wrong or missing. Append every correction and answer to the words fi
 
 ## 6. Hand off
 
-Tell the operator the intent id and that the next step is the workshop (`sd-service-design` on that intent).
+Tell the operator the intent id and that the next step is the workshop (`/workshop` on that intent).

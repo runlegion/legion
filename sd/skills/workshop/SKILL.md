@@ -1,5 +1,5 @@
 ---
-name: sd-service-design
+name: workshop
 description: |
   Run a repo's service design through the first diamond -- discover the problem, then define
   the service: the intent (from /intent) -> stories -> per persona group the persona, journey, and
@@ -15,7 +15,7 @@ allowed-tools: Bash, Read, Agent
 
 **This is a design discovery workshop.** You conduct the first diamond. Read the double diamond first: `legion document view --slug double-diamond --json`, and give each agent exactly its row of inputs. Do this well, and then there will be code.
 
-# Service design, conducted
+# /workshop: the design discovery workshop, conducted
 
 Service design here is discovery, not decoration: the intent raises questions for people,
 discovery answers them with cited first-hand evidence, and the artifacts are drawn from that
@@ -90,7 +90,7 @@ The agents read the service design primer by slug. Before step 2, confirm
 `legion document view --slug sd-primer` resolves; it serves only an adopted reference, and
 until the operator adopts it the pipeline stops before the stories.
 
-Dispatch each agent step with the Agent tool, `subagent_type: "legion:<step>"`, and a prompt
+Dispatch each agent step with the Agent tool, `subagent_type: "<step>"`, and a prompt
 that carries the step's inputs by id and nothing else: the agent holds its own rules. Read
 the return block at the end of its reply: `done` passes to the gate, `parked` goes to Park
 and resume, `stopped` names what is missing.
@@ -98,24 +98,24 @@ and resume, `stopped` names what is missing.
 1. **The intent** -- written with the operator through the `/intent` skill, whose not-hotdog
    agent holds it to the why. The workshop starts from a landed intent and takes nothing else
    about the service: no agenda, no brief. A repo with no intent runs `/intent` first.
-2. **`legion:sd-stories`** -- the intent id and a working file path in, one Discovery out.
+2. **`sd-stories`** -- the intent id and a working file path in, one Discovery out.
    Discovery raises its own questions from the intent's statements. This is the step that
    talks to the world, and the long one: a run that cannot finish in one session returns
    `parked` with the working file naming the next round, and you re-dispatch with the same
    path.
 3. **The writers, per persona group.** For each persona group in the Discovery with stories
    from three or more independent authors, run one chain in dependency order:
-   - **`legion:sd-write-persona`** -- the Discovery id and the group id in, one persona out.
-   - **`legion:sd-write-journey`** -- that persona's id and the Discovery id in, one journey
+   - **`sd-write-persona`** -- the Discovery id and the group id in, one persona out.
+   - **`sd-write-journey`** -- that persona's id and the Discovery id in, one journey
      out.
-   - **`legion:sd-write-blueprint`** -- that journey's id, the Discovery id, and the intent id
+   - **`sd-write-blueprint`** -- that journey's id, the Discovery id, and the intent id
      in, one blueprint out.
 
    A journey follows its persona and a blueprint follows its journey; each writer returns
    `stopped` on a missing input document. Separate chains run in parallel. A group with
    fewer than three authors gets no chain; its empty items are open questions in the
    Discovery.
-4. **`legion:sd-ecosystem-imagine`** -- last. The intent id, the Discovery id, and the ids of
+4. **`sd-ecosystem-imagine`** -- last. The intent id, the Discovery id, and the ids of
    every landed persona, journey, and blueprint in, one Ecosystem out. It draws its actors,
    channels, value exchanges, moments of truth, and failure modes from those documents, and
    may park on questions for real people or operator choices.
@@ -154,7 +154,7 @@ The root input is a living document; a revision after downstream artifacts exist
 propagates by what actually changed:
 
 - **Discovery**: a changed or new intent statement raises new questions. Re-dispatch
-  `legion:sd-stories` with the Discovery's working file; the questions already answered
+  `sd-stories` with the Discovery's working file; the questions already answered
   keep their status until new evidence moves them.
 - **Personas and journeys**: move only when a question their citations answer moved, or a
   group gained or lost stories.
