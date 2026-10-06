@@ -33,7 +33,7 @@ The work runs the double diamond, each diamond spreading out and then narrowing:
    eavesdrop asking real people) spreads out and takes as long as listening takes. Define
    (personas, journeys, blueprints of the current state, and last the ecosystem) narrows to the
    problem understood and the service as it is today.
-2. **The second diamond: the spec agents.** Develop gives several answers to the problem the
+2. **The second diamond: technical delivery,** run by the spec agents. Develop gives several answers to the problem the
    workshop defined, building toys wherever they do not know and learning what the base can do;
    Deliver keeps what the toys proved and writes the spec.
 
