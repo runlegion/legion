@@ -48,7 +48,7 @@ From what you kept, write the whole intent, as short as it can be:
 
 - **what_it_is**: one to three sentences: what the service is, for whom, and why it matters.
 - **becoming**: one or two sentences.
-- **directions**: the operator's bets, as few as the bets need, each one short line. Most intents need two to four.
+- **directions**: the operator's bets, as few as the bets need, each one short line. Most intents need two to four. What the service refuses to be is a bet too: every refusal in the words lands in a direction, or in what_it_is, and none is dropped.
 - **current_state**: what is real today, what is cut or broken and why, and the known gaps and when they matter, each written as what it means to the people the service serves.
 - **actors**: who touches the service (human, machine, or end-user), what they touch, and what is at stake for them.
 - **boundaries** and **consumers**: who owns what around the service, and who relies on it, in the operator's words.
