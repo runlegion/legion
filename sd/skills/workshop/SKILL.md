@@ -27,19 +27,18 @@ conductor owns.
 
 ## Where this sits
 
-Legion's work runs three diamonds, each one spreading out and then narrowing:
+The work runs the double diamond, each diamond spreading out and then narrowing:
 
-1. **The problem.** Discover (the intent, the stories, eavesdrop asking real people) spreads
-   out and takes as long as listening takes. Define (personas, journeys, blueprints, and
-   last the ecosystem) narrows to one defined service: who it is for, what makes it a
-   product, where it wins, where it breaks.
-2. **The solution design.** Develop explores and tests design solutions with people;
-   Deliver produces the finished design assets and the design system.
-3. **The engineering.** Research documents and toys explore how to build it; specs,
-   issues, code, review, and verify narrow to the built system.
+1. **The first diamond: the design discovery workshop.** Discover (the intent, the stories,
+   eavesdrop asking real people) spreads out and takes as long as listening takes. Define
+   (personas, journeys, blueprints of the current state, and last the ecosystem) narrows to the
+   problem understood and the service as it is today.
+2. **The second diamond: the spec agents.** Develop gives several answers to the problem the
+   workshop defined, building toys wherever they do not know and learning what the base can do;
+   Deliver keeps what the toys proved and writes the spec.
 
-This skill runs the first diamond alone. The second is designed separately. `sd-write-spec`
-belongs to the third and has its own entry point outside this pipeline.
+Then issues, code, review and verify. This skill runs the first diamond. The spec agents run the
+second from their own entry point.
 
 A step whose evidence is too thin to decide goes back to listening -- more crawl, or a
 question eavesdrop asks real people -- and parks until the answer comes. The operator gets
@@ -170,8 +169,7 @@ propagates by what actually changed:
 - An intent before any artifact.
 - Questions the world can answer go to the world; the operator gets strategy and values
   choices, each with a recommendation.
-- The first diamond alone: `sd-write-spec` and the second and third diamonds run from their
-  own entry points.
+- The first diamond only: the spec agents run the second diamond from their own entry point.
 
 ## Instrumentation
 
