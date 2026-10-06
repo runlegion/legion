@@ -65,7 +65,7 @@ The schema's `people` question kind is a question a customer can answer from the
 
 The whole web is evidence: community threads, forums, issue trackers, discussions, mailing lists, blog posts and their comments, talks, papers, and anything else where people describe their experience. The eavesdrop corpus is one source among them. It is searchable and already collected, so it is checked on every question, and the web is searched on every question too.
 
-**Current state (2026-10-05): eavesdrop is under refactor and its corpus is not trustworthy (threaded replies are misattributed). Do not run any `eavesdrop` command and cite nothing from its corpus until this note is removed.** The steps below that name eavesdrop are skipped; places worth crawling still go in `crawl_list`.
+**Current state (2026-10-06): eavesdrop's corpus is usable as it stands, with two known limits.** Threaded replies can carry the wrong author, and a reply can carry its thread's date instead of its own. Cite a top-level post as it is. Before counting a reply as a voice, open its URL and confirm the author and the words; when you cannot, keep it as context, not evidence. Record both limits in `sources`.
 
 ## Check each source before relying on it
 
