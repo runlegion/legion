@@ -33,12 +33,12 @@ The work runs the double diamond, each diamond spreading out and then narrowing:
    eavesdrop asking real people) spreads out and takes as long as listening takes. Define
    (personas, journeys, blueprints of the current state, and last the ecosystem) narrows to the
    problem understood and the service as it is today.
-2. **The second diamond: design.** Develop gives several different answers to the problem the
-   workshop defined, designed with the people and agents who will use them and tested small;
-   Deliver produces the finished design: the service as it will be, and its design assets.
+2. **The second diamond: design, by building.** What was discovered gets understood by building it
+   small: several answers, each a toy against the real system, tried with the people and agents it
+   is for, learning what the base can do. It delivers what the toys proved, and what they ruled out.
 
-Then technical delivery: the spec agents build toys where they do not know, learn what the base can
-do, write the spec, and the issues and code follow. This skill runs the first diamond.
+Then technical delivery: the spec, written from what the toys proved; then issues and code. This
+skill runs the first diamond.
 
 A step whose evidence is too thin to decide goes back to listening -- more crawl, or a
 question eavesdrop asks real people -- and parks until the answer comes. The operator gets
