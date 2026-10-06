@@ -1,0 +1,127 @@
+{
+ "meta": {
+  "title": "The player who becomes their own crash troubleshooter",
+  "set": "control-ezmode",
+  "actor": "P1",
+  "status": "draft",
+  "date": "2026-10-06",
+  "author": "sd-write-persona"
+ },
+ "built_from": {
+  "discovery": "01a11348-02d5-7070-8fe6-d46e2566e582",
+  "group": "P1",
+  "stories": 20,
+  "authors": 20,
+  "run_date": "2026-10-06"
+ },
+ "identity": {
+  "description": "Plays a large mod setup: a preconfigured list they keep adding to (Tuxborn, Squeegeepunk), a guide-built Skyrim (STEP), a Minecraft pack, or a load order assembled by hand [C2, C5, C32, C9, C38, C61]. When it crashes, the game closes, a save will not load, or the world kicks them out, and they become their own troubleshooter before anyone else is involved: switching mods off, searching the crash text, and asking wherever help seems closest [C1, C5, C32, C33, C93, C61]. What changes their behavior is where the log lives and whether they can read it: a crash logger's output in Skyrim, a launcher such as the Modrinth app in Minecraft that puts the log somewhere the instructions do not [C32, C47, C61]. Some now hand the log to ChatGPT or Claude Code before asking a person [C4, C57]. (situation and troubleshooting: 9 authors; the log: 3 authors; AI hand-off: 2 authors (thin))",
+  "mental_model": "\"this may (honestly likely) not be the fault of anything related here\" [C2]; \"the issue may be specific to my environment\" [C53]; \"maybe I have multiple mods causing it\" [C34]. They think it is probably their own setup; somewhere there is one mod at fault, and someone may already know which [C2, C53, C57, C34]. (4 authors)",
+  "quote": "\"I really don't know what to look for.\" [C32] -- the same not-knowing in other players' words: \"I couldn't tell you why\" [C1], \"not fully sure at this point\" [C5], \"I'm not really sure how to get more info\" [C61]. (4 authors)"
+ },
+ "goals": [
+  "Get back to playing: the world loads, the save loads, the scene plays through [C9, C5, C11, C32, C1]. (5 authors)",
+  "Find out whether it is them or the mods, and whether anyone else has the same crash [C53, C2, C10, C5]. (4 authors)",
+  "Understand what the log is saying and which mod is at fault, without testing everything by hand [C32, C3, C61, C1, C57]. (5 authors)",
+  "Keep the setup they have whole rather than give up a mod or a patch to make the crash stop [C15, C58, C4, C16]. (4 authors)",
+  "When a mod will not work with theirs, at least leave a note for the next player: \"just please add a note for others about incompatibility\" [C4]. (1 author) (thin)"
+ ],
+ "behaviors": [
+  {
+   "text": "Bisect by hand: enable and disable mods one by one, back out the mods added just before the crashes began, run two suspect mods alone together, or switch back and forth testing [C1, C2, C5, C57, C61, C10]. (6 authors)"
+  },
+  {
+   "text": "Look for someone else with the same crash: search the exact crash text, find a report on the mod's host page, and when they reach the thread add a confirmation with their version [C33, C10, C11, C13, C15, C16]. (6 authors)"
+  },
+  {
+   "text": "Ask wherever help seems closest -- the list's Discord, a mod's GitHub tracker, the guide's forum, the tool's tracker -- often as \"a shot in the dark\" [C2, C5, C32, C53, C4, C93]. (6 authors)"
+  },
+  {
+   "text": "Apologise for asking: \"sorry haha\", \"apologies once again\" [C2, C3], \"I apologize for the trouble\" [C53]. (2 authors) (thin)"
+  },
+  {
+   "text": "Route around the crash: apply the workaround posted in the thread, skip the scene with an alternate start, remove one of two clashing mods, or scrap their changes and give up [C13, C15, C12, C58, C85, C86]. (5 authors)"
+  },
+  {
+   "text": "Hand the crash log to an AI (ChatGPT, Claude Code) and bring its answer to the mod author as the report [C4, C57]. (2 authors) (thin)"
+  },
+  {
+   "text": "Join a Discord server per mod to get support, until more than half of 200 servers are for that [C20, C70]. (2 authors) (thin)"
+  }
+ ],
+ "frustrations": [
+  {
+   "text": "\"I really don't know what to look for.\" [C32] / \"how do I get the log of the world crashing?\" [C46] / \"The game just closes with nothing showing in the logs\" [C61] / \"if you could point me in the direction of how to diagnose this further\" [C3]. (4 authors)",
+   "insight": "L3"
+  },
+  {
+   "text": "\"Why is this issue not popular enough?\" [C11] / \"In v4.1.2beta bug still persists.\" [C16] / \"Confirming this bug's continued existence\" [C15] / \"I can also confirm this crash with the latest version.\" [C13]. (4 authors)",
+   "insight": "L4"
+  },
+  {
+   "text": "\"Wish I saw the comment earlier lol I spent about 1h going back and forth\" [C10] / \"I'll spend an evening getting it all to play nice then not have time to play games and for a few weeks\" [C38] / \"I tried to fix it for 30 hours\" [C85]. (3 authors)",
+   "insight": "L4"
+  },
+  {
+   "text": "\"you can't find any info about them because google can't index the discussions\" [C70] / \"every damn mod author wants to do support only on Discord\" [C20] / \"have tried asking their discord to no answer\" [C5]. (3 authors)",
+   "insight": "L2"
+  },
+  {
+   "text": "\"I'd prefer not to resort to this measure as a permanent fix as I'm uncertain what consequences disabling the patch would have for the rest of my gameplay\" [C15] / \"had to remove this mod till it got fixed\" [C58]. (2 authors) (thin)",
+   "insight": "L4"
+  }
+ ],
+ "needs": [
+  "To know quickly that others have the same crash and what they tried, because the answer was sometimes already posted and they lost an hour, or months, before seeing it [C10, C33, C13, C11]. (4 authors)",
+  "To know where the log is and what in it matters, because when an author asks for it they cannot find it or it shows nothing [C46, C47, C61, C32, C3]. (4 authors)",
+  "Someone who can read the log, in the place they asked, because when another author with better logging read it the cause was found at once, and when nobody answered they stalled [C9, C92, C5, C48]. (3 authors)",
+  "To know whether a workaround is safe for the rest of the game, because they keep it uneasily [C15]. (1 author) (thin)"
+ ],
+ "changed_their_mind": "Finding someone else with the same crash turns doubt into relief: \"so it's not just me, that's good\" [C10]. (1 author) (thin)",
+ "moment_of_truth": {
+  "description": "The first reply to a crash report [C9, C92, C5, C48]. (3 authors)",
+  "success": "Another mod's author had them install ModernFix for its logging and \"immediately pinpointed Slabbed\"; with it removed, \"now it worked too! ... But dang!\" [C9, C92]. (1 author) (thin)",
+  "failure": "\"have tried asking their discord to no answer\" [C5]; a \"hello?\" after being asked for a log they could not find [C46, C47, C48]. (2 authors) (thin)"
+ },
+ "other_moments_of_truth": [
+  {
+   "description": "Finding someone else with the same crash [C10, C11]. (2 authors) (thin)",
+   "success": "Relief that it is not just them: \"so it's not just me, that's good\" [C10]. (1 author) (thin)",
+   "failure": "Months of confirmations with no fix, then an older version that crashes at the same moment: \"The hype around this program is a joke.\" [C11]. (1 author) (thin)"
+  }
+ ],
+ "relationship_stages": [
+  {
+   "stage": "relying",
+   "they_do": "Keep a setup going for years by routing around known problems: \"after 14 years of running through Helgen, people have switched to using alternate start mods\" [C12]. (1 author) (thin)",
+   "service_provides": "(planned) Show that others have the crash and what they tried, so routing around is a choice made knowing the cost [C10, C13, C15]."
+  },
+  {
+   "stage": "leaving",
+   "they_do": "Drop a tool or a setup after a crash that breaks what they care about, or after long fixing: \"a deal braker for me\" [C16], \"The hype around this program is a joke.\" [C11], \"eventually decided to give up\" [C85]. (3 authors)",
+   "service_provides": "(planned) Know whether a workaround is safe for the rest of the game, and find the cause without testing everything by hand [C15, C61]."
+  }
+ ],
+ "doesnt_care_about": [
+  "The part of the game that crashes, when they can skip it: \"I can't remember when I last almost had my head chopped off\" [C12]. (1 author) (thin)"
+ ],
+ "would_leave_if": [
+  "A crash in a scene they care about stays without a fix: \"Dragon animations crashing ... is a deal braker for me\" [C16]; the older version \"crashed at the same moment\" and \"The hype around this program is a joke.\" [C11]; one mod removed \"till it got fixed\" [C58]. (3 authors)",
+  "Fixing takes so long it makes things worse: \"I tried to fix it for 30 hours and eventually decided to give up\", having \"made too many changes to the base code for it to be stable\" [C85, C86]. (1 author) (thin)"
+ ],
+ "quotes": [
+  "\"so it's not just me, that's good\" [C10] (1 author) (thin)",
+  "\"I couldn't tell you why but I enabled and disabled mods one by one until the CTD stopped happening\" [C1] -- the hand bisection also in [C2, C5, C57, C61]. (5 authors)",
+  "\"this is moreso a shot in the dark to wrap my head around what's even causing the issue in the first place (sorry haha)\" [C2] -- asking wherever seems closest, also [C5, C32, C53]. (4 authors)",
+  "\"I took the crash log to ChatGPT and it told me this is the cause:\" [C57] -- also [C4]. (2 authors) (thin)",
+  "\"I'd prefer not to resort to this measure as a permanent fix\" [C15] (1 author) (thin)",
+  "\"I tried to fix it for 30 hours and eventually decided to give up.\" [C85] (1 author) (thin)",
+  "\"just please add a note for others about incompatibility\" [C4] (1 author) (thin)"
+ ],
+ "open_questions": [
+  {
+   "item": "relationship_stages: first hearing, trying, adopting, recommending",
+   "question": "Q22: How did players come to running heavy setups, and what moment made a tool or a list become the one they rely on and recommend?"
+  }
+ ]
+}

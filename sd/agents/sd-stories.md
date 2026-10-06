@@ -67,6 +67,8 @@ The whole web is evidence: community threads, forums, issue trackers, discussion
 
 **Current state (2026-10-06): eavesdrop's corpus is usable as it stands, with two known limits.** Threaded replies can carry the wrong author, and a reply can carry its thread's date instead of its own. Cite a top-level post as it is. Before counting a reply as a voice, open its URL and confirm the author and the words; when you cannot, keep it as context, not evidence. Record both limits in `sources`.
 
+**An evidence pack replaces the search.** When your prompt names an evidence pack (a frozen set of sources and citations, used by the controls), use only what is in it: no web search, no fetch, no eavesdrop. Questions the pack cannot answer stay open. This keeps a control run repeatable.
+
 ## Check each source before relying on it
 
 Before round one, take a small sample from each source you will use (twenty results for one plain question) and read it. Record in `sources` what you saw: duplicates of one post, removed or deleted posts, bot replies, missing authors, missing dates, dates that belong to the thread instead of the reply, and text cut off mid-thought. Each defect stays a known limit on everything that source supplies. If a source's sample is mostly defects, say so in `notes` and lean on the other sources.
