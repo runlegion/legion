@@ -68,6 +68,8 @@ Run five light passes, one seat each, each told to find and answer questions abo
 
 The pass prompts carry the seat alone, free of answers and examples; the seat is the structure.
 
+Each pass runs clean and leaves nothing behind. When a pass runs as its own `claude -p` session, start it in an empty scratch directory with the plugins and hooks off (`--settings '{"enabledPlugins":{"legion@legion":false},"hooks":{}}'`), so it gets no team context at session start and its stop hook makes it write nothing to team memory or the bullpen. A pass returns its questions and answers to you, and you are the only one who writes.
+
 ## Answer them
 
 Every question goes to whoever can answer it, in this order:
