@@ -109,7 +109,7 @@ legion uncertainty emit --surface legion.sd --feature-key sd.ecosystem-imagine.e
   --payload '{"edge":<n>,"lenses":["actor-walk","second-order"],"route":"world|operator"}'
 ```
 
-`<n>` is the entry's 1-based position in the landed document's `failure_modes`. The schema gives register entries no id, so the position is the id: emit after create, from the landed order.
+`<n>` is the entry's 1-based position in the landed document's `failure_modes`. The schema gives register entries no id, so the position is the id: emit after create, from the landed order. Everywhere you name an entry (signals, notes, the return), call it "register entry <n>" and never write it as an array index: `failure_modes[<n>]` reads as 0-based and points one entry too far.
 
 Emit mechanics:
 - Pass `--session-id "$CLAUDE_CODE_SESSION_ID"` and leave out `--model`; the engine resolves the model from the session, and a guessed model mislabels the row. When the variable is unset, emit anyway and say so in `notes`.
