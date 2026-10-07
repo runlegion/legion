@@ -1,7 +1,7 @@
 # Publishing the workshop's documents
 
-Current choice (Sean, 2026-10-07): legion's UI shows the workshop's documents; rafters builds the components,
-legion embeds them. Revisable.
+Current choice (Sean, 2026-10-07): legion's UI shows the workshop's documents, and legion builds the components:
+mostly rafters composites, assembled from rafters' own components. Rafters does not build them. Revisable.
 
 The writers land JSON that validates against a schema. A component takes one document's payload as its props
 and draws the industry-standard visual from data alone: no prose parsing, no markdown, no hand-drawn charts.
