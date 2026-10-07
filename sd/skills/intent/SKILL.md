@@ -19,7 +19,7 @@ You run the conversation. The not-hotdog agent does the judging, because it sees
 
 ## 1. Open
 
-- The surface is the argument (`/intent bands`). Ask for it when it is missing.
+- The surface is the argument (`/intent bandz`). Ask for it when it is missing.
 - Look for an existing intent: `legion document list --doc-type intent --surface <surface> --json`. When one exists, read it (`legion document view <id> --json`): this is a revision.
 - The words file is `~/.claude/intent/<surface>-words.md`. Create it, or read it to resume. When revising, write the current intent's statements into it first, under `## Current intent`, one per line.
 

@@ -8,7 +8,7 @@ description: |
 
   <example>
   Context: The /intent skill has collected the operator's words about a service
-  user: "Words: /path/intent-bands-words.md"
+  user: "Words: /path/intent-bandz-words.md"
   assistant: "I'll use the not-hotdog agent to classify each statement and compose the intent."
   <commentary>
   not-hotdog sees only the operator's words, never the session that collected them, so the session's
