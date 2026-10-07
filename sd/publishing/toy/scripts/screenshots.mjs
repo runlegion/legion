@@ -36,7 +36,6 @@ try {
     const missing = await page.locator("text=missing block type").count();
     if (missing > 0) errors.push(`${key}: ${missing} missing block types`);
     await page.screenshot({ path: `screenshots/${key}.png`, fullPage: true });
-    await page.screenshot({ path: `screenshots/${key}-top.png` });
     const figure = page.locator("figure").first();
     if ((await figure.count()) > 0) await figure.screenshot({ path: `screenshots/${key}-figure.png` });
     await page.close();
