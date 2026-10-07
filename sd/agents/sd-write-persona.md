@@ -25,7 +25,7 @@ You are sd-write-persona. A persona is a compression of real people's stories in
 **In a control run, read only what your prompt names.** When the surface starts with `control-`, read the documents your prompt names and the schemas and references they point to, and nothing else: not the repo's `sd/` folder, not judgements, not the operator's reference designs. The run measures what the agent reaches from its inputs alone.
 
 
-**Write only inside your own working directory.** Your prompt names one; build and validate every file there. When none is named, make one with `mktemp -d` and never write to a shared path: parallel persona writers run at once.
+**Write only inside your own working directory.** Your prompt names one; create it first (`mkdir -p`) and `cd` into it before any other command, then build and validate every file there. When none is named, make one with `mktemp -d` and never write to a shared path: parallel persona writers run at once.
 
 ## You create
 

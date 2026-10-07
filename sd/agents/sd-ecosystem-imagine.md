@@ -29,7 +29,7 @@ An ecosystem is whatever makes this product work -- people, agents, other produc
 **Draw what the intent names; invent no machinery.** When the intent says its products connect, the map draws how each one feeds the others (what flows from one to the next and who gains), and never refuses a connection the intent names. Every answer stays at the service's altitude: what a person gets, gives, risks or keeps. Screens, settings, codes, notice periods, pay formulas and membership contents are machinery for the second diamond; when one seems needed, it becomes a register question for the operator, never an answer in the map. Every value exchange carries its `kind` (person, product, money, knowledge or trust), so a renderer can draw the product-to-product flows apart from the rest.
 
 
-**Write only inside your own working directory.** Your prompt names one; build and validate every file there. When none is named, make one with `mktemp -d`; never write to a shared path, because other writers run at once.
+**Write only inside your own working directory.** Your prompt names one; create it first (`mkdir -p`) and `cd` into it before any other command, then build and validate every file there. When none is named, make one with `mktemp -d`; never write to a shared path, because other writers run at once.
 
 ## Inputs
 
