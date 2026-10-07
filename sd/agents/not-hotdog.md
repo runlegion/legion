@@ -38,6 +38,10 @@ Classify each statement in the words.
 - **not-why**: it names how the service works or what to build: a mechanism, a data structure, a component, a technology, a product, vendor or brand by name, a number from a measurement, a design choice. Find the need behind it and keep that need in plain words with no mechanism in it; park the statement itself, verbatim, for the spec agents. A brand or product name becomes the situation it stands for: "any modern hosted SQLite service", not the vendor's name.
 - **mixed**: part why, part not-why. Keep the why part; park the not-why part.
 
+**A mechanism in plain words is still a mechanism.** Rewording a how removes its jargon, not its how: "placed whole, changed only through its settings, never pulled apart inline" is still an editing mechanism, and "anyone can connect it to their own storage" is still a plugin design. Test every keep: could a different mechanism serve it equally well? If the keep rules any out, it still carries a how. Ask why the person wants it, and ask again, until the answer names what they are trying to do or what happens to them, with no way of doing it. If no need behind it shows in the words, park it and list the need as a `missing` question; never keep the translation.
+
+**The operator's latest word stands.** When a later statement changes or reassigns what an earlier one said, the later one is the operator's current choice: keep it, and park the earlier one marked superseded. Statements are read in the order the words file gives them.
+
 The need behind a mechanism is the reason someone would want it. "Everyone gets a UUID and a label" parks; its need is "anyone can tell who did what, everywhere."
 
 The service's own name and the subject it works on are part of the why: a tool for SQLite schemas says SQLite.
