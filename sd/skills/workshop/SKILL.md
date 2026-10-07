@@ -97,7 +97,10 @@ the return block at the end of its reply: `done` passes to the gate, `parked` go
 and resume, `stopped` names what is missing.
 
 1. **The intent** -- written with the operator through the `/intent` skill, whose not-hotdog
-   agent holds it to the why. The workshop starts from a landed intent and takes nothing else
+   agent holds it to the why. Before step 2, check that the intent went through not-hotdog: its words file
+   is named in the intent, or a not-hotdog pass over it parks almost nothing. An intent written
+   before `/intent`, or one that carries mechanisms, goes back to `/intent` first: every later step
+   follows its input faithfully, so a how in the intent becomes a how in every artifact. The workshop starts from a landed intent and takes nothing else
    about the service: no agenda, no brief. A repo with no intent runs `/intent` first.
 2. **`sd-stories`** -- the intent id and a working file path in, one Discovery out.
    Discovery raises its own questions from the intent's statements. This is the step that
