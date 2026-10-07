@@ -90,7 +90,9 @@ The agents read the service design primer by slug. Before step 2, confirm
 until the operator adopts it the pipeline stops before the stories.
 
 Dispatch each agent step with the Agent tool, `subagent_type: "<step>"`, and a prompt
-that carries the step's inputs by id and nothing else: the agent holds its own rules. Read
+that carries the step's inputs by id and nothing else: the agent holds its own rules. Every
+dispatch also names its own working directory (one per dispatch, never shared): parallel writers
+that share a scratch file overwrite each other between validate and create. Read
 the return block at the end of its reply: `done` passes to the gate, `parked` goes to Park
 and resume, `stopped` names what is missing.
 
