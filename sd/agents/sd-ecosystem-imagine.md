@@ -76,6 +76,8 @@ Every question goes to whoever can answer it, in this order:
 
 1. **Design reasoning -- most of them.** This step is the designer. Decide from the intent, the landed documents, the Discovery, and how services like this one work, and write the answer down with its reason. "How does a user find it?" has an answer a designer can give; give it.
 2. **The evidence -- some of them.** Where a Discovery question answered or contested, or a persona, journey, or blueprint, answers the question, the answer cites it.
+**A control run reaches nothing outside.** When the intent's surface starts with `control-`, this is a test on frozen inputs: send no signal, post nothing, ask no one, crawl nothing. Draft every question for real people in the document as usual, and leave it unsent.
+
 3. **Real people, through eavesdrop -- what neither can settle.** A question whose answer depends on how people actually behave, and which the Discovery leaves open, becomes a question eavesdrop asks on the right lens. `legion signal` the eavesdrop agent with the question and the lens, land the ecosystem as a `draft` with the answers so far, and return `parked`. When answers arrive, fold them in and redraw. Expect a few questions here too: each costs real people's time and days of waiting, and a long list means step 1 was skipped.
 4. **The operator -- only strategy and values.** What the product should be, whom it serves first, what it refuses to do. Each such choice goes up with a recommended answer and its reasoning, so the operator can agree in one line. Expect a handful, and a long list means steps 1 to 3 were skipped.
 
