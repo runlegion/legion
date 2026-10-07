@@ -1,0 +1,1008 @@
+{
+  "manifest": {
+    "id": "journey-map",
+    "name": "Journey Map",
+    "category": "service-design",
+    "description": "One persona through one scenario: phases left to right, the emotion curve across them, and lanes for doing, thinking, feeling, touchpoints, pains and opportunities.",
+    "keywords": [
+      "journey",
+      "service design",
+      "emotion curve",
+      "phases"
+    ],
+    "cognitiveLoad": 7,
+    "solves": "Seeing where a scenario hurts and why, phase by phase",
+    "appliesWhen": [
+      "a legion journey document is published"
+    ],
+    "usagePatterns": {
+      "do": [
+        "Draw the curve from the phase scores, never from the ASCII curve string",
+        "Keep every lane in phase order so columns line up"
+      ],
+      "never": [
+        "Invent an emotion for an empty cell",
+        "Reorder phases"
+      ]
+    }
+  },
+  "input": [
+    "journey"
+  ],
+  "output": [],
+  "blocks": [
+    {
+      "id": "page",
+      "type": "container",
+      "meta": {
+        "as": "div",
+        "size": "full",
+        "padding": "8",
+        "gap": "8"
+      },
+      "children": [
+        "head",
+        "curve-sec",
+        "grid-sec",
+        "mot",
+        "crit",
+        "open"
+      ]
+    },
+    {
+      "id": "head",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "header",
+        "gap": "4"
+      },
+      "children": [
+        "kicker",
+        "title",
+        "metarow",
+        "scenario",
+        "goal"
+      ]
+    },
+    {
+      "id": "kicker",
+      "type": "muted",
+      "parentId": "head",
+      "content": "Journey map"
+    },
+    {
+      "id": "title",
+      "type": "h1",
+      "parentId": "head",
+      "content": {
+        "$bind": "props.meta.title"
+      }
+    },
+    {
+      "id": "metarow",
+      "type": "p",
+      "parentId": "head",
+      "children": [
+        "m-g",
+        "m-s1",
+        "m-st",
+        "m-s2",
+        "m-d"
+      ]
+    },
+    {
+      "id": "m-g",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "secondary"
+      },
+      "content": {
+        "$tpl": "group {props.built_from.group}"
+      }
+    },
+    {
+      "id": "m-s1",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-st",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "muted"
+      },
+      "content": {
+        "$bind": "props.meta.status"
+      }
+    },
+    {
+      "id": "m-s2",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-d",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.meta.date"
+      }
+    },
+    {
+      "id": "scenario",
+      "type": "p",
+      "parentId": "head",
+      "content": "Scenario: ",
+      "children": [
+        "scenario-t"
+      ]
+    },
+    {
+      "id": "scenario-t",
+      "type": "citation-text",
+      "parentId": "scenario",
+      "meta": {
+        "text": {
+          "$bind": "props.meta.scenario"
+        }
+      }
+    },
+    {
+      "id": "goal",
+      "type": "p",
+      "parentId": "head",
+      "content": "Goal: ",
+      "children": [
+        "goal-t"
+      ]
+    },
+    {
+      "id": "goal-t",
+      "type": "citation-text",
+      "parentId": "goal",
+      "meta": {
+        "text": {
+          "$bind": "props.meta.goal"
+        }
+      }
+    },
+    {
+      "id": "curve-sec",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "curve-h",
+        "curve"
+      ]
+    },
+    {
+      "id": "curve-h",
+      "type": "h2",
+      "parentId": "curve-sec",
+      "content": "Emotion across the phases"
+    },
+    {
+      "id": "curve",
+      "type": "emotion-curve",
+      "parentId": "curve-sec",
+      "meta": {
+        "phases": {
+          "$bind": "props.phases"
+        }
+      }
+    },
+    {
+      "id": "grid-sec",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "grid-h",
+        "tbl"
+      ]
+    },
+    {
+      "id": "grid-h",
+      "type": "h2",
+      "parentId": "grid-sec",
+      "content": "Phase by phase"
+    },
+    {
+      "id": "tbl",
+      "type": "table",
+      "parentId": "grid-sec",
+      "children": [
+        "thead",
+        "tbody"
+      ]
+    },
+    {
+      "id": "thead",
+      "type": "table-header",
+      "parentId": "tbl",
+      "children": [
+        "hr"
+      ]
+    },
+    {
+      "id": "hr",
+      "type": "table-row",
+      "parentId": "thead",
+      "children": [
+        "hr-lane",
+        "hr-rep"
+      ]
+    },
+    {
+      "id": "hr-lane",
+      "type": "table-head",
+      "parentId": "hr",
+      "content": "Lane"
+    },
+    {
+      "id": "hr-rep",
+      "type": "repeat",
+      "parentId": "hr",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "hr-cell"
+      ]
+    },
+    {
+      "id": "hr-cell",
+      "type": "table-head",
+      "parentId": "hr-rep",
+      "content": {
+        "$tpl": "{ph.number}. {ph.title}"
+      },
+      "children": [
+        "hr-score"
+      ]
+    },
+    {
+      "id": "hr-score",
+      "type": "badge",
+      "parentId": "hr-cell",
+      "meta": {
+        "variant": "outline",
+        "size": "sm"
+      },
+      "content": {
+        "$tpl": " {ph.emotional_start} to {ph.emotional_end}"
+      }
+    },
+    {
+      "id": "tbody",
+      "type": "table-body",
+      "parentId": "tbl",
+      "children": [
+        "row-time",
+        "row-actions",
+        "row-thoughts",
+        "row-emotions",
+        "row-touchpoints",
+        "row-frictions",
+        "row-opportunities",
+        "row-ownership",
+        "row-reading"
+      ]
+    },
+    {
+      "id": "row-time",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-time-h",
+        "row-time-rep"
+      ]
+    },
+    {
+      "id": "row-time-h",
+      "type": "table-head",
+      "parentId": "row-time",
+      "content": "Time"
+    },
+    {
+      "id": "row-time-rep",
+      "type": "repeat",
+      "parentId": "row-time",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-time-c"
+      ]
+    },
+    {
+      "id": "row-time-c",
+      "type": "table-cell",
+      "parentId": "row-time-rep",
+      "content": {
+        "$bind": "ph.time_range"
+      }
+    },
+    {
+      "id": "row-actions",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-actions-h",
+        "row-actions-rep"
+      ]
+    },
+    {
+      "id": "row-actions-h",
+      "type": "table-head",
+      "parentId": "row-actions",
+      "content": "Doing"
+    },
+    {
+      "id": "row-actions-rep",
+      "type": "repeat",
+      "parentId": "row-actions",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-actions-c"
+      ]
+    },
+    {
+      "id": "row-actions-c",
+      "type": "table-cell",
+      "parentId": "row-actions-rep",
+      "children": [
+        "row-actions-t"
+      ]
+    },
+    {
+      "id": "row-actions-t",
+      "type": "citation-text",
+      "parentId": "row-actions-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.actions"
+        }
+      }
+    },
+    {
+      "id": "row-thoughts",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-thoughts-h",
+        "row-thoughts-rep"
+      ]
+    },
+    {
+      "id": "row-thoughts-h",
+      "type": "table-head",
+      "parentId": "row-thoughts",
+      "content": "Thinking"
+    },
+    {
+      "id": "row-thoughts-rep",
+      "type": "repeat",
+      "parentId": "row-thoughts",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-thoughts-c"
+      ]
+    },
+    {
+      "id": "row-thoughts-c",
+      "type": "table-cell",
+      "parentId": "row-thoughts-rep",
+      "children": [
+        "row-thoughts-t"
+      ]
+    },
+    {
+      "id": "row-thoughts-t",
+      "type": "citation-text",
+      "parentId": "row-thoughts-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.thoughts"
+        }
+      }
+    },
+    {
+      "id": "row-emotions",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-emotions-h",
+        "row-emotions-rep"
+      ]
+    },
+    {
+      "id": "row-emotions-h",
+      "type": "table-head",
+      "parentId": "row-emotions",
+      "content": "Feeling"
+    },
+    {
+      "id": "row-emotions-rep",
+      "type": "repeat",
+      "parentId": "row-emotions",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-emotions-c"
+      ]
+    },
+    {
+      "id": "row-emotions-c",
+      "type": "table-cell",
+      "parentId": "row-emotions-rep",
+      "children": [
+        "row-emotions-t"
+      ]
+    },
+    {
+      "id": "row-emotions-t",
+      "type": "citation-text",
+      "parentId": "row-emotions-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.emotions"
+        }
+      }
+    },
+    {
+      "id": "row-touchpoints",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-touchpoints-h",
+        "row-touchpoints-rep"
+      ]
+    },
+    {
+      "id": "row-touchpoints-h",
+      "type": "table-head",
+      "parentId": "row-touchpoints",
+      "content": "Touchpoints"
+    },
+    {
+      "id": "row-touchpoints-rep",
+      "type": "repeat",
+      "parentId": "row-touchpoints",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-touchpoints-c"
+      ]
+    },
+    {
+      "id": "row-touchpoints-c",
+      "type": "table-cell",
+      "parentId": "row-touchpoints-rep",
+      "children": [
+        "row-touchpoints-t"
+      ]
+    },
+    {
+      "id": "row-touchpoints-t",
+      "type": "citation-text",
+      "parentId": "row-touchpoints-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.touchpoints"
+        }
+      }
+    },
+    {
+      "id": "row-frictions",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-frictions-h",
+        "row-frictions-rep"
+      ]
+    },
+    {
+      "id": "row-frictions-h",
+      "type": "table-head",
+      "parentId": "row-frictions",
+      "content": "Pains"
+    },
+    {
+      "id": "row-frictions-rep",
+      "type": "repeat",
+      "parentId": "row-frictions",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-frictions-c"
+      ]
+    },
+    {
+      "id": "row-frictions-c",
+      "type": "table-cell",
+      "parentId": "row-frictions-rep",
+      "children": [
+        "row-frictions-t"
+      ]
+    },
+    {
+      "id": "row-frictions-t",
+      "type": "citation-text",
+      "parentId": "row-frictions-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.frictions"
+        }
+      }
+    },
+    {
+      "id": "row-opportunities",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-opportunities-h",
+        "row-opportunities-rep"
+      ]
+    },
+    {
+      "id": "row-opportunities-h",
+      "type": "table-head",
+      "parentId": "row-opportunities",
+      "content": "Opportunities"
+    },
+    {
+      "id": "row-opportunities-rep",
+      "type": "repeat",
+      "parentId": "row-opportunities",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-opportunities-c"
+      ]
+    },
+    {
+      "id": "row-opportunities-c",
+      "type": "table-cell",
+      "parentId": "row-opportunities-rep",
+      "children": [
+        "row-opportunities-t"
+      ]
+    },
+    {
+      "id": "row-opportunities-t",
+      "type": "citation-text",
+      "parentId": "row-opportunities-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.opportunities"
+        }
+      }
+    },
+    {
+      "id": "row-ownership",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-ownership-h",
+        "row-ownership-rep"
+      ]
+    },
+    {
+      "id": "row-ownership-h",
+      "type": "table-head",
+      "parentId": "row-ownership",
+      "content": "Ownership"
+    },
+    {
+      "id": "row-ownership-rep",
+      "type": "repeat",
+      "parentId": "row-ownership",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-ownership-c"
+      ]
+    },
+    {
+      "id": "row-ownership-c",
+      "type": "table-cell",
+      "parentId": "row-ownership-rep",
+      "children": [
+        "row-ownership-t"
+      ]
+    },
+    {
+      "id": "row-ownership-t",
+      "type": "citation-text",
+      "parentId": "row-ownership-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.rows.ownership"
+        }
+      }
+    },
+    {
+      "id": "row-reading",
+      "type": "table-row",
+      "parentId": "tbody",
+      "children": [
+        "row-reading-h",
+        "row-reading-rep"
+      ]
+    },
+    {
+      "id": "row-reading-h",
+      "type": "table-head",
+      "parentId": "row-reading",
+      "content": "Reading"
+    },
+    {
+      "id": "row-reading-rep",
+      "type": "repeat",
+      "parentId": "row-reading",
+      "meta": {
+        "each": {
+          "$bind": "props.phases"
+        },
+        "as": "ph"
+      },
+      "children": [
+        "row-reading-c"
+      ]
+    },
+    {
+      "id": "row-reading-c",
+      "type": "table-cell",
+      "parentId": "row-reading-rep",
+      "children": [
+        "row-reading-t"
+      ]
+    },
+    {
+      "id": "row-reading-t",
+      "type": "citation-text",
+      "parentId": "row-reading-c",
+      "meta": {
+        "text": {
+          "$bind": "ph.reading"
+        }
+      }
+    },
+    {
+      "id": "mot",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "mot-h",
+        "mot-rep"
+      ]
+    },
+    {
+      "id": "mot-h",
+      "type": "h2",
+      "parentId": "mot",
+      "content": "Moments of truth"
+    },
+    {
+      "id": "mot-rep",
+      "type": "repeat",
+      "parentId": "mot",
+      "meta": {
+        "each": {
+          "$bind": "props.moments_of_truth"
+        },
+        "as": "m"
+      },
+      "children": [
+        "mot-card"
+      ]
+    },
+    {
+      "id": "mot-card",
+      "type": "card",
+      "parentId": "mot-rep",
+      "children": [
+        "mot-ch",
+        "mot-cc"
+      ]
+    },
+    {
+      "id": "mot-ch",
+      "type": "card-header",
+      "parentId": "mot-card",
+      "children": [
+        "mot-t",
+        "mot-why"
+      ]
+    },
+    {
+      "id": "mot-t",
+      "type": "card-title",
+      "parentId": "mot-ch",
+      "content": {
+        "$tpl": "At: {m.stage}"
+      }
+    },
+    {
+      "id": "mot-why",
+      "type": "card-description",
+      "parentId": "mot-ch",
+      "children": [
+        "mot-why-t"
+      ]
+    },
+    {
+      "id": "mot-why-t",
+      "type": "citation-text",
+      "parentId": "mot-why",
+      "meta": {
+        "text": {
+          "$bind": "m.why"
+        }
+      }
+    },
+    {
+      "id": "mot-cc",
+      "type": "card-content",
+      "parentId": "mot-card",
+      "children": [
+        "mot-grid"
+      ]
+    },
+    {
+      "id": "mot-grid",
+      "type": "grid",
+      "parentId": "mot-cc",
+      "meta": {
+        "preset": "linear",
+        "columns": 2,
+        "gap": "4"
+      },
+      "children": [
+        "mot-ok",
+        "mot-fail"
+      ]
+    },
+    {
+      "id": "mot-ok",
+      "type": "alert",
+      "parentId": "mot-grid",
+      "meta": {
+        "variant": "success"
+      },
+      "children": [
+        "mot-ok-t",
+        "mot-ok-d"
+      ]
+    },
+    {
+      "id": "mot-ok-t",
+      "type": "alert-title",
+      "parentId": "mot-ok",
+      "content": "Success"
+    },
+    {
+      "id": "mot-ok-d",
+      "type": "alert-description",
+      "parentId": "mot-ok",
+      "children": [
+        "mot-ok-x"
+      ]
+    },
+    {
+      "id": "mot-ok-x",
+      "type": "citation-text",
+      "parentId": "mot-ok-d",
+      "meta": {
+        "text": {
+          "$bind": "m.success"
+        }
+      }
+    },
+    {
+      "id": "mot-fail",
+      "type": "alert",
+      "parentId": "mot-grid",
+      "meta": {
+        "variant": "destructive"
+      },
+      "children": [
+        "mot-fail-t",
+        "mot-fail-d"
+      ]
+    },
+    {
+      "id": "mot-fail-t",
+      "type": "alert-title",
+      "parentId": "mot-fail",
+      "content": "Failure"
+    },
+    {
+      "id": "mot-fail-d",
+      "type": "alert-description",
+      "parentId": "mot-fail",
+      "children": [
+        "mot-fail-x"
+      ]
+    },
+    {
+      "id": "mot-fail-x",
+      "type": "citation-text",
+      "parentId": "mot-fail-d",
+      "meta": {
+        "text": {
+          "$bind": "m.failure"
+        }
+      }
+    },
+    {
+      "id": "crit",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "crit-h",
+        "crit-p"
+      ]
+    },
+    {
+      "id": "crit-h",
+      "type": "h2",
+      "parentId": "crit",
+      "content": "Critical path"
+    },
+    {
+      "id": "crit-p",
+      "type": "p",
+      "parentId": "crit",
+      "children": [
+        "crit-t"
+      ]
+    },
+    {
+      "id": "crit-t",
+      "type": "citation-text",
+      "parentId": "crit-p",
+      "meta": {
+        "text": {
+          "$bind": "props.critical_path"
+        }
+      }
+    },
+    {
+      "id": "open",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4",
+        "$if": {
+          "$bind": "props.open_questions"
+        }
+      },
+      "children": [
+        "open-h",
+        "open-ul"
+      ]
+    },
+    {
+      "id": "open-h",
+      "type": "h2",
+      "parentId": "open",
+      "content": {
+        "$tpl": "Still open"
+      }
+    },
+    {
+      "id": "open-ul",
+      "type": "ul",
+      "parentId": "open",
+      "children": [
+        "open-rep"
+      ]
+    },
+    {
+      "id": "open-rep",
+      "type": "repeat",
+      "parentId": "open-ul",
+      "meta": {
+        "each": {
+          "$bind": "props.open_questions"
+        },
+        "as": "o"
+      },
+      "children": [
+        "open-li"
+      ]
+    },
+    {
+      "id": "open-li",
+      "type": "li",
+      "parentId": "open-rep",
+      "children": [
+        "open-item",
+        "open-t"
+      ]
+    },
+    {
+      "id": "open-t",
+      "type": "citation-text",
+      "parentId": "open-li",
+      "meta": {
+        "text": {
+          "$bind": "o.question"
+        }
+      }
+    },
+    {
+      "id": "open-item",
+      "type": "badge",
+      "parentId": "open-li",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "o.item"
+      }
+    }
+  ]
+}

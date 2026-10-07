@@ -1,0 +1,172 @@
+{
+  "meta": {
+    "title": "The operator who keeps re-teaching the same agent: getting one correction to stick across sessions",
+    "status": "draft",
+    "date": "2026-10-06",
+    "author": "sd-write-journey",
+    "persona": "01a11460-e4f3-7871-903f-bde2fdab3d79",
+    "scenario": "Working daily with one coding agent on one long project of their own, the operator tells it a fact or a rule once, has it saved to memory, and comes back in later sessions to the same work [C11, C5, C14]. The scenario follows that one correction: taught, met again at the next session start, corrected again and again, then doubted, then worked around or abandoned [C11, C13, C20, C6, C117].",
+    "goal": "A fact told once stays established and a correction sticks after one telling, so their hours go to the project and not to re-explaining: \"Have established facts stay established\" [C11]; \"read source data before writing a migration\" kept without raising it again [C5]; trust what the agent says without re-checking it [C20]; time on the project, not on the agent [C12, C109].",
+    "expectations": "Who: someone who works every day with Claude Code, Codex or Opencode on one long-running project (a webapp with servers, keys and branches; DB migrations; an XFCE widget; software for a live race) and keeps rules in CLAUDE.md, AGENTS.md and memory files [C11, C5, C14, C62, C109, C23]. Expectation going in: \"Users write memories expecting behavioral change\" [C7]; when the agent is corrected \"it saves a new memory entry promising not to forget again\" [C11]; a rule written and loaded should govern, and every rule \"was added in direct response to a specific documented failure\" [C23]. Why it matters: the repeats add up to \"hours of the user's time every week\" [C12], and the cost is trust: \"The trust cost is cumulative\" [C13]."
+  },
+  "built_from": {
+    "discovery": "01a1145d-dcd4-71c3-867b-fd6b5a7a3abe",
+    "group": "P4",
+    "run_date": "2026-10-06"
+  },
+  "phases": [
+    {
+      "number": 1,
+      "title": "Teaches the agent (7 stories)",
+      "time_range": "",
+      "emotional_start": 0,
+      "emotional_end": 0,
+      "rows": {
+        "actions": "States a fact or rule; the agent saves it to memory: \"When corrected, it saves a new memory entry promising not to forget again\" [C11]; has the agent record \"read source data before writing any DB migration\" [C5].",
+        "thoughts": "Expects behavioural change: \"Users write memories expecting behavioral change\" [C7].",
+        "emotions": "",
+        "touchpoints": "CLAUDE.md, MEMORY.md and memory files; the chat where the correction is given [C11, C23].",
+        "frictions": "",
+        "opportunities": "",
+        "ownership": ""
+      },
+      "reading": "The journey starts in expectation, not in feeling: the operator states the fact, the agent writes a memory promising not to forget, and the operator expects the behaviour to change [C11, C5, C7]. The rules themselves carry history (\"Every rule in this system was added in direct response to a specific documented failure\" [C23]), but the Discovery records no feeling words and no pain for this stage, so the score is 0: no direction shown, not a neutral experience proven."
+    },
+    {
+      "number": 2,
+      "title": "Next session (3 stories)",
+      "time_range": "Session start; 9 sessions on one task between 16:24 and 19:51 one afternoon (S26) [C14]",
+      "emotional_start": -1,
+      "emotional_end": -1,
+      "rows": {
+        "actions": "Opens a new session on the same work: \"9 separate Claude sessions were opened for the same task\" [C14, C11].",
+        "thoughts": "",
+        "emotions": "",
+        "touchpoints": "Session start [C14]; a self-built memory layer that injects prior observations (\"Claude reads the injection block\") [C15].",
+        "frictions": "The agent starts from scratch or ignores the injected memory: \"Started from scratch with no memory of what had been tried\" [C14]; \"The memory is there. Claude reads the injection block. And then suggests pkill genmon anyway.\" [C15]",
+        "opportunities": "(planned) What was tried and what failed, there when the same step comes up [C15]; answers the agent re-proposing the failed command and starting from scratch [C14, C15].",
+        "ownership": "The service holds and surfaces what was tried and what failed (planned); the agent, another actor in the stories, is the one that reads it and must act on it, since injection alone was read and ignored [C15]."
+      },
+      "reading": "The stage is defined by a pain the operators describe, not by feeling words: each new session \"Started from scratch\" [C14], and with the operator's own memory layer injecting context the agent still \"suggests pkill genmon anyway\" [C15]. The score of -1 is placed from that direction alone; the Discovery records no thoughts or feelings here, so the strength is unknown and the score goes no lower."
+    },
+    {
+      "number": 3,
+      "title": "Corrects again (4 stories)",
+      "time_range": "Hours a week [C12]; 5+ cycles for the same facts [C11], 4-6 corrections per data type [C5], about 50 for one fact across sessions [C118]",
+      "emotional_start": -1,
+      "emotional_end": -2,
+      "rows": {
+        "actions": "Re-explains and re-corrects, and counts the repeats: \"Re-explaining the same facts, watching Claude \\\"discover\\\" things it already knows, correcting the same mistakes\" [C12]; asks the agent to count its own violations, \"13 in its own memory files, two of them marked \\\"final warning\\\" by me\" [C1]; raises \"the same schema gaps 4-6 times per data type\" [C5].",
+        "thoughts": "Sees each promise to remember as broken: \"after 5 cycles of the same broken promise\" [C13].",
+        "emotions": "\"the tool feels unreliable\" [C13]; \"whats the point of a memory idk man\" [C19].",
+        "touchpoints": "The chat; the agent's own memory files and violation counts [C1]; the operator's own feedback file, which \"Claude liest ... zu Sitzungsbeginn nicht automatisch\" (Claude does not read at session start) [C120].",
+        "frictions": "Hours a week lost: \"This wastes hours of the user's time every week\" [C12]; 4-6 corrections per data type [C5]; ~50 corrections of one mislabel that \"never propagated to source-of-truth files\" [C118].",
+        "opportunities": "(planned) One telling is enough: each correction written as its own dated entry and read back by later sessions; \"The count went to one.\" [C10] (reported by someone outside the group, stake unknown). Answers the repeated corrections and the hours they cost [C12, C5, C118].",
+        "ownership": "The service writes the correction as its own dated, authored entry the moment it lands (planned) [C10]; later sessions of the agent read it back before they start [C10]; the operator gives the correction once."
+      },
+      "reading": "This is the valley that sets the rest of the journey. The feeling is quoted and it worsens with each repeat: \"The trust cost is cumulative: after 5 cycles of the same broken promise, the tool feels unreliable\" [C13]; by the third update of the same memory, \"whats the point of a memory idk man\" [C19]. The score moves from -1 to -2 within the stage because the stories themselves say the cost accumulates [C13]; the counts behind it run from 5+ [C11] through 4-6 per data type [C5] to about 50 [C118]."
+    },
+    {
+      "number": 4,
+      "title": "Stops trusting (4 stories)",
+      "time_range": "Within a session: 4.5 hours refuting the model's inventions [C109]",
+      "emotional_start": -2,
+      "emotional_end": -2,
+      "rows": {
+        "actions": "Verifies every statement and refutes the agent's claims: \"spend 4.5 hours refuting the model's inventions instead of racing\" [C109]; challenges the agent before it follows the current rule: it \"only discovered and followed the current global rule after the user challenged the behavior\" [C62].",
+        "thoughts": "Cannot tell checked from recalled: \"From my side there is no way to tell a checked statement from a recalled one.\" [C20]",
+        "emotions": "\"false confidence\" [C63]; \"a wrong list is still wrong\" [C101].",
+        "touchpoints": "The agent's confident answers: a table titled \"work you can pick up right now\" with eleven items, none checked \"against source code, git, or the database\" [C100].",
+        "frictions": "Hours spent refuting inventions instead of the project: 4.5 hours \"instead of racing\" [C109].",
+        "opportunities": "(planned) To know which statements were checked [C20]; answers the hours spent refuting [C109] and the hedge that read as fact (\"It used a disclaimer as a substitute for verification\") [C101].",
+        "ownership": "The service marks which statements were checked and which were recalled (planned) [C20]; the agent does the checking against source, git or the database [C100]; the operator stops having to re-check each one [C20]."
+      },
+      "reading": "Here the low point is in the operators' own words. \"False confidence\" [C63] names a misplaced sense of safety, that current controls are active while older remembered workflows drive what happens, rather than a good feeling. The score of -2 is placed from the quoted judgements: \"a wrong list is still wrong\" [C101] and the inability to tell checked from recalled [C20], with a whole session spent refuting [C109]. It holds at -2 because nothing in the stage shows recovery."
+    },
+    {
+      "number": 5,
+      "title": "Works around or leaves (6 stories)",
+      "time_range": "",
+      "emotional_start": -1,
+      "emotional_end": -1,
+      "rows": {
+        "actions": "Builds hooks that block tool calls [C6]; keeps their own feedback file as memory [C120]; ends the session and asks for a fresh one [C119]; cancels the account [C117].",
+        "thoughts": "",
+        "emotions": "",
+        "touchpoints": "Hooks at ~/.claude/hooks/ (PreToolUse, PostToolUse, Stop) [C6]; a personal feedback file the agent does not read at session start [C120].",
+        "frictions": "",
+        "opportunities": "",
+        "ownership": ""
+      },
+      "reading": "The stage splits into two endings and the Discovery records no feeling words for either. The workaround branch reports the journey's only first-hand success: \"Hooks work. Memories do not.\" [C6], relief found by leaving memory behind for mechanical enforcement. The leaving branch ends the session \"because the assistant's reliability had degraded past the point where supervising it was worth it\" [C119], or cancels the account \"tonight\" with the issue filed \"as their parting feedback\" [C117]. The score of -1 is placed from direction alone: both endings walk away from memory as a way to keep a correction [C6, C119, C117]; strength is unknown."
+    }
+  ],
+  "emotional_curve": "       +3 |\n       +2 |\n       +1 |\n        0 |  *--*\n       -1 |         *--*  *                      *--*\n       -2 |                 \\--*  *--------*\n       -3 |\n          +-----------------------------------------------\n             1 Teaches  2 Next    3 Corrects  4 Stops     5 Works around\n             the agent  session   again       trusting    or leaves\n\n   Scores (start -> end): 1: 0 -> 0 | 2: -1 -> -1 | 3: -1 -> -2 | 4: -2 -> -2 | 5: -1 -> -1\n   1, 2 and 5 are placed without quoted feeling (felt rows empty in the Discovery); 3 and 4 from quoted words.",
+  "critical_path": "Stages 2 (Next session) and 3 (Corrects again) decide it. Stage 2 is where the taught fact is either there or not: the agent \"Started from scratch\" [C14] or read the injected memory and re-proposed the failed command anyway [C15]. Stage 3 is where the operator's belief in memory is spent, one repeat at a time: \"The trust cost is cumulative\" [C13]; every leaving in stage 5 traces back to repeats here: ~50 corrections, then cancellation [C118, C117]; 4-6 corrections per data type, then hooks [C5, C6]; the same memory updated \"for a third time\", then a fresh session [C19, C119]. Stage 4 follows from 3 and makes the cost explicit in hours [C109]. Time: no P4 story reaches the point where the operator is convinced memory works, so the shortest time to convinced is not in the material. The shortest path the stories show runs the other way: 9 sessions on one task in about three and a half hours, 16:24 to 19:51, without the agent keeping what had been tried [C14].",
+  "moments_of_truth": [
+    {
+      "stage": "Corrects again",
+      "success": "\"the moment a correction lands it gets written out as its own entry, with an author and a date, and later sessions read it back before they start. The count went to one.\" [C10] (one account, from outside the P4 group, stake unknown)",
+      "failure": "\"after 5 cycles of the same broken promise, the tool feels unreliable\" [C13]; \"Users write memories expecting behavioral change, get none, and lose trust in the system.\" [C7]",
+      "why": "The second correction of the same thing is the first proof that the memory did not hold, and the stories say the damage compounds: \"The trust cost is cumulative\" [C13]. Each later stage (verifying everything, hooks, fresh sessions, cancellation) is a response to repeats that began here [C118, C117, C5, C6, C19, C119]."
+    }
+  ],
+  "open_questions": [
+    {
+      "item": "Stage 1 Teaches the agent: emotions",
+      "question": "When you tell the agent a fact or rule and it saves it to memory, how do you feel about it at that moment: confident it will hold, hopeful, or already doubtful? (Discovery felt row empty)"
+    },
+    {
+      "item": "Stage 1 Teaches the agent: frictions",
+      "question": "What, if anything, goes wrong at the moment of teaching itself? Proposed addition, not counted: C1 (S28, scottconverse, filed under P5; the Discovery's P4 material cites C1 only at Corrects again) says the agent \"acknowledges the rule, writes memory notes about it, and then violates it again in the same session\"; ask whether the failure starts within the teaching session."
+    },
+    {
+      "item": "Stage 1 Teaches the agent: opportunities and ownership",
+      "question": "What would help at the moment you give the correction: seeing what was written, where, and when it will be read back? (Discovery could_help row empty)"
+    },
+    {
+      "item": "Stage 1 Teaches the agent: time_range",
+      "question": "How long does teaching take: one line in chat, or a session spent writing rules into CLAUDE.md? (not in the material)"
+    },
+    {
+      "item": "Stage 2 Next session: thoughts and emotions",
+      "question": "When you open the next session and see the agent starting from scratch or re-proposing a command that already failed, what goes through your head and how does it feel? (Discovery thought and felt rows empty; the -1 score rests on the described pain alone)"
+    },
+    {
+      "item": "Stage 2 Next session: proposed addition",
+      "question": "Proposed, not counted: C102 (S30, wichara), \"asked me to decide it again\", is a next-session pain about decisions rather than facts. Should S30 count toward Next session?"
+    },
+    {
+      "item": "Stage 5 Works around or leaves: thoughts and emotions",
+      "question": "When you build hooks or keep your own feedback file, or when you cancel, what do you feel: relief, anger, resignation? (Discovery thought and felt rows empty; the -1 score is direction alone)"
+    },
+    {
+      "item": "Stage 5 Works around or leaves: frictions",
+      "question": "What does the workaround cost you to build and keep running (hooks, compaction watchers, feedback files)? (Discovery hurt row empty)"
+    },
+    {
+      "item": "Stage 5 Works around or leaves: opportunities and ownership",
+      "question": "What would have kept you from building your own machinery or leaving? (Discovery could_help row empty)"
+    },
+    {
+      "item": "Stage 5 Works around or leaves: time_range",
+      "question": "How long after the first repeat did you start building workarounds or decide to leave? (S32 covers 16 months of use [C117] but the material gives no stage duration)"
+    },
+    {
+      "item": "Missing stage: Relying, where it works (proposed recount)",
+      "question": "S34 (samuelknight) sits in no stage of the Discovery's P4 journey: \"more and more tasks are solved by agent intelligence or these happy path hints\" [C79], after asking the agent what was missing and adding pointers to CLAUDE.md [C80]. Proposed recount: a Relying stage reached by 1 story (thin), the journey's only positive branch. Ask operators for whom memory works what that looks like."
+    },
+    {
+      "item": "Critical path: time to convinced",
+      "question": "No P4 story reaches the point where the operator is convinced a correction will hold. For anyone it has worked for, how many sessions or days did it take before you stopped re-checking?"
+    },
+    {
+      "item": "High points",
+      "question": "The only success account for the moment of truth (C10) is from outside the group, stake unknown. Ask operators directly whether a correction has ever held after one telling, and how it felt."
+    },
+    {
+      "item": "Sources",
+      "question": "Discovery notes Reddit was unreachable and the eavesdrop agent-memory-hn corpus unreadable this run; do Reddit and HN operator voices match the GitHub tracker ones this journey rests on?"
+    }
+  ]
+}

@@ -1,0 +1,1106 @@
+{
+  "manifest": {
+    "id": "intent-sheet",
+    "name": "Intent Sheet",
+    "category": "service-design",
+    "description": "One service intent on one page: what it is, today, where it is going, what it refuses, who touches it, and what is still open.",
+    "keywords": [
+      "intent",
+      "service design",
+      "why",
+      "boundaries"
+    ],
+    "cognitiveLoad": 5,
+    "solves": "Reading a service's why without reading its build",
+    "appliesWhen": [
+      "a legion intent document is published"
+    ],
+    "usagePatterns": {
+      "do": [
+        "Lead with what_it_is in the operator's own words",
+        "Show settled and open proposals by status, not by order"
+      ],
+      "never": [
+        "Rewrite or summarise the intent's text",
+        "Hide open questions below the fold of a collapsed section"
+      ]
+    }
+  },
+  "input": [
+    "intent"
+  ],
+  "output": [],
+  "blocks": [
+    {
+      "id": "page",
+      "type": "container",
+      "meta": {
+        "as": "div",
+        "size": "6xl",
+        "padding": "8",
+        "gap": "8"
+      },
+      "children": [
+        "head",
+        "today",
+        "direction",
+        "who",
+        "bounds",
+        "open"
+      ]
+    },
+    {
+      "id": "head",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "header",
+        "gap": "4"
+      },
+      "children": [
+        "kicker",
+        "title",
+        "metarow",
+        "what"
+      ]
+    },
+    {
+      "id": "kicker",
+      "type": "muted",
+      "parentId": "head",
+      "content": "Intent"
+    },
+    {
+      "id": "title",
+      "type": "h1",
+      "parentId": "head",
+      "content": {
+        "$bind": "props.meta.title"
+      }
+    },
+    {
+      "id": "metarow",
+      "type": "p",
+      "parentId": "head",
+      "children": [
+        "m-status",
+        "m-sp1",
+        "m-owner",
+        "m-sp2",
+        "m-date"
+      ]
+    },
+    {
+      "id": "m-status",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "secondary"
+      },
+      "content": {
+        "$bind": "props.meta.status"
+      }
+    },
+    {
+      "id": "m-sp1",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-owner",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$tpl": "owner: {props.meta.owner}"
+      }
+    },
+    {
+      "id": "m-sp2",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-date",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.meta.date"
+      }
+    },
+    {
+      "id": "what",
+      "type": "lead",
+      "parentId": "head",
+      "content": {
+        "$bind": "props.what_it_is"
+      }
+    },
+    {
+      "id": "today",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "today-h",
+        "today-grid"
+      ]
+    },
+    {
+      "id": "today-h",
+      "type": "h2",
+      "parentId": "today",
+      "content": "Today"
+    },
+    {
+      "id": "today-grid",
+      "type": "grid",
+      "parentId": "today",
+      "meta": {
+        "preset": "linear",
+        "columns": 3,
+        "gap": "4"
+      },
+      "children": [
+        "real",
+        "broken",
+        "gaps"
+      ]
+    },
+    {
+      "id": "real",
+      "type": "card",
+      "parentId": "today-grid",
+      "children": [
+        "real-h",
+        "real-c"
+      ]
+    },
+    {
+      "id": "real-h",
+      "type": "card-header",
+      "parentId": "real",
+      "children": [
+        "real-t",
+        "real-d"
+      ]
+    },
+    {
+      "id": "real-t",
+      "type": "card-title",
+      "parentId": "real-h",
+      "content": "What is real"
+    },
+    {
+      "id": "real-d",
+      "type": "card-description",
+      "parentId": "real-h",
+      "content": "Working now, and worth keeping."
+    },
+    {
+      "id": "real-c",
+      "type": "card-content",
+      "parentId": "real",
+      "children": [
+        "real-ul"
+      ]
+    },
+    {
+      "id": "real-ul",
+      "type": "ul",
+      "parentId": "real-c",
+      "children": [
+        "real-rep"
+      ]
+    },
+    {
+      "id": "real-rep",
+      "type": "repeat",
+      "parentId": "real-ul",
+      "meta": {
+        "each": {
+          "$bind": "props.current_state.real"
+        },
+        "as": "r"
+      },
+      "children": [
+        "real-li"
+      ]
+    },
+    {
+      "id": "real-li",
+      "type": "li",
+      "parentId": "real-rep",
+      "content": {
+        "$bind": "r.text"
+      }
+    },
+    {
+      "id": "broken",
+      "type": "card",
+      "parentId": "today-grid",
+      "children": [
+        "broken-h",
+        "broken-c"
+      ]
+    },
+    {
+      "id": "broken-h",
+      "type": "card-header",
+      "parentId": "broken",
+      "children": [
+        "broken-t",
+        "broken-d"
+      ]
+    },
+    {
+      "id": "broken-t",
+      "type": "card-title",
+      "parentId": "broken-h",
+      "content": "Cut or broken"
+    },
+    {
+      "id": "broken-d",
+      "type": "card-description",
+      "parentId": "broken-h",
+      "content": "Each with why it broke."
+    },
+    {
+      "id": "broken-c",
+      "type": "card-content",
+      "parentId": "broken",
+      "children": [
+        "broken-ul"
+      ]
+    },
+    {
+      "id": "broken-ul",
+      "type": "ul",
+      "parentId": "broken-c",
+      "children": [
+        "broken-rep"
+      ]
+    },
+    {
+      "id": "broken-rep",
+      "type": "repeat",
+      "parentId": "broken-ul",
+      "meta": {
+        "each": {
+          "$bind": "props.current_state.cut_or_broken"
+        },
+        "as": "b"
+      },
+      "children": [
+        "broken-li"
+      ]
+    },
+    {
+      "id": "broken-li",
+      "type": "li",
+      "parentId": "broken-rep",
+      "children": [
+        "broken-text",
+        "broken-why"
+      ]
+    },
+    {
+      "id": "broken-text",
+      "type": "p",
+      "parentId": "broken-li",
+      "content": {
+        "$bind": "b.text"
+      }
+    },
+    {
+      "id": "broken-why",
+      "type": "muted",
+      "parentId": "broken-li",
+      "content": {
+        "$tpl": "Why: {b.why}"
+      }
+    },
+    {
+      "id": "gaps",
+      "type": "card",
+      "parentId": "today-grid",
+      "children": [
+        "gaps-h",
+        "gaps-c"
+      ]
+    },
+    {
+      "id": "gaps-h",
+      "type": "card-header",
+      "parentId": "gaps",
+      "children": [
+        "gaps-t",
+        "gaps-d"
+      ]
+    },
+    {
+      "id": "gaps-t",
+      "type": "card-title",
+      "parentId": "gaps-h",
+      "content": "Known gaps"
+    },
+    {
+      "id": "gaps-d",
+      "type": "card-description",
+      "parentId": "gaps-h",
+      "content": "Each with when it matters."
+    },
+    {
+      "id": "gaps-c",
+      "type": "card-content",
+      "parentId": "gaps",
+      "children": [
+        "gaps-ul"
+      ]
+    },
+    {
+      "id": "gaps-ul",
+      "type": "ul",
+      "parentId": "gaps-c",
+      "children": [
+        "gaps-rep"
+      ]
+    },
+    {
+      "id": "gaps-rep",
+      "type": "repeat",
+      "parentId": "gaps-ul",
+      "meta": {
+        "each": {
+          "$bind": "props.current_state.known_gaps"
+        },
+        "as": "g"
+      },
+      "children": [
+        "gaps-li"
+      ]
+    },
+    {
+      "id": "gaps-li",
+      "type": "li",
+      "parentId": "gaps-rep",
+      "children": [
+        "gaps-text",
+        "gaps-when"
+      ]
+    },
+    {
+      "id": "gaps-text",
+      "type": "p",
+      "parentId": "gaps-li",
+      "content": {
+        "$bind": "g.text"
+      }
+    },
+    {
+      "id": "gaps-when",
+      "type": "muted",
+      "parentId": "gaps-li",
+      "content": {
+        "$tpl": "When it matters: {g.when_it_matters}"
+      }
+    },
+    {
+      "id": "direction",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "dir-h",
+        "becoming",
+        "props-table"
+      ]
+    },
+    {
+      "id": "dir-h",
+      "type": "h2",
+      "parentId": "direction",
+      "content": "Becoming"
+    },
+    {
+      "id": "becoming",
+      "type": "blockquote",
+      "parentId": "direction",
+      "content": {
+        "$bind": "props.direction.becoming"
+      }
+    },
+    {
+      "id": "props-table",
+      "type": "table",
+      "parentId": "direction",
+      "children": [
+        "props-cap",
+        "props-head",
+        "props-body"
+      ]
+    },
+    {
+      "id": "props-cap",
+      "type": "table-caption",
+      "parentId": "props-table",
+      "content": "The operator's bets. Discovery informs how each is designed, never whether it is needed."
+    },
+    {
+      "id": "props-head",
+      "type": "table-header",
+      "parentId": "props-table",
+      "children": [
+        "props-hr"
+      ]
+    },
+    {
+      "id": "props-hr",
+      "type": "table-row",
+      "parentId": "props-head",
+      "children": [
+        "props-h1",
+        "props-h2",
+        "props-h3"
+      ]
+    },
+    {
+      "id": "props-h1",
+      "type": "table-head",
+      "parentId": "props-hr",
+      "content": "Proposal"
+    },
+    {
+      "id": "props-h2",
+      "type": "table-head",
+      "parentId": "props-hr",
+      "content": "Status"
+    },
+    {
+      "id": "props-h3",
+      "type": "table-head",
+      "parentId": "props-hr",
+      "content": "Pressure test"
+    },
+    {
+      "id": "props-body",
+      "type": "table-body",
+      "parentId": "props-table",
+      "children": [
+        "props-rep"
+      ]
+    },
+    {
+      "id": "props-rep",
+      "type": "repeat",
+      "parentId": "props-body",
+      "meta": {
+        "each": {
+          "$bind": "props.direction.proposals"
+        },
+        "as": "pr"
+      },
+      "children": [
+        "props-row"
+      ]
+    },
+    {
+      "id": "props-row",
+      "type": "table-row",
+      "parentId": "props-rep",
+      "children": [
+        "props-c1",
+        "props-c2",
+        "props-c3"
+      ]
+    },
+    {
+      "id": "props-c1",
+      "type": "table-cell",
+      "parentId": "props-row",
+      "content": {
+        "$bind": "pr.text"
+      }
+    },
+    {
+      "id": "props-c2",
+      "type": "table-cell",
+      "parentId": "props-row",
+      "children": [
+        "props-badge"
+      ]
+    },
+    {
+      "id": "props-badge",
+      "type": "badge",
+      "parentId": "props-c2",
+      "meta": {
+        "variant": {
+          "$bind": "pr.status",
+          "$map": {
+            "settled": "success",
+            "open": "warning",
+            "contested": "destructive"
+          },
+          "$default": "muted"
+        }
+      },
+      "content": {
+        "$bind": "pr.status"
+      }
+    },
+    {
+      "id": "props-c3",
+      "type": "table-cell",
+      "parentId": "props-row",
+      "content": {
+        "$bind": "pr.needs_pressure_test",
+        "$map": {
+          "true": "needed",
+          "false": "no"
+        }
+      }
+    },
+    {
+      "id": "who",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "who-h",
+        "who-grid",
+        "cons-h",
+        "cons-table"
+      ]
+    },
+    {
+      "id": "who-h",
+      "type": "h2",
+      "parentId": "who",
+      "content": "Who touches it"
+    },
+    {
+      "id": "who-grid",
+      "type": "grid",
+      "parentId": "who",
+      "meta": {
+        "preset": "linear",
+        "columns": 2,
+        "gap": "4"
+      },
+      "children": [
+        "actor-rep"
+      ]
+    },
+    {
+      "id": "actor-rep",
+      "type": "repeat",
+      "parentId": "who-grid",
+      "meta": {
+        "each": {
+          "$bind": "props.actors"
+        },
+        "as": "a"
+      },
+      "children": [
+        "actor-card"
+      ]
+    },
+    {
+      "id": "actor-card",
+      "type": "card",
+      "parentId": "actor-rep",
+      "children": [
+        "actor-h",
+        "actor-c"
+      ]
+    },
+    {
+      "id": "actor-h",
+      "type": "card-header",
+      "parentId": "actor-card",
+      "children": [
+        "actor-t",
+        "actor-type-p"
+      ]
+    },
+    {
+      "id": "actor-t",
+      "type": "card-title",
+      "parentId": "actor-h",
+      "content": {
+        "$bind": "a.name"
+      }
+    },
+    {
+      "id": "actor-type",
+      "type": "badge",
+      "parentId": "actor-type-p",
+      "meta": {
+        "variant": {
+          "$bind": "a.type",
+          "$map": {
+            "human": "info",
+            "machine": "accent"
+          },
+          "$default": "muted"
+        }
+      },
+      "content": {
+        "$bind": "a.type"
+      }
+    },
+    {
+      "id": "actor-c",
+      "type": "card-content",
+      "parentId": "actor-card",
+      "children": [
+        "actor-touch",
+        "actor-stakes"
+      ]
+    },
+    {
+      "id": "actor-touch",
+      "type": "p",
+      "parentId": "actor-c",
+      "content": {
+        "$tpl": "Touches: {a.touches}"
+      }
+    },
+    {
+      "id": "actor-stakes",
+      "type": "p",
+      "parentId": "actor-c",
+      "content": {
+        "$tpl": "Stakes: {a.stakes}"
+      }
+    },
+    {
+      "id": "cons-h",
+      "type": "h3",
+      "parentId": "who",
+      "content": "Where it shows up"
+    },
+    {
+      "id": "cons-table",
+      "type": "table",
+      "parentId": "who",
+      "children": [
+        "cons-head",
+        "cons-body"
+      ]
+    },
+    {
+      "id": "cons-head",
+      "type": "table-header",
+      "parentId": "cons-table",
+      "children": [
+        "cons-hr"
+      ]
+    },
+    {
+      "id": "cons-hr",
+      "type": "table-row",
+      "parentId": "cons-head",
+      "children": [
+        "cons-h1",
+        "cons-h2",
+        "cons-h3"
+      ]
+    },
+    {
+      "id": "cons-h1",
+      "type": "table-head",
+      "parentId": "cons-hr",
+      "content": "Consumer"
+    },
+    {
+      "id": "cons-h2",
+      "type": "table-head",
+      "parentId": "cons-hr",
+      "content": "Relationship"
+    },
+    {
+      "id": "cons-h3",
+      "type": "table-head",
+      "parentId": "cons-hr",
+      "content": "Status"
+    },
+    {
+      "id": "cons-body",
+      "type": "table-body",
+      "parentId": "cons-table",
+      "children": [
+        "cons-rep"
+      ]
+    },
+    {
+      "id": "cons-rep",
+      "type": "repeat",
+      "parentId": "cons-body",
+      "meta": {
+        "each": {
+          "$bind": "props.consumers"
+        },
+        "as": "c"
+      },
+      "children": [
+        "cons-row"
+      ]
+    },
+    {
+      "id": "cons-row",
+      "type": "table-row",
+      "parentId": "cons-rep",
+      "children": [
+        "cons-c1",
+        "cons-c2",
+        "cons-c3"
+      ]
+    },
+    {
+      "id": "cons-c1",
+      "type": "table-cell",
+      "parentId": "cons-row",
+      "content": {
+        "$bind": "c.name"
+      }
+    },
+    {
+      "id": "cons-c2",
+      "type": "table-cell",
+      "parentId": "cons-row",
+      "content": {
+        "$bind": "c.relationship"
+      }
+    },
+    {
+      "id": "cons-c3",
+      "type": "table-cell",
+      "parentId": "cons-row",
+      "children": [
+        "cons-badge"
+      ]
+    },
+    {
+      "id": "cons-badge",
+      "type": "badge",
+      "parentId": "cons-c3",
+      "meta": {
+        "variant": {
+          "$bind": "c.status",
+          "$map": {
+            "built": "success",
+            "planned": "info",
+            "not-built": "muted"
+          },
+          "$default": "outline"
+        }
+      },
+      "content": {
+        "$bind": "c.status"
+      }
+    },
+    {
+      "id": "bounds",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "bounds-h",
+        "bounds-table"
+      ]
+    },
+    {
+      "id": "bounds-h",
+      "type": "h2",
+      "parentId": "bounds",
+      "content": "What it owns, and what it refuses"
+    },
+    {
+      "id": "bounds-table",
+      "type": "table",
+      "parentId": "bounds",
+      "children": [
+        "bounds-head",
+        "bounds-body"
+      ]
+    },
+    {
+      "id": "bounds-head",
+      "type": "table-header",
+      "parentId": "bounds-table",
+      "children": [
+        "bounds-hr"
+      ]
+    },
+    {
+      "id": "bounds-hr",
+      "type": "table-row",
+      "parentId": "bounds-head",
+      "children": [
+        "bounds-h1",
+        "bounds-h2"
+      ]
+    },
+    {
+      "id": "bounds-h1",
+      "type": "table-head",
+      "parentId": "bounds-hr",
+      "content": "Owner"
+    },
+    {
+      "id": "bounds-h2",
+      "type": "table-head",
+      "parentId": "bounds-hr",
+      "content": "Owns"
+    },
+    {
+      "id": "bounds-body",
+      "type": "table-body",
+      "parentId": "bounds-table",
+      "children": [
+        "bounds-rep"
+      ]
+    },
+    {
+      "id": "bounds-rep",
+      "type": "repeat",
+      "parentId": "bounds-body",
+      "meta": {
+        "each": {
+          "$bind": "props.boundaries"
+        },
+        "as": "bd"
+      },
+      "children": [
+        "bounds-row"
+      ]
+    },
+    {
+      "id": "bounds-row",
+      "type": "table-row",
+      "parentId": "bounds-rep",
+      "children": [
+        "bounds-c1",
+        "bounds-c2"
+      ]
+    },
+    {
+      "id": "bounds-c1",
+      "type": "table-cell",
+      "parentId": "bounds-row",
+      "content": {
+        "$bind": "bd.owner"
+      }
+    },
+    {
+      "id": "bounds-c2",
+      "type": "table-cell",
+      "parentId": "bounds-row",
+      "content": {
+        "$bind": "bd.owns"
+      }
+    },
+    {
+      "id": "open",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "open-h",
+        "open-table"
+      ]
+    },
+    {
+      "id": "open-h",
+      "type": "h2",
+      "parentId": "open",
+      "content": "Open questions"
+    },
+    {
+      "id": "open-table",
+      "type": "table",
+      "parentId": "open",
+      "children": [
+        "open-head",
+        "open-body"
+      ]
+    },
+    {
+      "id": "open-head",
+      "type": "table-header",
+      "parentId": "open-table",
+      "children": [
+        "open-hr"
+      ]
+    },
+    {
+      "id": "open-hr",
+      "type": "table-row",
+      "parentId": "open-head",
+      "children": [
+        "open-h1",
+        "open-h2",
+        "open-h3",
+        "open-h4"
+      ]
+    },
+    {
+      "id": "open-h1",
+      "type": "table-head",
+      "parentId": "open-hr",
+      "content": "Id"
+    },
+    {
+      "id": "open-h2",
+      "type": "table-head",
+      "parentId": "open-hr",
+      "content": "Question"
+    },
+    {
+      "id": "open-h3",
+      "type": "table-head",
+      "parentId": "open-hr",
+      "content": "Resolve with"
+    },
+    {
+      "id": "open-h4",
+      "type": "table-head",
+      "parentId": "open-hr",
+      "content": "Resolution"
+    },
+    {
+      "id": "open-body",
+      "type": "table-body",
+      "parentId": "open-table",
+      "children": [
+        "open-rep"
+      ]
+    },
+    {
+      "id": "open-rep",
+      "type": "repeat",
+      "parentId": "open-body",
+      "meta": {
+        "each": {
+          "$bind": "props.open_questions"
+        },
+        "as": "q"
+      },
+      "children": [
+        "open-row"
+      ]
+    },
+    {
+      "id": "open-row",
+      "type": "table-row",
+      "parentId": "open-rep",
+      "children": [
+        "open-c1",
+        "open-c2",
+        "open-c3",
+        "open-c4"
+      ]
+    },
+    {
+      "id": "open-c1",
+      "type": "table-cell",
+      "parentId": "open-row",
+      "content": {
+        "$bind": "q.id"
+      }
+    },
+    {
+      "id": "open-c2",
+      "type": "table-cell",
+      "parentId": "open-row",
+      "content": {
+        "$bind": "q.question"
+      }
+    },
+    {
+      "id": "open-c3",
+      "type": "table-cell",
+      "parentId": "open-row",
+      "children": [
+        "open-with"
+      ]
+    },
+    {
+      "id": "open-with",
+      "type": "badge",
+      "parentId": "open-c3",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "q.resolve_with"
+      }
+    },
+    {
+      "id": "open-c4",
+      "type": "table-cell",
+      "parentId": "open-row",
+      "children": [
+        "open-res",
+        "open-none"
+      ]
+    },
+    {
+      "id": "open-res",
+      "type": "text",
+      "parentId": "open-c4",
+      "meta": {
+        "$if": {
+          "$bind": "q.resolution"
+        }
+      },
+      "content": {
+        "$bind": "q.resolution"
+      }
+    },
+    {
+      "id": "open-none",
+      "type": "badge",
+      "parentId": "open-c4",
+      "meta": {
+        "$unless": {
+          "$bind": "q.resolution"
+        },
+        "variant": "warning"
+      },
+      "content": "open"
+    },
+    {
+      "id": "actor-type-p",
+      "type": "p",
+      "parentId": "actor-h",
+      "children": [
+        "actor-type"
+      ]
+    }
+  ]
+}

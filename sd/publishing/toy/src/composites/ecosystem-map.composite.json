@@ -1,0 +1,1566 @@
+{
+  "manifest": {
+    "id": "ecosystem-map",
+    "name": "Ecosystem Map",
+    "category": "service-design",
+    "description": "The service's ecosystem: actors in rings by tier around the core service, value flowing between them by kind, the channels, the moments of truth, and the failure register.",
+    "keywords": [
+      "ecosystem",
+      "service design",
+      "value exchange",
+      "actors",
+      "failure modes"
+    ],
+    "cognitiveLoad": 8,
+    "solves": "Seeing who the service depends on, what moves between them, and where it breaks",
+    "appliesWhen": [
+      "a legion ecosystem document is published"
+    ],
+    "usagePatterns": {
+      "do": [
+        "Colour flows by kind in a fixed order, with a legend that shows absent kinds as zero",
+        "Keep the failure register beside the map, not in an appendix"
+      ],
+      "never": [
+        "Place an actor in a ring its tier does not name",
+        "Draw a flow whose endpoint is not an actor without saying so"
+      ]
+    }
+  },
+  "input": [
+    "ecosystem"
+  ],
+  "output": [],
+  "blocks": [
+    {
+      "id": "page",
+      "type": "container",
+      "meta": {
+        "as": "div",
+        "size": "full",
+        "padding": "8",
+        "gap": "8"
+      },
+      "children": [
+        "head",
+        "map",
+        "tiers",
+        "channels",
+        "flows",
+        "mot",
+        "fail",
+        "answers"
+      ]
+    },
+    {
+      "id": "head",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "header",
+        "gap": "4"
+      },
+      "children": [
+        "kicker",
+        "title",
+        "metarow",
+        "core"
+      ]
+    },
+    {
+      "id": "kicker",
+      "type": "muted",
+      "parentId": "head",
+      "content": "Ecosystem map"
+    },
+    {
+      "id": "title",
+      "type": "h1",
+      "parentId": "head",
+      "content": {
+        "$bind": "props.meta.title"
+      }
+    },
+    {
+      "id": "metarow",
+      "type": "p",
+      "parentId": "head",
+      "children": [
+        "m-st",
+        "m-s1",
+        "m-d",
+        "m-s2",
+        "m-ve",
+        "m-s3"
+      ]
+    },
+    {
+      "id": "m-st",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "muted"
+      },
+      "content": {
+        "$bind": "props.meta.status"
+      }
+    },
+    {
+      "id": "m-s1",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-d",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.meta.date"
+      }
+    },
+    {
+      "id": "m-s2",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-ve",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.value_exchanges",
+        "$count": true
+      }
+    },
+    {
+      "id": "core",
+      "type": "lead",
+      "parentId": "head",
+      "content": {
+        "$bind": "props.meta.core_service"
+      }
+    },
+    {
+      "id": "map",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "map-h",
+        "rings"
+      ]
+    },
+    {
+      "id": "map-h",
+      "type": "h2",
+      "parentId": "map",
+      "content": "Actors and the value between them"
+    },
+    {
+      "id": "rings",
+      "type": "ecosystem-rings",
+      "parentId": "map",
+      "meta": {
+        "core": "legion",
+        "actors": {
+          "$bind": "props.actors"
+        },
+        "exchanges": {
+          "$bind": "props.value_exchanges"
+        }
+      }
+    },
+    {
+      "id": "tiers",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "tiers-h",
+        "tier-grid"
+      ]
+    },
+    {
+      "id": "tiers-h",
+      "type": "h2",
+      "parentId": "tiers",
+      "content": "Actors by tier"
+    },
+    {
+      "id": "tier-grid",
+      "type": "grid",
+      "parentId": "tiers",
+      "meta": {
+        "preset": "linear",
+        "columns": 3,
+        "gap": "4"
+      },
+      "children": [
+        "t-primary",
+        "t-secondary",
+        "t-tertiary"
+      ]
+    },
+    {
+      "id": "t-primary",
+      "type": "container",
+      "parentId": "tier-grid",
+      "meta": {
+        "as": "section",
+        "gap": "3"
+      },
+      "children": [
+        "t-primary-h",
+        "t-primary-d",
+        "t-primary-rep"
+      ]
+    },
+    {
+      "id": "t-primary-h",
+      "type": "h3",
+      "parentId": "t-primary",
+      "content": "Primary"
+    },
+    {
+      "id": "t-primary-d",
+      "type": "muted",
+      "parentId": "t-primary",
+      "content": "Customers: the persona groups."
+    },
+    {
+      "id": "t-primary-rep",
+      "type": "repeat",
+      "parentId": "t-primary",
+      "meta": {
+        "each": {
+          "$bind": "props.actors.primary"
+        },
+        "as": "a"
+      },
+      "children": [
+        "t-primary-card"
+      ]
+    },
+    {
+      "id": "t-primary-card",
+      "type": "card",
+      "parentId": "t-primary-rep",
+      "children": [
+        "t-primary-ch",
+        "t-primary-cc"
+      ]
+    },
+    {
+      "id": "t-primary-ch",
+      "type": "card-header",
+      "parentId": "t-primary-card",
+      "children": [
+        "t-primary-ct",
+        "t-primary-cd"
+      ]
+    },
+    {
+      "id": "t-primary-ct",
+      "type": "card-title",
+      "parentId": "t-primary-ch",
+      "content": {
+        "$bind": "a.name"
+      }
+    },
+    {
+      "id": "t-primary-cd",
+      "type": "card-description",
+      "parentId": "t-primary-ch",
+      "children": [
+        "t-primary-role"
+      ]
+    },
+    {
+      "id": "t-primary-role",
+      "type": "citation-text",
+      "parentId": "t-primary-cd",
+      "meta": {
+        "text": {
+          "$bind": "a.role"
+        }
+      }
+    },
+    {
+      "id": "t-primary-cc",
+      "type": "card-content",
+      "parentId": "t-primary-card",
+      "children": [
+        "t-primary-need",
+        "t-primary-rel"
+      ]
+    },
+    {
+      "id": "t-primary-need",
+      "type": "p",
+      "parentId": "t-primary-cc",
+      "meta": {
+        "$if": {
+          "$bind": "a.need"
+        }
+      },
+      "content": "Needs: ",
+      "children": [
+        "t-primary-need-t"
+      ]
+    },
+    {
+      "id": "t-primary-need-t",
+      "type": "citation-text",
+      "parentId": "t-primary-need",
+      "meta": {
+        "text": {
+          "$bind": "a.need"
+        }
+      }
+    },
+    {
+      "id": "t-primary-rel",
+      "type": "p",
+      "parentId": "t-primary-cc",
+      "meta": {
+        "$if": {
+          "$bind": "a.relationship"
+        }
+      },
+      "children": [
+        "t-primary-rel-t"
+      ]
+    },
+    {
+      "id": "t-primary-rel-t",
+      "type": "citation-text",
+      "parentId": "t-primary-rel",
+      "meta": {
+        "text": {
+          "$bind": "a.relationship"
+        }
+      }
+    },
+    {
+      "id": "t-secondary",
+      "type": "container",
+      "parentId": "tier-grid",
+      "meta": {
+        "as": "section",
+        "gap": "3"
+      },
+      "children": [
+        "t-secondary-h",
+        "t-secondary-d",
+        "t-secondary-rep"
+      ]
+    },
+    {
+      "id": "t-secondary-h",
+      "type": "h3",
+      "parentId": "t-secondary",
+      "content": "Secondary"
+    },
+    {
+      "id": "t-secondary-d",
+      "type": "muted",
+      "parentId": "t-secondary",
+      "content": "On stage with the customer."
+    },
+    {
+      "id": "t-secondary-rep",
+      "type": "repeat",
+      "parentId": "t-secondary",
+      "meta": {
+        "each": {
+          "$bind": "props.actors.secondary"
+        },
+        "as": "a"
+      },
+      "children": [
+        "t-secondary-card"
+      ]
+    },
+    {
+      "id": "t-secondary-card",
+      "type": "card",
+      "parentId": "t-secondary-rep",
+      "children": [
+        "t-secondary-ch",
+        "t-secondary-cc"
+      ]
+    },
+    {
+      "id": "t-secondary-ch",
+      "type": "card-header",
+      "parentId": "t-secondary-card",
+      "children": [
+        "t-secondary-ct",
+        "t-secondary-cd"
+      ]
+    },
+    {
+      "id": "t-secondary-ct",
+      "type": "card-title",
+      "parentId": "t-secondary-ch",
+      "content": {
+        "$bind": "a.name"
+      }
+    },
+    {
+      "id": "t-secondary-cd",
+      "type": "card-description",
+      "parentId": "t-secondary-ch",
+      "children": [
+        "t-secondary-role"
+      ]
+    },
+    {
+      "id": "t-secondary-role",
+      "type": "citation-text",
+      "parentId": "t-secondary-cd",
+      "meta": {
+        "text": {
+          "$bind": "a.role"
+        }
+      }
+    },
+    {
+      "id": "t-secondary-cc",
+      "type": "card-content",
+      "parentId": "t-secondary-card",
+      "children": [
+        "t-secondary-need",
+        "t-secondary-rel"
+      ]
+    },
+    {
+      "id": "t-secondary-need",
+      "type": "p",
+      "parentId": "t-secondary-cc",
+      "meta": {
+        "$if": {
+          "$bind": "a.need"
+        }
+      },
+      "content": "Needs: ",
+      "children": [
+        "t-secondary-need-t"
+      ]
+    },
+    {
+      "id": "t-secondary-need-t",
+      "type": "citation-text",
+      "parentId": "t-secondary-need",
+      "meta": {
+        "text": {
+          "$bind": "a.need"
+        }
+      }
+    },
+    {
+      "id": "t-secondary-rel",
+      "type": "p",
+      "parentId": "t-secondary-cc",
+      "meta": {
+        "$if": {
+          "$bind": "a.relationship"
+        }
+      },
+      "children": [
+        "t-secondary-rel-t"
+      ]
+    },
+    {
+      "id": "t-secondary-rel-t",
+      "type": "citation-text",
+      "parentId": "t-secondary-rel",
+      "meta": {
+        "text": {
+          "$bind": "a.relationship"
+        }
+      }
+    },
+    {
+      "id": "t-tertiary",
+      "type": "container",
+      "parentId": "tier-grid",
+      "meta": {
+        "as": "section",
+        "gap": "3"
+      },
+      "children": [
+        "t-tertiary-h",
+        "t-tertiary-d",
+        "t-tertiary-rep"
+      ]
+    },
+    {
+      "id": "t-tertiary-h",
+      "type": "h3",
+      "parentId": "t-tertiary",
+      "content": "Tertiary"
+    },
+    {
+      "id": "t-tertiary-d",
+      "type": "muted",
+      "parentId": "t-tertiary",
+      "content": "The parts around the service."
+    },
+    {
+      "id": "t-tertiary-rep",
+      "type": "repeat",
+      "parentId": "t-tertiary",
+      "meta": {
+        "each": {
+          "$bind": "props.actors.tertiary"
+        },
+        "as": "a"
+      },
+      "children": [
+        "t-tertiary-card"
+      ]
+    },
+    {
+      "id": "t-tertiary-card",
+      "type": "card",
+      "parentId": "t-tertiary-rep",
+      "children": [
+        "t-tertiary-ch",
+        "t-tertiary-cc"
+      ]
+    },
+    {
+      "id": "t-tertiary-ch",
+      "type": "card-header",
+      "parentId": "t-tertiary-card",
+      "children": [
+        "t-tertiary-ct",
+        "t-tertiary-cd"
+      ]
+    },
+    {
+      "id": "t-tertiary-ct",
+      "type": "card-title",
+      "parentId": "t-tertiary-ch",
+      "content": {
+        "$bind": "a.name"
+      }
+    },
+    {
+      "id": "t-tertiary-cd",
+      "type": "card-description",
+      "parentId": "t-tertiary-ch",
+      "children": [
+        "t-tertiary-role"
+      ]
+    },
+    {
+      "id": "t-tertiary-role",
+      "type": "citation-text",
+      "parentId": "t-tertiary-cd",
+      "meta": {
+        "text": {
+          "$bind": "a.role"
+        }
+      }
+    },
+    {
+      "id": "t-tertiary-cc",
+      "type": "card-content",
+      "parentId": "t-tertiary-card",
+      "children": [
+        "t-tertiary-need",
+        "t-tertiary-rel"
+      ]
+    },
+    {
+      "id": "t-tertiary-need",
+      "type": "p",
+      "parentId": "t-tertiary-cc",
+      "meta": {
+        "$if": {
+          "$bind": "a.need"
+        }
+      },
+      "content": "Needs: ",
+      "children": [
+        "t-tertiary-need-t"
+      ]
+    },
+    {
+      "id": "t-tertiary-need-t",
+      "type": "citation-text",
+      "parentId": "t-tertiary-need",
+      "meta": {
+        "text": {
+          "$bind": "a.need"
+        }
+      }
+    },
+    {
+      "id": "t-tertiary-rel",
+      "type": "p",
+      "parentId": "t-tertiary-cc",
+      "meta": {
+        "$if": {
+          "$bind": "a.relationship"
+        }
+      },
+      "children": [
+        "t-tertiary-rel-t"
+      ]
+    },
+    {
+      "id": "t-tertiary-rel-t",
+      "type": "citation-text",
+      "parentId": "t-tertiary-rel",
+      "meta": {
+        "text": {
+          "$bind": "a.relationship"
+        }
+      }
+    },
+    {
+      "id": "channels",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "channels-h",
+        "ch-t"
+      ]
+    },
+    {
+      "id": "channels-h",
+      "type": "h2",
+      "parentId": "channels",
+      "content": "Channels"
+    },
+    {
+      "id": "ch-t",
+      "type": "table",
+      "parentId": "channels",
+      "children": [
+        "ch-t-head",
+        "ch-t-body"
+      ]
+    },
+    {
+      "id": "ch-t-head",
+      "type": "table-header",
+      "parentId": "ch-t",
+      "children": [
+        "ch-t-hr"
+      ]
+    },
+    {
+      "id": "ch-t-hr",
+      "type": "table-row",
+      "parentId": "ch-t-head",
+      "children": [
+        "ch-t-h0",
+        "ch-t-h1",
+        "ch-t-h2",
+        "ch-t-h3"
+      ]
+    },
+    {
+      "id": "ch-t-h0",
+      "type": "table-head",
+      "parentId": "ch-t-hr",
+      "content": "Channel"
+    },
+    {
+      "id": "ch-t-h1",
+      "type": "table-head",
+      "parentId": "ch-t-hr",
+      "content": "Type"
+    },
+    {
+      "id": "ch-t-h2",
+      "type": "table-head",
+      "parentId": "ch-t-hr",
+      "content": "Used by"
+    },
+    {
+      "id": "ch-t-h3",
+      "type": "table-head",
+      "parentId": "ch-t-hr",
+      "content": "Purpose"
+    },
+    {
+      "id": "ch-t-body",
+      "type": "table-body",
+      "parentId": "ch-t",
+      "children": [
+        "ch-t-rep"
+      ]
+    },
+    {
+      "id": "ch-t-rep",
+      "type": "repeat",
+      "parentId": "ch-t-body",
+      "meta": {
+        "each": {
+          "$bind": "props.channels"
+        },
+        "as": "c"
+      },
+      "children": [
+        "ch-t-row"
+      ]
+    },
+    {
+      "id": "ch-t-row",
+      "type": "table-row",
+      "parentId": "ch-t-rep",
+      "children": [
+        "ch-t-c0",
+        "ch-t-c1",
+        "ch-t-c2",
+        "ch-t-c3"
+      ]
+    },
+    {
+      "id": "ch-t-c0",
+      "type": "table-cell",
+      "parentId": "ch-t-row",
+      "content": {
+        "$bind": "c.name"
+      }
+    },
+    {
+      "id": "ch-t-c1",
+      "type": "table-cell",
+      "parentId": "ch-t-row",
+      "children": [
+        "ch-t-c1-x"
+      ]
+    },
+    {
+      "type": "badge",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "c.type"
+      },
+      "id": "ch-t-c1-x",
+      "parentId": "ch-t-c1"
+    },
+    {
+      "id": "ch-t-c2",
+      "type": "table-cell",
+      "parentId": "ch-t-row",
+      "content": {
+        "$bind": "c.users"
+      }
+    },
+    {
+      "id": "ch-t-c3",
+      "type": "table-cell",
+      "parentId": "ch-t-row",
+      "children": [
+        "ch-t-c3-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "c.purpose"
+        }
+      },
+      "id": "ch-t-c3-x",
+      "parentId": "ch-t-c3"
+    },
+    {
+      "id": "flows",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "flows-h",
+        "ve-t"
+      ]
+    },
+    {
+      "id": "flows-h",
+      "type": "h2",
+      "parentId": "flows",
+      "content": "Value exchanges"
+    },
+    {
+      "id": "ve-t",
+      "type": "table",
+      "parentId": "flows",
+      "children": [
+        "ve-t-head",
+        "ve-t-body"
+      ]
+    },
+    {
+      "id": "ve-t-head",
+      "type": "table-header",
+      "parentId": "ve-t",
+      "children": [
+        "ve-t-hr"
+      ]
+    },
+    {
+      "id": "ve-t-hr",
+      "type": "table-row",
+      "parentId": "ve-t-head",
+      "children": [
+        "ve-t-h0",
+        "ve-t-h1",
+        "ve-t-h2",
+        "ve-t-h3",
+        "ve-t-h4"
+      ]
+    },
+    {
+      "id": "ve-t-h0",
+      "type": "table-head",
+      "parentId": "ve-t-hr",
+      "content": "From"
+    },
+    {
+      "id": "ve-t-h1",
+      "type": "table-head",
+      "parentId": "ve-t-hr",
+      "content": "To"
+    },
+    {
+      "id": "ve-t-h2",
+      "type": "table-head",
+      "parentId": "ve-t-hr",
+      "content": "Kind"
+    },
+    {
+      "id": "ve-t-h3",
+      "type": "table-head",
+      "parentId": "ve-t-hr",
+      "content": "Gives"
+    },
+    {
+      "id": "ve-t-h4",
+      "type": "table-head",
+      "parentId": "ve-t-hr",
+      "content": "Gets"
+    },
+    {
+      "id": "ve-t-body",
+      "type": "table-body",
+      "parentId": "ve-t",
+      "children": [
+        "ve-t-rep"
+      ]
+    },
+    {
+      "id": "ve-t-rep",
+      "type": "repeat",
+      "parentId": "ve-t-body",
+      "meta": {
+        "each": {
+          "$bind": "props.value_exchanges"
+        },
+        "as": "v"
+      },
+      "children": [
+        "ve-t-row"
+      ]
+    },
+    {
+      "id": "ve-t-row",
+      "type": "table-row",
+      "parentId": "ve-t-rep",
+      "children": [
+        "ve-t-c0",
+        "ve-t-c1",
+        "ve-t-c2",
+        "ve-t-c3",
+        "ve-t-c4"
+      ]
+    },
+    {
+      "id": "ve-t-c0",
+      "type": "table-cell",
+      "parentId": "ve-t-row",
+      "content": {
+        "$bind": "v.from"
+      }
+    },
+    {
+      "id": "ve-t-c1",
+      "type": "table-cell",
+      "parentId": "ve-t-row",
+      "content": {
+        "$bind": "v.to"
+      }
+    },
+    {
+      "id": "ve-t-c2",
+      "type": "table-cell",
+      "parentId": "ve-t-row",
+      "children": [
+        "ve-t-c2-x"
+      ]
+    },
+    {
+      "type": "badge",
+      "meta": {
+        "variant": {
+          "$bind": "v.kind",
+          "$map": {
+            "person": "info",
+            "product": "secondary",
+            "money": "warning",
+            "knowledge": "accent",
+            "trust": "success"
+          }
+        }
+      },
+      "content": {
+        "$bind": "v.kind"
+      },
+      "id": "ve-t-c2-x",
+      "parentId": "ve-t-c2"
+    },
+    {
+      "id": "ve-t-c3",
+      "type": "table-cell",
+      "parentId": "ve-t-row",
+      "children": [
+        "ve-t-c3-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "v.gives"
+        }
+      },
+      "id": "ve-t-c3-x",
+      "parentId": "ve-t-c3"
+    },
+    {
+      "id": "ve-t-c4",
+      "type": "table-cell",
+      "parentId": "ve-t-row",
+      "children": [
+        "ve-t-c4-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "v.gets"
+        }
+      },
+      "id": "ve-t-c4-x",
+      "parentId": "ve-t-c4"
+    },
+    {
+      "id": "mot",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "mot-h",
+        "mot-grid"
+      ]
+    },
+    {
+      "id": "mot-h",
+      "type": "h2",
+      "parentId": "mot",
+      "content": "Moments of truth"
+    },
+    {
+      "id": "mot-grid",
+      "type": "grid",
+      "parentId": "mot",
+      "meta": {
+        "preset": "linear",
+        "columns": 2,
+        "gap": "4"
+      },
+      "children": [
+        "mot-rep"
+      ]
+    },
+    {
+      "id": "mot-rep",
+      "type": "repeat",
+      "parentId": "mot-grid",
+      "meta": {
+        "each": {
+          "$bind": "props.moments_of_truth"
+        },
+        "as": "m"
+      },
+      "children": [
+        "mot-card"
+      ]
+    },
+    {
+      "id": "mot-card",
+      "type": "card",
+      "parentId": "mot-rep",
+      "children": [
+        "mot-ch",
+        "mot-cc"
+      ]
+    },
+    {
+      "id": "mot-ch",
+      "type": "card-header",
+      "parentId": "mot-card",
+      "children": [
+        "mot-t",
+        "mot-a"
+      ]
+    },
+    {
+      "id": "mot-t",
+      "type": "card-title",
+      "parentId": "mot-ch",
+      "content": {
+        "$tpl": "{m.number}. {m.title}"
+      }
+    },
+    {
+      "id": "mot-a",
+      "type": "card-description",
+      "parentId": "mot-ch",
+      "content": {
+        "$bind": "m.actor"
+      }
+    },
+    {
+      "id": "mot-cc",
+      "type": "card-content",
+      "parentId": "mot-card",
+      "children": [
+        "mot-ok",
+        "mot-fail",
+        "mot-why"
+      ]
+    },
+    {
+      "id": "mot-ok",
+      "type": "alert",
+      "parentId": "mot-cc",
+      "meta": {
+        "variant": "success"
+      },
+      "children": [
+        "mot-ok-t",
+        "mot-ok-d"
+      ]
+    },
+    {
+      "id": "mot-ok-t",
+      "type": "alert-title",
+      "parentId": "mot-ok",
+      "content": "Success"
+    },
+    {
+      "id": "mot-ok-d",
+      "type": "alert-description",
+      "parentId": "mot-ok",
+      "children": [
+        "mot-ok-x"
+      ]
+    },
+    {
+      "id": "mot-ok-x",
+      "type": "citation-text",
+      "parentId": "mot-ok-d",
+      "meta": {
+        "text": {
+          "$bind": "m.success"
+        }
+      }
+    },
+    {
+      "id": "mot-fail",
+      "type": "alert",
+      "parentId": "mot-cc",
+      "meta": {
+        "variant": "destructive"
+      },
+      "children": [
+        "mot-fail-t",
+        "mot-fail-d"
+      ]
+    },
+    {
+      "id": "mot-fail-t",
+      "type": "alert-title",
+      "parentId": "mot-fail",
+      "content": "Failure"
+    },
+    {
+      "id": "mot-fail-d",
+      "type": "alert-description",
+      "parentId": "mot-fail",
+      "children": [
+        "mot-fail-x"
+      ]
+    },
+    {
+      "id": "mot-fail-x",
+      "type": "citation-text",
+      "parentId": "mot-fail-d",
+      "meta": {
+        "text": {
+          "$bind": "m.failure"
+        }
+      }
+    },
+    {
+      "id": "mot-why",
+      "type": "muted",
+      "parentId": "mot-cc",
+      "content": "Why it weighs more: ",
+      "children": [
+        "mot-why-x"
+      ]
+    },
+    {
+      "id": "mot-why-x",
+      "type": "citation-text",
+      "parentId": "mot-why",
+      "meta": {
+        "text": {
+          "$bind": "m.why_disproportionate"
+        }
+      }
+    },
+    {
+      "id": "fail",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "fail-h",
+        "fail-lead",
+        "fm-t"
+      ]
+    },
+    {
+      "id": "fail-h",
+      "type": "h2",
+      "parentId": "fail",
+      "content": "Failure register"
+    },
+    {
+      "id": "fail-lead",
+      "type": "muted",
+      "parentId": "fail",
+      "content": "The schema gives a failure mode no status field, so open and answered entries cannot be separated from data; the status lives in the recovery text."
+    },
+    {
+      "id": "fm-t",
+      "type": "table",
+      "parentId": "fail",
+      "children": [
+        "fm-t-head",
+        "fm-t-body"
+      ]
+    },
+    {
+      "id": "fm-t-head",
+      "type": "table-header",
+      "parentId": "fm-t",
+      "children": [
+        "fm-t-hr"
+      ]
+    },
+    {
+      "id": "fm-t-hr",
+      "type": "table-row",
+      "parentId": "fm-t-head",
+      "children": [
+        "fm-t-h0",
+        "fm-t-h1",
+        "fm-t-h2",
+        "fm-t-h3"
+      ]
+    },
+    {
+      "id": "fm-t-h0",
+      "type": "table-head",
+      "parentId": "fm-t-hr",
+      "content": "#"
+    },
+    {
+      "id": "fm-t-h1",
+      "type": "table-head",
+      "parentId": "fm-t-hr",
+      "content": "Failure"
+    },
+    {
+      "id": "fm-t-h2",
+      "type": "table-head",
+      "parentId": "fm-t-hr",
+      "content": "Impact"
+    },
+    {
+      "id": "fm-t-h3",
+      "type": "table-head",
+      "parentId": "fm-t-hr",
+      "content": "Recovery"
+    },
+    {
+      "id": "fm-t-body",
+      "type": "table-body",
+      "parentId": "fm-t",
+      "children": [
+        "fm-t-rep"
+      ]
+    },
+    {
+      "id": "fm-t-rep",
+      "type": "repeat",
+      "parentId": "fm-t-body",
+      "meta": {
+        "each": {
+          "$bind": "props.failure_modes"
+        },
+        "as": "f"
+      },
+      "children": [
+        "fm-t-row"
+      ]
+    },
+    {
+      "id": "fm-t-row",
+      "type": "table-row",
+      "parentId": "fm-t-rep",
+      "children": [
+        "fm-t-c0",
+        "fm-t-c1",
+        "fm-t-c2",
+        "fm-t-c3"
+      ]
+    },
+    {
+      "id": "fm-t-c0",
+      "type": "table-cell",
+      "parentId": "fm-t-row",
+      "content": {
+        "$bind": "$n"
+      }
+    },
+    {
+      "id": "fm-t-c1",
+      "type": "table-cell",
+      "parentId": "fm-t-row",
+      "children": [
+        "fm-t-c1-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "f.failure"
+        }
+      },
+      "id": "fm-t-c1-x",
+      "parentId": "fm-t-c1"
+    },
+    {
+      "id": "fm-t-c2",
+      "type": "table-cell",
+      "parentId": "fm-t-row",
+      "children": [
+        "fm-t-c2-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "f.impact"
+        }
+      },
+      "id": "fm-t-c2-x",
+      "parentId": "fm-t-c2"
+    },
+    {
+      "id": "fm-t-c3",
+      "type": "table-cell",
+      "parentId": "fm-t-row",
+      "children": [
+        "fm-t-c3-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "f.recovery"
+        }
+      },
+      "id": "fm-t-c3-x",
+      "parentId": "fm-t-c3"
+    },
+    {
+      "id": "answers",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "answers-h",
+        "an-t"
+      ]
+    },
+    {
+      "id": "answers-h",
+      "type": "h2",
+      "parentId": "answers",
+      "content": "Questions answered"
+    },
+    {
+      "id": "an-t",
+      "type": "table",
+      "parentId": "answers",
+      "children": [
+        "an-t-head",
+        "an-t-body"
+      ]
+    },
+    {
+      "id": "an-t-head",
+      "type": "table-header",
+      "parentId": "an-t",
+      "children": [
+        "an-t-hr"
+      ]
+    },
+    {
+      "id": "an-t-hr",
+      "type": "table-row",
+      "parentId": "an-t-head",
+      "children": [
+        "an-t-h0",
+        "an-t-h1",
+        "an-t-h2",
+        "an-t-h3",
+        "an-t-h4",
+        "an-t-h5"
+      ]
+    },
+    {
+      "id": "an-t-h0",
+      "type": "table-head",
+      "parentId": "an-t-hr",
+      "content": "Area"
+    },
+    {
+      "id": "an-t-h1",
+      "type": "table-head",
+      "parentId": "an-t-hr",
+      "content": "For"
+    },
+    {
+      "id": "an-t-h2",
+      "type": "table-head",
+      "parentId": "an-t-hr",
+      "content": "Question"
+    },
+    {
+      "id": "an-t-h3",
+      "type": "table-head",
+      "parentId": "an-t-hr",
+      "content": "Answer"
+    },
+    {
+      "id": "an-t-h4",
+      "type": "table-head",
+      "parentId": "an-t-hr",
+      "content": "Weight"
+    },
+    {
+      "id": "an-t-h5",
+      "type": "table-head",
+      "parentId": "an-t-hr",
+      "content": "Cites"
+    },
+    {
+      "id": "an-t-body",
+      "type": "table-body",
+      "parentId": "an-t",
+      "children": [
+        "an-t-rep"
+      ]
+    },
+    {
+      "id": "an-t-rep",
+      "type": "repeat",
+      "parentId": "an-t-body",
+      "meta": {
+        "each": {
+          "$bind": "props.answers"
+        },
+        "as": "q"
+      },
+      "children": [
+        "an-t-row"
+      ]
+    },
+    {
+      "id": "an-t-row",
+      "type": "table-row",
+      "parentId": "an-t-rep",
+      "children": [
+        "an-t-c0",
+        "an-t-c1",
+        "an-t-c2",
+        "an-t-c3",
+        "an-t-c4",
+        "an-t-c5"
+      ]
+    },
+    {
+      "id": "an-t-c0",
+      "type": "table-cell",
+      "parentId": "an-t-row",
+      "children": [
+        "an-t-c0-x"
+      ]
+    },
+    {
+      "type": "badge",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "q.ground_area"
+      },
+      "id": "an-t-c0-x",
+      "parentId": "an-t-c0"
+    },
+    {
+      "id": "an-t-c1",
+      "type": "table-cell",
+      "parentId": "an-t-row",
+      "content": {
+        "$bind": "q.for"
+      }
+    },
+    {
+      "id": "an-t-c2",
+      "type": "table-cell",
+      "parentId": "an-t-row",
+      "content": {
+        "$bind": "q.question"
+      }
+    },
+    {
+      "id": "an-t-c3",
+      "type": "table-cell",
+      "parentId": "an-t-row",
+      "children": [
+        "an-t-c3-x"
+      ]
+    },
+    {
+      "type": "citation-text",
+      "meta": {
+        "text": {
+          "$bind": "q.answer"
+        }
+      },
+      "id": "an-t-c3-x",
+      "parentId": "an-t-c3"
+    },
+    {
+      "id": "an-t-c4",
+      "type": "table-cell",
+      "parentId": "an-t-row",
+      "children": [
+        "an-t-c4-x"
+      ]
+    },
+    {
+      "type": "badge",
+      "meta": {
+        "variant": {
+          "$bind": "q.weight",
+          "$map": {
+            "core": "success",
+            "two-lens": "info",
+            "single-lens": "muted",
+            "design-reasoning": "secondary"
+          }
+        }
+      },
+      "content": {
+        "$bind": "q.weight"
+      },
+      "id": "an-t-c4-x",
+      "parentId": "an-t-c4"
+    },
+    {
+      "id": "an-t-c5",
+      "type": "table-cell",
+      "parentId": "an-t-row",
+      "children": [
+        "an-t-c5-x"
+      ]
+    },
+    {
+      "type": "citation-chips",
+      "meta": {
+        "ids": {
+          "$bind": "q.cites"
+        }
+      },
+      "id": "an-t-c5-x",
+      "parentId": "an-t-c5"
+    },
+    {
+      "id": "m-s3",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " value exchanges"
+    }
+  ]
+}

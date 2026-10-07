@@ -1,0 +1,901 @@
+{
+  "manifest": {
+    "id": "question-board",
+    "name": "Question Board",
+    "category": "service-design",
+    "description": "A Discovery as a board: every question in the lane of its status, with its voices and citations; the persona groups the stories formed; the citation register.",
+    "keywords": [
+      "discovery",
+      "research",
+      "questions",
+      "evidence",
+      "citations"
+    ],
+    "cognitiveLoad": 7,
+    "solves": "Seeing what research settled, what it contested, and what is still open, with every claim one step from its source",
+    "appliesWhen": [
+      "a legion discovery document is published"
+    ],
+    "usagePatterns": {
+      "do": [
+        "Lane by status so open and contested work is visible at a glance",
+        "Show the number of authors and families beside every answer"
+      ],
+      "never": [
+        "Show an answer without its evidence ids",
+        "Show a few-voice question without its few-voices marker"
+      ]
+    }
+  },
+  "input": [
+    "discovery"
+  ],
+  "output": [],
+  "blocks": [
+    {
+      "id": "page",
+      "type": "container",
+      "meta": {
+        "as": "div",
+        "size": "full",
+        "padding": "8",
+        "gap": "8"
+      },
+      "children": [
+        "head",
+        "board",
+        "groups",
+        "register"
+      ]
+    },
+    {
+      "id": "head",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "header",
+        "gap": "4"
+      },
+      "children": [
+        "kicker",
+        "title",
+        "metarow"
+      ]
+    },
+    {
+      "id": "kicker",
+      "type": "muted",
+      "parentId": "head",
+      "content": "Discovery"
+    },
+    {
+      "id": "title",
+      "type": "h1",
+      "parentId": "head",
+      "content": {
+        "$bind": "props.meta.title"
+      }
+    },
+    {
+      "id": "metarow",
+      "type": "p",
+      "parentId": "head",
+      "children": [
+        "m-q",
+        "m-s1",
+        "m-c",
+        "m-s2",
+        "m-s",
+        "m-s3",
+        "m-r",
+        "m-s4",
+        "m-d"
+      ]
+    },
+    {
+      "id": "m-q",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "secondary"
+      },
+      "content": {
+        "$tpl": "{props.meta.status}"
+      }
+    },
+    {
+      "id": "m-s1",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-c",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.citations",
+        "$count": true
+      }
+    },
+    {
+      "id": "m-s2",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " citations "
+    },
+    {
+      "id": "m-s",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.stories",
+        "$count": true
+      }
+    },
+    {
+      "id": "m-s3",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " stories "
+    },
+    {
+      "id": "m-r",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$tpl": "{props.meta.rounds} rounds"
+      }
+    },
+    {
+      "id": "m-s4",
+      "type": "text",
+      "parentId": "metarow",
+      "content": " "
+    },
+    {
+      "id": "m-d",
+      "type": "badge",
+      "parentId": "metarow",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "props.meta.date"
+      }
+    },
+    {
+      "id": "board",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "board-h",
+        "lanes"
+      ]
+    },
+    {
+      "id": "board-h",
+      "type": "h2",
+      "parentId": "board",
+      "content": "Questions by status"
+    },
+    {
+      "id": "lanes",
+      "type": "grid",
+      "parentId": "board",
+      "meta": {
+        "preset": "linear",
+        "columns": 3,
+        "gap": "4"
+      },
+      "children": [
+        "lane-answered",
+        "lane-contested",
+        "lane-open"
+      ]
+    },
+    {
+      "id": "lane-answered",
+      "type": "container",
+      "parentId": "lanes",
+      "meta": {
+        "as": "section",
+        "gap": "3"
+      },
+      "children": [
+        "la-h",
+        "la-rep"
+      ]
+    },
+    {
+      "id": "la-h",
+      "type": "h3",
+      "parentId": "lane-answered",
+      "content": "Answered"
+    },
+    {
+      "id": "la-rep",
+      "type": "repeat",
+      "parentId": "lane-answered",
+      "meta": {
+        "each": {
+          "$bind": "props.questions"
+        },
+        "as": "q",
+        "where": [
+          {
+            "path": "q.status",
+            "equals": "answered"
+          }
+        ]
+      },
+      "children": [
+        "qcard"
+      ]
+    },
+    {
+      "id": "lane-contested",
+      "type": "container",
+      "parentId": "lanes",
+      "meta": {
+        "as": "section",
+        "gap": "3"
+      },
+      "children": [
+        "lc-h",
+        "lc-rep"
+      ]
+    },
+    {
+      "id": "lc-h",
+      "type": "h3",
+      "parentId": "lane-contested",
+      "content": "Contested"
+    },
+    {
+      "id": "lc-rep",
+      "type": "repeat",
+      "parentId": "lane-contested",
+      "meta": {
+        "each": {
+          "$bind": "props.questions"
+        },
+        "as": "q",
+        "where": [
+          {
+            "path": "q.status",
+            "equals": "contested"
+          }
+        ]
+      },
+      "children": [
+        "qcard"
+      ]
+    },
+    {
+      "id": "lane-open",
+      "type": "container",
+      "parentId": "lanes",
+      "meta": {
+        "as": "section",
+        "gap": "3"
+      },
+      "children": [
+        "lo-h",
+        "lo-rep"
+      ]
+    },
+    {
+      "id": "lo-h",
+      "type": "h3",
+      "parentId": "lane-open",
+      "content": "Open"
+    },
+    {
+      "id": "lo-rep",
+      "type": "repeat",
+      "parentId": "lane-open",
+      "meta": {
+        "each": {
+          "$bind": "props.questions"
+        },
+        "as": "q",
+        "where": [
+          {
+            "path": "q.status",
+            "equals": "open"
+          }
+        ]
+      },
+      "children": [
+        "qcard"
+      ]
+    },
+    {
+      "id": "qcard",
+      "type": "card",
+      "parentId": "la-rep",
+      "children": [
+        "q-head",
+        "q-body",
+        "q-foot"
+      ]
+    },
+    {
+      "id": "q-head",
+      "type": "card-header",
+      "parentId": "qcard",
+      "children": [
+        "q-tags",
+        "q-title"
+      ]
+    },
+    {
+      "id": "q-tags",
+      "type": "p",
+      "parentId": "q-head",
+      "children": [
+        "q-id",
+        "q-sp",
+        "q-status",
+        "q-sp2",
+        "q-kind",
+        "q-sp3",
+        "q-expert",
+        "q-sp4",
+        "q-few"
+      ]
+    },
+    {
+      "id": "q-id",
+      "type": "badge",
+      "parentId": "q-tags",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "q.id"
+      }
+    },
+    {
+      "id": "q-sp",
+      "type": "text",
+      "parentId": "q-tags",
+      "content": " "
+    },
+    {
+      "id": "q-status",
+      "type": "badge",
+      "parentId": "q-tags",
+      "meta": {
+        "variant": {
+          "$bind": "q.status",
+          "$map": {
+            "answered": "success",
+            "contested": "destructive",
+            "open": "warning"
+          },
+          "$default": "muted"
+        }
+      },
+      "content": {
+        "$bind": "q.status"
+      }
+    },
+    {
+      "id": "q-sp2",
+      "type": "text",
+      "parentId": "q-tags",
+      "content": " "
+    },
+    {
+      "id": "q-kind",
+      "type": "badge",
+      "parentId": "q-tags",
+      "meta": {
+        "variant": "muted"
+      },
+      "content": {
+        "$tpl": "round {q.round}, {q.kind}"
+      }
+    },
+    {
+      "id": "q-sp3",
+      "type": "text",
+      "parentId": "q-tags",
+      "content": " "
+    },
+    {
+      "id": "q-expert",
+      "type": "badge",
+      "parentId": "q-tags",
+      "meta": {
+        "$if": {
+          "$bind": "q.expert_only"
+        },
+        "variant": "info"
+      },
+      "content": "expert only"
+    },
+    {
+      "id": "q-title",
+      "type": "card-title",
+      "parentId": "q-head",
+      "content": {
+        "$bind": "q.question"
+      }
+    },
+    {
+      "id": "q-body",
+      "type": "card-content",
+      "parentId": "qcard",
+      "children": [
+        "q-answer",
+        "q-voices"
+      ]
+    },
+    {
+      "id": "q-answer",
+      "type": "p",
+      "parentId": "q-body",
+      "children": [
+        "q-answer-text"
+      ]
+    },
+    {
+      "id": "q-answer-text",
+      "type": "citation-text",
+      "parentId": "q-answer",
+      "meta": {
+        "text": {
+          "$bind": "q.answer"
+        }
+      }
+    },
+    {
+      "id": "q-voices",
+      "type": "muted",
+      "parentId": "q-body",
+      "content": {
+        "$tpl": "{q.authors} authors across {q.families} families: "
+      },
+      "children": [
+        "q-fam"
+      ]
+    },
+    {
+      "id": "q-fam",
+      "type": "text",
+      "parentId": "q-voices",
+      "content": {
+        "$bind": "q.family_names",
+        "$join": ", "
+      }
+    },
+    {
+      "id": "q-foot",
+      "type": "card-footer",
+      "parentId": "qcard",
+      "children": [
+        "q-ev"
+      ]
+    },
+    {
+      "id": "q-ev",
+      "type": "small",
+      "parentId": "q-foot",
+      "content": "Evidence: ",
+      "children": [
+        "q-chips"
+      ]
+    },
+    {
+      "id": "q-chips",
+      "type": "citation-chips",
+      "parentId": "q-ev",
+      "meta": {
+        "ids": {
+          "$bind": "q.evidence"
+        }
+      }
+    },
+    {
+      "id": "groups",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "groups-h",
+        "groups-table"
+      ]
+    },
+    {
+      "id": "groups-h",
+      "type": "h2",
+      "parentId": "groups",
+      "content": "Persona groups"
+    },
+    {
+      "id": "groups-table",
+      "type": "table",
+      "parentId": "groups",
+      "children": [
+        "g-head",
+        "g-body"
+      ]
+    },
+    {
+      "id": "g-head",
+      "type": "table-header",
+      "parentId": "groups-table",
+      "children": [
+        "g-hr"
+      ]
+    },
+    {
+      "id": "g-hr",
+      "type": "table-row",
+      "parentId": "g-head",
+      "children": [
+        "g-h1",
+        "g-h2",
+        "g-h3",
+        "g-h4",
+        "g-h5"
+      ]
+    },
+    {
+      "id": "g-h1",
+      "type": "table-head",
+      "parentId": "g-hr",
+      "content": "Group"
+    },
+    {
+      "id": "g-h2",
+      "type": "table-head",
+      "parentId": "g-hr",
+      "content": "Name"
+    },
+    {
+      "id": "g-h3",
+      "type": "table-head",
+      "parentId": "g-hr",
+      "content": "Who"
+    },
+    {
+      "id": "g-h4",
+      "type": "table-head",
+      "parentId": "g-hr",
+      "content": "Stories"
+    },
+    {
+      "id": "g-h5",
+      "type": "table-head",
+      "parentId": "g-hr",
+      "content": "Authors"
+    },
+    {
+      "id": "g-body",
+      "type": "table-body",
+      "parentId": "groups-table",
+      "children": [
+        "g-rep"
+      ]
+    },
+    {
+      "id": "g-rep",
+      "type": "repeat",
+      "parentId": "g-body",
+      "meta": {
+        "each": {
+          "$bind": "props.persona_groups"
+        },
+        "as": "g"
+      },
+      "children": [
+        "g-row"
+      ]
+    },
+    {
+      "id": "g-row",
+      "type": "table-row",
+      "parentId": "g-rep",
+      "children": [
+        "g-c1",
+        "g-c2",
+        "g-c3",
+        "g-c4",
+        "g-c5"
+      ]
+    },
+    {
+      "id": "g-c1",
+      "type": "table-cell",
+      "parentId": "g-row",
+      "children": [
+        "g-id"
+      ]
+    },
+    {
+      "id": "g-id",
+      "type": "badge",
+      "parentId": "g-c1",
+      "meta": {
+        "variant": "secondary"
+      },
+      "content": {
+        "$bind": "g.id"
+      }
+    },
+    {
+      "id": "g-c2",
+      "type": "table-cell",
+      "parentId": "g-row",
+      "content": {
+        "$bind": "g.name"
+      }
+    },
+    {
+      "id": "g-c3",
+      "type": "table-cell",
+      "parentId": "g-row",
+      "content": {
+        "$bind": "g.who.text"
+      },
+      "children": [
+        "g-who-sp",
+        "g-who-chips"
+      ]
+    },
+    {
+      "id": "g-who-sp",
+      "type": "text",
+      "parentId": "g-c3",
+      "content": " "
+    },
+    {
+      "id": "g-who-chips",
+      "type": "citation-chips",
+      "parentId": "g-c3",
+      "meta": {
+        "ids": {
+          "$bind": "g.who.citations"
+        }
+      }
+    },
+    {
+      "id": "g-c4",
+      "type": "table-cell",
+      "parentId": "g-row",
+      "content": {
+        "$bind": "g.stories",
+        "$count": true
+      }
+    },
+    {
+      "id": "g-c5",
+      "type": "table-cell",
+      "parentId": "g-row",
+      "content": {
+        "$bind": "g.authors"
+      }
+    },
+    {
+      "id": "register",
+      "type": "container",
+      "parentId": "page",
+      "meta": {
+        "as": "section",
+        "gap": "4"
+      },
+      "children": [
+        "reg-h",
+        "reg-lead",
+        "reg-table"
+      ]
+    },
+    {
+      "id": "reg-h",
+      "type": "h2",
+      "parentId": "register",
+      "content": "Citation register"
+    },
+    {
+      "id": "reg-lead",
+      "type": "muted",
+      "parentId": "register",
+      "content": "Every id on every page resolves here: the words, who said them, when, and where."
+    },
+    {
+      "id": "reg-table",
+      "type": "table",
+      "parentId": "register",
+      "children": [
+        "r-head",
+        "r-body"
+      ]
+    },
+    {
+      "id": "r-head",
+      "type": "table-header",
+      "parentId": "reg-table",
+      "children": [
+        "r-hr"
+      ]
+    },
+    {
+      "id": "r-hr",
+      "type": "table-row",
+      "parentId": "r-head",
+      "children": [
+        "r-h1",
+        "r-h2",
+        "r-h3",
+        "r-h4",
+        "r-h5"
+      ]
+    },
+    {
+      "id": "r-h1",
+      "type": "table-head",
+      "parentId": "r-hr",
+      "content": "Id"
+    },
+    {
+      "id": "r-h2",
+      "type": "table-head",
+      "parentId": "r-hr",
+      "content": "Quote"
+    },
+    {
+      "id": "r-h3",
+      "type": "table-head",
+      "parentId": "r-hr",
+      "content": "Author"
+    },
+    {
+      "id": "r-h4",
+      "type": "table-head",
+      "parentId": "r-hr",
+      "content": "Stake"
+    },
+    {
+      "id": "r-h5",
+      "type": "table-head",
+      "parentId": "r-hr",
+      "content": "Source"
+    },
+    {
+      "id": "r-body",
+      "type": "table-body",
+      "parentId": "reg-table",
+      "children": [
+        "r-rep"
+      ]
+    },
+    {
+      "id": "r-rep",
+      "type": "repeat",
+      "parentId": "r-body",
+      "meta": {
+        "each": {
+          "$bind": "props.citations"
+        },
+        "as": "c"
+      },
+      "children": [
+        "r-row"
+      ]
+    },
+    {
+      "id": "r-row",
+      "type": "table-row",
+      "parentId": "r-rep",
+      "children": [
+        "r-c1",
+        "r-c2",
+        "r-c3",
+        "r-c4",
+        "r-c5"
+      ]
+    },
+    {
+      "id": "r-c1",
+      "type": "table-cell",
+      "parentId": "r-row",
+      "content": {
+        "$bind": "c.id"
+      }
+    },
+    {
+      "id": "r-c2",
+      "type": "table-cell",
+      "parentId": "r-row",
+      "content": {
+        "$bind": "c.text"
+      }
+    },
+    {
+      "id": "r-c3",
+      "type": "table-cell",
+      "parentId": "r-row",
+      "content": {
+        "$tpl": "{c.author}, {c.date}"
+      }
+    },
+    {
+      "id": "r-c4",
+      "type": "table-cell",
+      "parentId": "r-row",
+      "children": [
+        "r-stake"
+      ]
+    },
+    {
+      "id": "r-stake",
+      "type": "badge",
+      "parentId": "r-c4",
+      "meta": {
+        "variant": "outline"
+      },
+      "content": {
+        "$bind": "c.stake"
+      }
+    },
+    {
+      "id": "r-c5",
+      "type": "table-cell",
+      "parentId": "r-row",
+      "children": [
+        "r-link"
+      ]
+    },
+    {
+      "id": "r-link",
+      "type": "link",
+      "parentId": "r-c5",
+      "meta": {
+        "href": {
+          "$bind": "c.url"
+        }
+      },
+      "content": {
+        "$bind": "c.family"
+      }
+    },
+    {
+      "id": "q-sp4",
+      "type": "text",
+      "parentId": "q-tags",
+      "content": " "
+    },
+    {
+      "id": "q-few",
+      "type": "badge",
+      "parentId": "q-tags",
+      "meta": {
+        "$if": {
+          "$bind": "q.few_voices"
+        },
+        "variant": "warning"
+      },
+      "content": "few voices"
+    }
+  ]
+}
