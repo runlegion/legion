@@ -69,6 +69,9 @@ Emit mechanics:
 
 **Who witnesses, and when.** The crit (the acceptance step that moves the blueprint past `draft`) witnesses it, confirming the id by rebuilding `<journey-id>:blueprint:<blueprint-id>`. The blueprint's meta has no journey field, so the pair lives in the return and the payload alone; the crit reads it there. `outcome_correctness` is the fraction of steps accepted as written, backstage and frictions included; the label is `shipped` when nothing was struck or relabeled, `scoped-down` when the crit cut steps or moved a mechanism to planned, `escalated` when it sent the blueprint back. Until the crit exists, the operator who moves the document past `draft` witnesses it by hand with the same rule. The writer stakes; the crit scores.
 
+
+**Fingerprints in zsh:** write every variable in braces, `${id}:question:Q1`, never `$id:question:Q1`. zsh reads `$id:q` as a modifier and silently drops the `:q`, so the fingerprint never matches its witness.
+
 ## Holds to
 
 - Backstage machinery that `current_state.real` carries, or that is labeled planned and grounded in `direction`.

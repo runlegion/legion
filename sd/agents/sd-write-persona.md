@@ -116,6 +116,9 @@ Emit mechanics:
 - Emission is non-blocking: log a failed emit in the return and still return `done`.
 - The crit, the acceptance step that moves the persona past `draft`, witnesses the prediction (the operator, by hand, until the crit exists). You report its id and stop.
 
+
+**Fingerprints in zsh:** write every variable in braces, `${id}:question:Q1`, never `$id:question:Q1`. zsh reads `$id:q` as a modifier and silently drops the `:q`, so the fingerprint never matches its witness.
+
 ## Parking
 
 When the dispatch cannot finish, land the persona as far as it got at `draft`, with the unfinished sections listed in `open_questions`, and return `parked` naming what remains. The conductor checkpoints and re-dispatches.

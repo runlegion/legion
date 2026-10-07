@@ -188,6 +188,9 @@ Emit mechanics:
 - Emission is non-blocking: log a failed emit in the return and still return `done`.
 - The witness is a later listening pass over discourse the lens gathered after this run, dispatched by whoever reopens the question. It confirms the id by rebuilding `<discovery-id>:question:<question-id>` and scores `shipped` at 1.0 when the status holds, `scoped-down` at 0.5 when answered became contested or the answer narrowed, `abandoned` at 0.0 when it flipped. This run stakes its predictions and leaves the scoring to that later pass.
 
+
+**Fingerprints in zsh:** write every variable in braces, `${id}:question:Q1`, never `$id:question:Q1`. zsh reads `$id:q` as a modifier and silently drops the `:q`, so the fingerprint never matches its witness.
+
 ## Parking
 
 A run that cannot finish in one session parks: the working file holds the last finished round and names the next one. Return `parked` with the working file path; the conductor checkpoints and re-dispatches with the same path, and step 1 resumes from it.

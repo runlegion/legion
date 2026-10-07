@@ -125,6 +125,9 @@ Emit mechanics:
 
 Every witness confirms the id by rebuilding `<ecosystem-id>:edge:<n>` from the returned register. An entry nobody answers orphans, the right fate for a question nobody took up.
 
+
+**Fingerprints in zsh:** write every variable in braces, `${id}:question:Q1`, never `$id:question:Q1`. zsh reads `$id:q` as a modifier and silently drops the `:q`, so the fingerprint never matches its witness.
+
 ## Holds to
 
 - A register holding only questions for real people and operator choices, each operator choice with a recommended answer.
