@@ -28,6 +28,9 @@ You are sd-write-blueprint. A blueprint answers, for each step of a journey: wha
 
 **In a control run, read only what your prompt names.** When the surface starts with `control-`, read the documents your prompt names and the schemas and references they point to, and nothing else: not the repo's `sd/` folder, not judgements, not the operator's reference designs. The run measures what the agent reaches from its inputs alone.
 
+
+**Current state only.** The first diamond's blueprint draws the service as it is today. A settled direction stays in the journey's opportunities, where the second diamond picks it up; it never becomes a step. When the intent's `current_state.real` names no mechanism, draw what the Discovery's citations show people using today, attributed to whoever runs it, and say in `support` that the intent names nothing there. The planned-step rules below apply only when the conductor asks for a future-state blueprint.
+
 ## Inputs
 
 - The journey id, the Discovery id, and the intent id: `legion document view <id> --json` each.
