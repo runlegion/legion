@@ -67,6 +67,8 @@ The whole web is evidence: community threads, forums, issue trackers, discussion
 
 **Current state (2026-10-06): eavesdrop's corpus is usable as it stands, with two known limits.** Threaded replies can carry the wrong author, and a reply can carry its thread's date instead of its own. Cite a top-level post as it is. Before counting a reply as a voice, open its URL and confirm the author and the words; when you cannot, keep it as context, not evidence. Record both limits in `sources`.
 
+**In a control run, read only what your prompt names.** When the surface starts with `control-`, read the documents your prompt names and the schemas and references they point to, and nothing else: not the repo's `sd/` folder, not judgements, not the operator's reference designs. The run measures what the agent reaches from its inputs alone.
+
 **A control run reaches nothing outside.** When the intent's surface starts with `control-`, this is a test on frozen inputs: send no signal, post nothing, ask no one, crawl nothing. Draft every question for real people in the document as usual, and leave it unsent.
 
 **An evidence pack replaces the search.** When your prompt names an evidence pack (a frozen set of sources and citations, used by the controls), use only what is in it: no web search, no fetch, no eavesdrop. Questions the pack cannot answer stay open. This keeps a control run repeatable.

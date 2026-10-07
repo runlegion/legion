@@ -1,0 +1,241 @@
+{
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "x-doc-type": "blueprint",
+ "title": "Blueprint",
+ "description": "Service blueprint: frontstage/backstage of a service across a sequence of steps. Part of the definition layer (legion #526). pain_points/metrics are plain string arrays per the validated instances (the vault doc's Zod wrapper objects were a TOML-era artifact).",
+ "type": "object",
+ "properties": {
+  "meta": {
+   "type": "object",
+   "properties": {
+    "title": {
+     "type": "string"
+    },
+    "status": {
+     "type": "string",
+     "enum": [
+      "draft",
+      "review",
+      "done"
+     ]
+    },
+    "date": {
+     "type": "string"
+    },
+    "author": {
+     "type": "string"
+    },
+    "persona": {
+     "type": "string"
+    },
+    "trigger": {
+     "type": "string"
+    },
+    "scope": {
+     "type": "string"
+    },
+    "channels": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "required": [
+    "title",
+    "status",
+    "date",
+    "author",
+    "persona",
+    "trigger",
+    "scope",
+    "channels"
+   ]
+  },
+  "steps": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "number": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "title": {
+      "type": "string"
+     },
+     "emotional_score": {
+      "type": "number",
+      "minimum": -3,
+      "maximum": 3
+     },
+     "emotional_label": {
+      "type": "string"
+     },
+     "layers": {
+      "type": "object",
+      "properties": {
+       "evidence": {
+        "type": "string"
+       },
+       "customer_actions": {
+        "type": "string"
+       },
+       "frontstage": {
+        "type": "string"
+       },
+       "backstage": {
+        "type": "string"
+       },
+       "support": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "evidence",
+       "customer_actions",
+       "frontstage",
+       "backstage",
+       "support"
+      ]
+     },
+     "pain_points": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "DEPRECATED vocabulary (startup register): superseded by frictions. Tolerated on old documents; writers write frictions."
+     },
+     "metrics": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "evidence_links": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "properties": {
+        "source": {
+         "type": "string"
+        },
+        "url": {
+         "type": "string"
+        },
+        "score": {
+         "type": "number",
+         "minimum": 0,
+         "maximum": 1
+        },
+        "text": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "source",
+        "url",
+        "score",
+        "text"
+       ]
+      }
+     },
+     "time": {
+      "type": "string",
+      "description": "Execution time or duration for this step (Shostack 1984 carried per-step times and tolerances; optional but traditional)."
+     },
+     "fail_points": {
+      "type": "array",
+      "description": "Process fail points -- Shostack's F marks: where the SERVICE can break, distinct from pain_points (where the CUSTOMER hurts). Optional.",
+      "items": {
+       "type": "string"
+      }
+     },
+     "frictions": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Where the experience grinds at this step -- the design word; each cites an insight. Supersedes pain_points. Distinct from fail_points (Shostack's F marks: where the SERVICE breaks)."
+     },
+     "actor": {
+      "type": "string",
+      "description": "Who takes this step: the persona, or another person on stage named in actors. Omitted means the persona. A renderer draws one lane per actor."
+     }
+    },
+    "required": [
+     "number",
+     "title",
+     "emotional_score",
+     "emotional_label",
+     "layers"
+    ]
+   }
+  },
+  "actors": {
+   "type": "array",
+   "description": "Everyone who takes a step, so a renderer can give each a lane.",
+   "items": {
+    "type": "object",
+    "required": [
+     "name",
+     "role"
+    ],
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "role": {
+      "type": "string",
+      "enum": [
+       "customer",
+       "on_stage"
+      ]
+     },
+     "persona": {
+      "type": "string",
+      "description": "Persona document id, when one has landed."
+     }
+    }
+   }
+  },
+  "moments_of_truth": {
+   "type": "array",
+   "description": "The journey's moments of truth, placed at their step, success and failure each cited.",
+   "items": {
+    "type": "object",
+    "required": [
+     "step",
+     "title",
+     "success",
+     "failure"
+    ],
+    "properties": {
+     "step": {
+      "type": "integer"
+     },
+     "title": {
+      "type": "string"
+     },
+     "success": {
+      "type": "string"
+     },
+     "failure": {
+      "type": "string"
+     },
+     "evidence": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Citation ids."
+     }
+    }
+   }
+  }
+ },
+ "required": [
+  "meta",
+  "steps"
+ ]
+}

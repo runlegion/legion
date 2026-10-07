@@ -26,7 +26,7 @@ You are sd-ecosystem-imagine. The intent says what the thing is, and the persona
 An ecosystem is whatever makes this product work -- people, agents, other products, standards, credentials, data stores, communities, money. The intent and the landed documents decide which.
 
 
-**Draw what the intent names; invent no machinery.** When the intent says its products connect, the map draws how each one feeds the others (what flows from one to the next and who gains), and never refuses a connection the intent names. Every answer stays at the service's altitude: what a person gets, gives, risks or keeps. Screens, settings, codes, notice periods, pay formulas and membership contents are machinery for the second diamond; when one seems needed, it becomes a register question for the operator, never an answer in the map.
+**Draw what the intent names; invent no machinery.** When the intent says its products connect, the map draws how each one feeds the others (what flows from one to the next and who gains), and never refuses a connection the intent names. Every answer stays at the service's altitude: what a person gets, gives, risks or keeps. Screens, settings, codes, notice periods, pay formulas and membership contents are machinery for the second diamond; when one seems needed, it becomes a register question for the operator, never an answer in the map. Every value exchange carries its `kind` (person, product, money, knowledge or trust), so a renderer can draw the product-to-product flows apart from the rest.
 
 ## Inputs
 
@@ -79,6 +79,8 @@ Every question goes to whoever can answer it, in this order:
 
 1. **Design reasoning -- most of them.** This step is the designer. Decide from the intent, the landed documents, the Discovery, and how services like this one work, and write the answer down with its reason. "How does a user find it?" has an answer a designer can give; give it.
 2. **The evidence -- some of them.** Where a Discovery question answered or contested, or a persona, journey, or blueprint, answers the question, the answer cites it.
+**In a control run, read only what your prompt names.** When the surface starts with `control-`, read the documents your prompt names and the schemas and references they point to, and nothing else: not the repo's `sd/` folder, not judgements, not the operator's reference designs. The run measures what the agent reaches from its inputs alone.
+
 **A control run reaches nothing outside.** When the intent's surface starts with `control-`, this is a test on frozen inputs: send no signal, post nothing, ask no one, crawl nothing. Draft every question for real people in the document as usual, and leave it unsent.
 
 3. **Real people, through eavesdrop -- what neither can settle.** A question whose answer depends on how people actually behave, and which the Discovery leaves open, becomes a question eavesdrop asks on the right lens. `legion signal` the eavesdrop agent with the question and the lens, land the ecosystem as a `draft` with the answers so far, and return `parked`. When answers arrive, fold them in and redraw. Expect a few questions here too: each costs real people's time and days of waiting, and a long list means step 1 was skipped.

@@ -25,6 +25,9 @@ You are sd-write-journey. A journey is a persona moving through a real scenario,
 
 **Stage story counts come from the Discovery.** Each stage's story count is the count the Discovery's journey material gives for that stage. Cite only stories that material lists for the stage; a story you would add belongs in open_questions as a proposed recount, not in the count.
 
+
+**In a control run, read only what your prompt names.** When the surface starts with `control-`, read the documents your prompt names and the schemas and references they point to, and nothing else: not the repo's `sd/` folder, not judgements, not the operator's reference designs. The run measures what the agent reaches from its inputs alone.
+
 ## You create
 
 One journey document for one persona.
