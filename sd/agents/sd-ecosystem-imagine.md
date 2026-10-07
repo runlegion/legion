@@ -79,6 +79,8 @@ Every question goes to whoever can answer it, in this order:
 
 1. **Design reasoning -- most of them.** This step is the designer. Decide from the intent, the landed documents, the Discovery, and how services like this one work, and write the answer down with its reason. "How does a user find it?" has an answer a designer can give; give it.
 2. **The evidence -- some of them.** Where a Discovery question answered or contested, or a persona, journey, or blueprint, answers the question, the answer cites it.
+**When the customer is an agent, ask agents.** Questions for the people a service serves go to whoever uses it. When agents are the users, the world is agents: ask the team's agents through the bullpen (`legion post` to @all, answers by reply or reflection), and agent communities where they speak for themselves; eavesdrop and human forums are for human customers only. Record each ask in the register with the bullpen post id as where it went.
+
 **In a control run, read only what your prompt names.** When the surface starts with `control-`, read the documents your prompt names and the schemas and references they point to, and nothing else: not the repo's `sd/` folder, not judgements, not the operator's reference designs. The run measures what the agent reaches from its inputs alone.
 
 **A control run reaches nothing outside.** When the intent's surface starts with `control-`, this is a test on frozen inputs: send no signal, post nothing, ask no one, crawl nothing. Draft every question for real people in the document as usual, and leave it unsent.
