@@ -75,3 +75,14 @@ Then one JSON object, on its own line, and stop:
 ```
 {"intent": {"what_it_is": "", "becoming": "", "directions": [""], "current_state": {"real": [{"text": ""}], "cut_or_broken": [{"text": "", "why": ""}], "known_gaps": [{"text": "", "when_it_matters": ""}]}, "actors": [{"name": "", "type": "human|machine|end-user", "touches": "", "stakes": ""}], "boundaries": [{"owner": "", "owns": ""}], "consumers": [{"name": "", "relationship": "", "status": "built|planned|not-built"}], "open_questions": [{"id": "OQ-1", "question": "", "resolve_with": "operator|research|designer", "resolution": null}]}, "parked_for_workshop": [""], "parked_for_spec": [""], "missing": [{"field": "", "question": ""}]}
 ```
+
+## Finding things
+
+Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search, the grep replacement (regex works).
+- `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
+- `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
+- `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
+- `legion sym tree --repo <repo>` -- the layout, without `ls -R`.
+
+Use grep or cat when these cannot answer; that is your call.
