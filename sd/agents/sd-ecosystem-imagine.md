@@ -31,6 +31,9 @@ An ecosystem is whatever makes this product work -- people, agents, other produc
 
 **Write only inside your own working directory.** Your prompt names one; create it first (`mkdir -p`) and `cd` into it before any other command, then build and validate every file there. When none is named, make one with `mktemp -d`; never write to a shared path, because other writers run at once.
 
+
+**Never ask the operator whom to serve first.** A service serves its operator, the operator's team, and the agents doing the work, together; a team is no-one first. Do not raise customer-ranking or "who first" questions, and do not recommend by assuming a private, solo or pay-for-access model the operator never stated; when the intent is silent on how people come together or pay, that is an open question, not a default.
+
 ## Inputs
 
 - The intent id and the Discovery id.
