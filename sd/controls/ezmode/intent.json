@@ -1,0 +1,106 @@
+{
+ "meta": {
+  "title": "Control: ezmode",
+  "surface": "control-ezmode",
+  "status": "draft",
+  "owner": "legion",
+  "date": "2026-10-06",
+  "purpose": "Control intent for testing the design discovery workshop's steps against the operator's hand-made ezmode service design. Composed by not-hotdog from a summary the operator adopted.",
+  "sources": [
+   {
+    "ref": "~/.claude/intent/control-ezmode-words.md",
+    "kind": "doc"
+   }
+  ]
+ },
+ "what_it_is": "Ezmode is tools for game modders: players running heavy mod setups, the mod authors they depend on, and the community leaders who hold their groups together. It is one ecosystem of four products (a crash reporter, community pages for gaming groups, mod hosting that pays creators, and a desktop mod manager). It matters because these communities keep being displaced, their crash fixes get lost, and their creators aren't paid fairly.",
+ "current_state": {
+  "real": [
+   {
+    "text": "Today players like Alex crash with no idea why, and can't tell whether it is just them or whether a fix exists."
+   },
+   {
+    "text": "Today mod authors like Sarah get 'my game crashed idk' in chat instead of real data, and are paid fractions of a penny if at all."
+   },
+   {
+    "text": "Today a diagnosis worked out in chat never reaches the next player with the same crash."
+   },
+   {
+    "text": "These communities have lost their home several times: their files were locked by the big mod host in 2021, their community platform died under corporate ownership in 2025, and their chat platform demanded government IDs in 2026."
+   }
+  ],
+  "cut_or_broken": [],
+  "known_gaps": []
+ },
+ "direction": {
+  "becoming": "One ecosystem where each product works alone and gets better connected, built on promises that are the reverse of what these communities lived.",
+  "proposals": [
+   {
+    "text": "Each product works alone and gets better connected.",
+    "status": "settled",
+    "needs_pressure_test": false
+   },
+   {
+    "text": "A crash someone has already worked out reaches the next player who hits it.",
+    "status": "settled",
+    "needs_pressure_test": false
+   },
+   {
+    "text": "Creators are paid fairly and keep control of their work, including deleting it.",
+    "status": "settled",
+    "needs_pressure_test": false
+   },
+   {
+    "text": "Only content that is actually illegal is removed, and leaving is real; that is what makes staying meaningful.",
+    "status": "settled",
+    "needs_pressure_test": false
+   }
+  ]
+ },
+ "boundaries": [],
+ "actors": [
+  {
+   "name": "Players running heavy mod setups (Alex)",
+   "type": "end-user",
+   "touches": "Their crashing mod setup, and the help they look for",
+   "stakes": "Finding out whether it is just them, whether there is a fix, and showing someone who can help"
+  },
+  {
+   "name": "Mod authors (Sarah)",
+   "type": "human",
+   "touches": "The mods they make, and the crash reports and payment that come back to them",
+   "stakes": "Real data instead of 'idk', fair pay, and the decision to delete their own work"
+  },
+  {
+   "name": "Community leaders of modding groups and guilds",
+   "type": "human",
+   "touches": "Their group's home",
+   "stakes": "A home a platform can't take away, after being displaced again and again"
+  },
+  {
+   "name": "Staff who moderate",
+   "type": "human",
+   "touches": "Content and communities",
+   "stakes": "Removing only what is actually illegal"
+  },
+  {
+   "name": "Developers building on it",
+   "type": "human",
+   "touches": "Ezmode, as something to build on",
+   "stakes": "unknown"
+  }
+ ],
+ "consumers": [
+  {
+   "name": "Developers building on it",
+   "relationship": "build on ezmode",
+   "status": "not-built"
+  }
+ ],
+ "evidence": {
+  "lenses": [],
+  "needs_crawl": true,
+  "crawl_topic": "game modders: crashes, mod authors' pay and data, community platforms displacing modding groups"
+ },
+ "open_questions": []
+}

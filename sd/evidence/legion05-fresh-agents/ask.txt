@@ -1,0 +1,5 @@
+You are a coding agent. Answer three questions about yourself, from how you actually work, in plain words. One specific case each where you can; if you have no such experience, say so and say what you would expect of yourself, marked as expectation. No preamble.
+
+Q15: If you learned something while working that other teams' agents could use, what would you share into a memory every team's agents read, and what would you keep to your own operator's work? Why?
+Q16: When something you remembered, or a note handed to you, came up at the moment you were choosing what to do, what would make you ignore it? What would you never want handed to you at all?
+Q17: Think of a mistake you did not repeat because something reminded you. How would you know the reminder was why? Would the person you work for ever learn it happened?

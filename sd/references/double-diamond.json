@@ -1,0 +1,46 @@
+{
+ "meta": {
+  "type": "reference",
+  "owner": "legion",
+  "author": "legion",
+  "surface": "legion",
+  "status": "adopted"
+ },
+ "title": "The double diamond, and where you are in it",
+ "slug": "double-diamond",
+ "domain": "service-design",
+ "audience": "every agent in the double diamond, read first",
+ "sections": [
+  {
+   "heading": "What service design is",
+   "body": "Service design is organizing a service's people, props and processes, together with the people who deliver it and use it, so the experience works for the staff directly and for the customers through them. It covers what happens to someone as they move through the service over time: everyone and everything they meet, what they see, what happens out of their sight, and how it feels at the moments that decide whether they stay. It is grounded in research into how things really are, and it stays at the service's altitude: the service, not the machine. Here the customer and the staff may be agents."
+  },
+  {
+   "heading": "Where you are",
+   "body": "FIRST DIAMOND: the design discovery workshop, where we understand the problem and the service as it is today. Everything in it is discovery.\n1. Intent (not-hotdog, with the operator): the why, and nothing to build.\n2. Stories (sd-stories): the questions the intent raises, asked of every actor and the neighbouring experts in their own communities, answered as real stories in their own words.\n3. Personas, journeys, blueprints (sd-write-persona, sd-write-journey, sd-write-blueprint): the current state, drawn from the stories.\n4. Ecosystem (sd-ecosystem-imagine): written last, as the reward: what flows between whom, and where it crosses boundaries.\nSECOND DIAMOND: design, where what was discovered gets understood by building it small.\n5. Develop: several different answers to what the workshop found, each built as a toy against the real system and tried with the people and agents it is for; learn what the base (rafters, platform, the legion crates) can actually do.\n6. Deliver: what the toys proved: the design of the solution, with its evidence, and what the toys ruled out.\nTHEN, TECHNICAL DELIVERY: the spec, written from what the toys proved; then issues, code, review, verify.\nDo this well, and then there will be code."
+  },
+  {
+   "heading": "Your input and output",
+   "body": "| Step | Agent | Input | Output |\n|---|---|---|---|\n| 1 | not-hotdog, with the operator | the operator's words | Intent, plus parked notes for the spec agents |\n| 2 | sd-stories | Intent | Discovery: questions, citations, stories, persona and journey material |\n| 3a | sd-write-persona | Discovery, one persona group | Persona |\n| 3b | sd-write-journey | Persona, Discovery | Journey |\n| 3c | sd-write-blueprint | Journey, Discovery, Intent | Blueprint (current state) |\n| 4 | sd-ecosystem-imagine | Intent, Discovery, every persona, journey and blueprint | Ecosystem |\n| 5-6 | toy agents (second diamond) | the finished workshop | toys with measurements; the design they proved, and what they ruled out |\n| then | spec writer (technical delivery) | the second diamond's proven design | the spec |\n| then | issue writer, builders | spec | issues, code |\nYour input is exactly your row: document ids, and nothing else. Your output is one document, landed and validated; then you stop."
+  },
+  {
+   "heading": "At every step",
+   "body": "Stay at your altitude. Cite what you claim. Mark what exists as existing and what is planned as planned. Ask the world what it can answer; bring the operator only strategy and values choices, each with a recommendation."
+  }
+ ],
+ "sources": [
+  {
+   "citation": "Design Council, The Double Diamond",
+   "url": "https://www.designcouncil.org.uk/our-resources/the-double-diamond/"
+  },
+  {
+   "citation": "NN/g, Service Design 101",
+   "url": "https://www.nngroup.com/articles/service-design-101/"
+  },
+  {
+   "citation": "Stickdorn et al., This Is Service Design Doing (2018)",
+   "url": "https://www.thisisservicedesigndoing.com/"
+  }
+ ],
+ "exemplars": []
+}

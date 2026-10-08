@@ -1,0 +1,6323 @@
+{
+ "meta": {
+  "title": "Discovery: Control: ezmode",
+  "status": "draft",
+  "date": "2026-10-06",
+  "author": "sd-stories",
+  "intent": "01a11327-eadb-7e02-b6bc-eb3ece0533bf",
+  "rounds": 3
+ },
+ "sources": [
+  {
+   "name": "GitHub issue trackers (REST search via gh api, full threads via the issues and comments endpoints)",
+   "sampled": 20,
+   "defects": [
+    "sample 'crash modpack' (20 issues): 20/20 on topic, but 17/20 Minecraft, so the source skews to Minecraft modpacks over Bethesda heavy setups",
+    "logs offloaded to external pastes (mclo.gs, gist, pastebin, gnomebot, p.kdan.dev) in 9/20; pastes can expire, so the data a report carried may no longer be reachable",
+    "forced issue templates leave '_No response_' fields in 6/20; the player's own words are often one line inside a template",
+    "1/20 author shown as 'ghost' (deleted account)",
+    "5/20 dated before 2023; older reports describe tool versions since replaced",
+    "2026 issues increasingly carry AI-written analyses and some repos are written by AI agents end to end (seen in roughly 1 in 10 Skyrim crash issues read and in most 'nexus api' results); only the person's own lines are cited",
+    "one tracker per repo; counted here as one family (GitHub issue trackers) so that several repos never make a second family"
+   ]
+  },
+  {
+   "name": "Hacker News (Algolia search API and Firebase item API, read through WebFetch)",
+   "sampled": 20,
+   "defects": [
+    "sample 'mod crash' comments (20): 4/20 on game mods; 16/20 off topic (hardware mods, cars, browsers)",
+    "story titles sometimes '[dead]'; one hit was a pasted Nexus announcement (context, not evidence)",
+    "comment tree fetches (items endpoint) are truncated by the fetch tool, so a fetch that reports no matching comments is not evidence of silence; such searches are marked unreliable in the trails",
+    "dates are per comment and reliable; text verified through the Firebase item endpoint"
+   ]
+  },
+  {
+   "name": "Lemmy/threadiverse (lemmy.world search API, per-comment API on the origin instance)",
+   "sampled": 20,
+   "defects": [
+    "sample 'modding discord' comments (20): 6/20 use 'modding' to mean moderating",
+    "instances die: lemmyonline.com no longer serves comments (lemmy.world copies used), lemmy.one returned 522, kbin.social is gone",
+    "'guilded' searches return mostly 'gilded age' misspellings (18/20 off topic)",
+    "search results read through a summarizing model truncate content; every cited comment was re-fetched from the per-comment endpoint"
+   ]
+  },
+  {
+   "name": "Steam Community discussions (read through WebFetch)",
+   "sampled": 3,
+   "defects": [
+    "three threads read (about 25 posts); two fetches returned only the page chrome (Skyrim app 72850 threads) so the Skyrim forum stayed out of reach",
+    "the fetch tool summarizes posts; one first-hand passage was re-fetched for exact text",
+    "most replies in the sampled threads were advice or second-hand recollection rather than first-hand accounts"
+   ]
+  },
+  {
+   "name": "STEP Modifications forum (read through WebFetch)",
+   "sampled": 2,
+   "defects": [
+    "two threads read (16 posts); search pages not fetched, threads found through web search",
+    "the fetch tool invented a post: its first summary of thread 20025 gave z929669 a Sept 23 reply ('Perhaps. Maybe report it on that mod page') that the string-check showed is not on the page; every STEP quote cited was string-checked",
+    "logs linked off-site"
+   ]
+  },
+  {
+   "name": "Roblox DevForum (Discourse JSON, read through WebFetch)",
+   "sampled": 2,
+   "defects": [
+    "two topics read (about 24 posts of 223); only the first page of the 221-post announcement topic was reached",
+    "voices are Roblox creators who used Guilded, not modding groups",
+    "many posts are one-line farewells without an experience"
+   ]
+  },
+  {
+   "name": "EndeavourOS forum (Discourse JSON)",
+   "sampled": 1,
+   "defects": [
+    "one topic, 7 posts; a Linux project community, not a modding group"
+   ]
+  },
+  {
+   "name": "General web search (WebSearch)",
+   "sampled": 12,
+   "defects": [
+    "returns a model summary plus links; summaries were used only to find places, never cited",
+    "many hits are SEO or AI-written pages (Discord-alternative listicles, 'how much does CurseForge pay' explainers); none cited",
+    "press articles quote authors (Arthmoor, 2021) second-hand; kept as context"
+   ]
+  },
+  {
+   "name": "WebFetch path (all non-GitHub pages)",
+   "sampled": 0,
+   "defects": [
+    "passes pages through a small model that paraphrases, inserts ellipses, and once invented a post; every cited quote from this path was either fetched from a per-item API in exact form or string-checked in a second fetch"
+   ]
+  },
+  {
+   "name": "Reddit (r/skyrimmods, r/feedthebeast and others)",
+   "sampled": 0,
+   "defects": [
+    "unreachable: WebFetch is refused for reddit.com, redlib/libreddit mirrors returned 403 or TLS errors, arctic-shift returned 422, and a direct network fetch needs the operator's approval; the largest player and author community is therefore absent from this record"
+   ]
+  },
+  {
+   "name": "Nexus Mods site and forums",
+   "sampled": 0,
+   "defects": [
+    "unreachable: every page returned 403; mod-page posts tabs, author About pages and the 2021 announcement comments are absent"
+   ]
+  },
+  {
+   "name": "Discord servers",
+   "sampled": 0,
+   "defects": [
+    "not searchable from outside; the place where much mod support now happens (see Q14) is invisible to this record"
+   ]
+  },
+  {
+   "name": "eavesdrop corpus",
+   "sampled": 0,
+   "defects": [
+    "not used: under refactor and not trustworthy as of 2026-10-05 (threaded replies misattributed), per the run instructions"
+   ]
+  }
+ ],
+ "questions": [
+  {
+   "id": "Q1",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[0]",
+   "question": "When a heavily modded game crashes, what do players do next, and how do they work out whether it is just them?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "STEP Modifications forum",
+     "url": "https://stepmodifications.org/forum/",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "r/feedthebeast",
+     "url": "https://www.reddit.com/r/feedthebeast/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: '\"no idea why\" crash mod is:issue' (20 read)",
+     "GitHub issues: 'crash log skyrim CTD is:issue' (15 read)",
+     "GitHub issues: '\"just me\" crash mod is:issue' (20 read)",
+     "GitHub issues: 'repo:wabbajack-tools/wabbajack crash game is:issue' (15 read)",
+     "GitHub issues: 'crash modpack' source sample (20 read)",
+     "web: 'stepmodifications.org forum CTD crash log \"I have no idea\"' then 2 STEP threads read in full",
+     "HN Algolia: 'mod crash' comments (20 read)",
+     "opposite direction, GitHub: '\"that fixed it\" crash mod in:comments created:>2025-06-01' (15 titles, 3 threads read): found crashes that went away fast once an author or upstream shipped an update (C82), which bears on Q5, not on what players do first",
+     "Reddit r/skyrimmods: unreachable"
+    ],
+    "read": 128,
+    "on_question": 26
+   },
+   "evidence": [
+    "C1",
+    "C2",
+    "C4",
+    "C5",
+    "C7",
+    "C10",
+    "C11",
+    "C16",
+    "C32",
+    "C33",
+    "C34",
+    "C38",
+    "C53",
+    "C57",
+    "C61",
+    "C91"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 13,
+   "families": 3,
+   "family_names": [
+    "GitHub issue trackers",
+    "Hacker News",
+    "STEP Modifications forum"
+   ],
+   "answer": "as of 2026-10-06: Players work it out alone first. They switch mods off one by one or back out what they just added (C1, C2, C57, C61), search the crash text for someone else's post (C33), or hand the log to an AI (C4, C57). Most cannot read the log themselves (C7, C32). They suspect their own setup and apologise for asking (C2, C53). It costs them hours or a whole evening (C10, C38). Finding another person's report of the same crash brings relief: 'so it's not just me, that's good' (C10). No first-hand account found says the first move was different.",
+   "spawned": [
+    "Q15",
+    "Q16",
+    "Q17"
+   ]
+  },
+  {
+   "id": "Q2",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "actors[0].stakes",
+   "question": "Where do players take a crash for help, and what happens when they show it to someone?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "STEP Modifications forum",
+     "url": "https://stepmodifications.org/forum/",
+     "in_lens": false
+    },
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: threads read in full (Wabbajack #2627, Seb263 #80, Fuzss #166, Lucis #8, VFXEditor #338, Unicopia #602)",
+     "GitHub issues: '\"can't help without\" log crash mod in:comments' (6 read)",
+     "GitHub issues: '\"need the crash log\" mod in:comments' (20 titles, 4 threads read)",
+     "STEP forum: 2 threads read in full",
+     "Lemmy: 'modding discord' comments (20 read)",
+     "opposite direction: looked for players who were helped on the first try; found one (C9), where another mod's author pinpointed the cause once better logging was on"
+    ],
+    "read": 62,
+    "on_question": 18
+   },
+   "evidence": [
+    "C3",
+    "C5",
+    "C6",
+    "C9",
+    "C20",
+    "C32",
+    "C35",
+    "C46",
+    "C47",
+    "C48",
+    "C54",
+    "C55",
+    "C92"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 7,
+   "families": 3,
+   "family_names": [
+    "GitHub issue trackers",
+    "Lemmy/threadiverse",
+    "STEP Modifications forum"
+   ],
+   "answer": "as of 2026-10-06: Help is spread across a modlist's Discord, each mod's tracker, host comment threads and forums (C5, C20). Players get sent somewhere else, either 'not a WJ issue' (C6) or 'report to connector first' (C55). Some wait with no answer (C5, C48). They are asked for logs they do not know how to find (C46, C47). When the right person sees good data, the cause can be found at once (C9). The STEP forum's administrator, who helps players, says crash logs are mostly beyond them too (C35, maintainer).",
+   "spawned": [
+    "Q14",
+    "Q15"
+   ]
+  },
+  {
+   "id": "Q3",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[1]",
+   "question": "What reaches mod authors when a player reports a crash, and what do they do with it?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "r/feedthebeast",
+     "url": "https://www.reddit.com/r/feedthebeast/",
+     "in_lens": false
+    },
+    {
+     "name": "Planet Minecraft blogs",
+     "url": "https://www.planetminecraft.com/blogs/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: '\"can't help without\" log crash mod in:comments' (6 read)",
+     "GitHub issues: '\"need the crash log\" mod in:comments' (20 titles, 4 threads read)",
+     "GitHub issues: '\"not enough information\" crash mod in:comments' (20 titles, 1 read)",
+     "GitHub issues: '\"idk\" \"game crashed\" mod is:issue' (15 read)",
+     "STEP forum: 2 threads read",
+     "Nexus mod-page posts tabs and author About pages: unreachable (403)",
+     "opposite direction: reports that arrived complete and were fixed fast (C84) found on GitHub only"
+    ],
+    "read": 71,
+    "on_question": 12
+   },
+   "evidence": [
+    "C17",
+    "C18",
+    "C45",
+    "C50",
+    "C51",
+    "C52",
+    "C55",
+    "C84"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 4,
+   "families": 1,
+   "family_names": [
+    "GitHub issue trackers"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Mod authors: when someone reports a crash with one of your mods, what usually reaches you, and where does it reach you (Nexus posts, DMs, Discord, GitHub)? What do you do with a report that says only 'it crashed'? I'm trying to understand what authors actually deal with, not to pitch anything."
+    },
+    {
+     "place": "Nexus Mods forums",
+     "wording": "For mod authors: what does a typical crash report on your mod page look like, and how much of your modding time goes to them? An example of a good one and a bad one would help."
+    },
+    {
+     "place": "r/feedthebeast",
+     "wording": "Mod devs: crash reports here often come with mclo.gs links from Crash Assistant. Has that changed what you get and what you can do with it, compared with before?"
+    }
+   ],
+   "spawned": [
+    "Q15",
+    "Q19"
+   ]
+  },
+  {
+   "id": "Q4",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[1]",
+   "question": "What do mod authors get back from their mods (money, points, perks), and how do they feel about it?",
+   "places": [
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "r/modding",
+     "url": "https://www.reddit.com/r/modding/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "web: 'mod author how much I earned from Nexus Mods donation points per download' (10 links, all Nexus announcements, none first-hand)",
+     "web: '\"CurseForge\" rewards points mod author pennies earnings blog' (10 links; program pages and explainers)",
+     "web: '\"my mods\" earned \"a month\" Nexus donation points' (9 links; one Steam thread read, no first-hand author answers)",
+     "web: 'modder blog \"donation points\" how much I made' (9 links; PC Gamer feature second-hand; itch.io post off topic)",
+     "HN Algolia: '\"donation points\"' (1 hit, off topic) and '\"my mods\"' (screened by fetch-model filter, 4 returned)",
+     "Lemmy: 'nexus mods' (screened by fetch-model filter, 2 returned), 'paid mods mod author' (screened, 0 returned), 'as a modder' (screened, 1 returned)",
+     "GitHub issues: '\"donation points\" nexus' (20 read), 'curseforge points earn mod author' (15 read), 'modrinth payout' (7 read)",
+     "planetminecraft.com author review: 403",
+     "opposite direction: authors saying money does not matter to them; found one (C25)"
+    ],
+    "read": 56,
+    "on_question": 5
+   },
+   "evidence": [
+    "C22",
+    "C23",
+    "C24",
+    "C25"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 1,
+   "families": 1,
+   "family_names": [
+    "Lemmy/threadiverse"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Mod authors, a frank question: what do your mods actually bring back to you each month (DP, Patreon, Ko-fi, nothing), and does that number change how you feel about modding or what you make next?"
+    },
+    {
+     "place": "r/feedthebeast",
+     "wording": "Mod devs on CurseForge or Modrinth: roughly what do your rewards come to, and is it something you count on, a nice extra, or something you ignore?"
+    },
+    {
+     "place": "Nexus Mods forums",
+     "wording": "Authors: since the 2024 Donation Points change, has what you receive moved for you? What did you expect, and what happened?"
+    }
+   ],
+   "spawned": [
+    "Q19"
+   ]
+  },
+  {
+   "id": "Q5",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[2]",
+   "question": "When a player hits a crash that someone has already worked out, do they find that answer, and how?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "STEP Modifications forum",
+     "url": "https://stepmodifications.org/forum/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: threads read in full (Pandora #504, Cardsauce #154, Hypixel overlay #2, BonsaiTrees #369, Splinecart #53, Lucis #8, Fuzss #166)",
+     "STEP forum: thread 20025 read in full",
+     "opposite direction, GitHub: '\"that fixed it\" crash mod in:comments' and '\"found the fix\" crash mod in:comments' (30 titles, 3 threads read); one crash was fixed upstream within two days (C82)"
+    ],
+    "read": 58,
+    "on_question": 16
+   },
+   "evidence": [
+    "C8",
+    "C10",
+    "C12",
+    "C13",
+    "C14",
+    "C15",
+    "C19",
+    "C33",
+    "C49",
+    "C58",
+    "C60",
+    "C79",
+    "C82"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 12,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "STEP Modifications forum"
+   ],
+   "answer": "as of 2026-10-06: Sometimes, and late. The answer sits in an issue thread, a CurseForge or Nexus comment, or someone's forum post. The next player finds it after an hour of testing (C10), by searching the exact crash text (C33), or months into a thread (C13, C15). Others add 'same issue' and wait (C8, C49), route around the crash (C12, C58), or point the next player to a replacement (C19). Players who find a workaround do not know what it costs them (C15). A comment holding a fix seemed to vanish from Nexus (C14); the tool's author said they do not delete comments (C79, maintainer). The other direction: when an upstream author keeps shipping updates, the crash can simply go away (C82).",
+   "spawned": [
+    "Q17"
+   ]
+  },
+  {
+   "id": "Q6",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[3]",
+   "question": "What did mod authors and players live through when Nexus stopped letting authors delete their files in 2021?",
+   "places": [
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "AFK Mods forum",
+     "url": "https://www.afkmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Steam Community discussions (Skyrim, Fallout 4)",
+     "url": "https://steamcommunity.com/app/377160/discussions/",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "web: '\"why I left nexus\" OR \"I deleted all my mods\" OR \"removing my mods from nexus\" collections 2021' (10 links; press and Steam threads)",
+     "web: 'mod author blog leaving Nexus Mods archive my files can't delete' (9 links; press)",
+     "web: 'Arthmoor afkmods leaving Nexus statement 2021' (9 links; press quotes only)",
+     "HN Algolia: 'nexus mods' comments Jul-Sep 2021 (4 hits read; one pasted announcement, one opinion)",
+     "HN story 27724152 (Kotaku, 1 comment) and 27701514 (0 comments)",
+     "Steam: 'Mods that were deleted From Nexus' (FO4) read; Skyrim thread 3049485912450678259 returned only page chrome",
+     "Nexus forums thread 10746773: 403",
+     "GitHub issues: 'nexus mods \"delete\" \"my mods\" collections' (20 read), '\"removed from nexus\" mod' (20 read)"
+    ],
+    "read": 52,
+    "on_question": 4
+   },
+   "evidence": [
+    "C30",
+    "C37"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 2,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "Steam Community discussions"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "For authors who were around in July-August 2021: when Nexus announced files would be archived instead of deleted, what did you do (stay, request deletion before Aug 5, move to AFK Mods or elsewhere), and how do you see it now?"
+    },
+    {
+     "place": "AFK Mods forum",
+     "wording": "Authors who moved work here around the 2021 Nexus archive change: what made you move, what did it cost you in reach or contact with players, and would you choose the same again?"
+    },
+    {
+     "place": "Nexus Mods forums",
+     "wording": "Players: did a mod or list you relied on break in 2021 when authors pulled files before the archive change? What happened next?"
+    }
+   ],
+   "spawned": [
+    "Q18"
+   ]
+  },
+  {
+   "id": "Q7",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[3]",
+   "question": "When the community platform a gaming group lived on closed in 2025 (read here as Guilded, shut by Roblox on 2025-12-19), what did the group's leaders and members do and feel?",
+   "places": [
+    {
+     "name": "Roblox DevForum (Guilded shutdown threads)",
+     "url": "https://devforum.roblox.com/t/update-on-guilded-and-communities/3966775",
+     "in_lens": false
+    },
+    {
+     "name": "r/Guilded",
+     "url": "https://www.reddit.com/r/Guilded/",
+     "in_lens": false
+    },
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "web: 'Guilded shutting down 2025 communities moving' (9 links; news and Roblox announcement)",
+     "web (extended): '\"guilded\" shutting down \"our server\" moving guild community' (10 links; Patreon post 403)",
+     "web (extended): '\"our guild\" OR \"our clan\" moved from Guilded' (9 links; one DevForum topic read)",
+     "Roblox DevForum topic 3966775: first 24 posts read (page 1 of 221 posts); topic 3968539: 2 posts read",
+     "Lemmy: 'guilded' comments (20 read; 18 were 'gilded age')",
+     "AlternativeTo news comments: 1 comment, not first-hand"
+    ],
+    "read": 47,
+    "on_question": 6
+   },
+   "evidence": [],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 0,
+   "families": 0,
+   "family_names": [],
+   "ask": [
+    {
+     "place": "r/Guilded",
+     "wording": "If you ran a gaming group or modding server on Guilded until it closed in December 2025: where did your group go, who came with you, and what did you lose on the way (history, members, bots, files)?"
+    },
+    {
+     "place": "r/skyrimmods",
+     "wording": "Did any modding group you belonged to live on Guilded? What happened to it when Guilded shut down?"
+    }
+   ],
+   "spawned": [
+    "Q20"
+   ]
+  },
+  {
+   "id": "Q8",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "current_state.real[3]",
+   "question": "When Discord began demanding face or ID checks in 2026, what did modding groups and their leaders do and feel?",
+   "places": [
+    {
+     "name": "r/discordapp",
+     "url": "https://www.reddit.com/r/discordapp/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "EndeavourOS forum",
+     "url": "https://forum.endeavouros.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "HN Algolia: 'discord age verification' stories since 2026-01-01 (10 listed); trees 46995046 and 47021421 screened by fetch-model filter (0 and 4 returned; trees truncated, unreliable for silence)",
+     "Lemmy: 'discord age verification server' (screened by fetch-model filter, 5 returned, none modding), 'mod discord verification' (screened, 0 returned)",
+     "web (extended): 'modding community server leaving Discord age verification 2026' (9 links; listicles)",
+     "EndeavourOS forum topic 81618 read (7 posts)",
+     "GitHub issues: 'discord \"age verification\" mod created:>2026-01-01' (25 read; none first-hand modding)"
+    ],
+    "read": 41,
+    "on_question": 5
+   },
+   "evidence": [],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 0,
+   "families": 0,
+   "family_names": [],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Modlist and mod authors who run Discord servers: did Discord's 2026 age checks change anything for your server (members dropping, moving support elsewhere, nothing)? What did you decide and why?"
+    },
+    {
+     "place": "r/feedthebeast",
+     "wording": "Modpack servers and mod devs: when Discord turned age checks back on in September 2026, did you or your members get asked, and did anyone leave or move?"
+    },
+    {
+     "place": "Lemmy: lemmy.world",
+     "wording": "Anyone who ran a modding or gaming server on Discord: what did you do when the face/ID checks arrived, and who followed you if you moved?"
+    }
+   ],
+   "spawned": [
+    "Q20"
+   ]
+  },
+  {
+   "id": "Q9",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "direction.proposals[2]",
+   "question": "Why do mod authors take down their own work, and what happens to them and to players when they do or cannot?",
+   "places": [
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "AFK Mods forum",
+     "url": "https://www.afkmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: '\"no longer\" \"on nexus\" mod author' (20 read), '\"removed from nexus\" mod' (20 read)",
+     "web searches as in Q6 (press only for authors' reasons)",
+     "Steam FO4 'Mods that were deleted From Nexus' (author's reasons given second-hand)"
+    ],
+    "read": 52,
+    "on_question": 4
+   },
+   "evidence": [
+    "C30",
+    "C31",
+    "C69"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 1,
+   "families": 1,
+   "family_names": [
+    "GitHub issue trackers"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Authors who have hidden or deleted a mod: what made you do it, and what happened afterwards with the people who used it?"
+    },
+    {
+     "place": "Nexus Mods forums",
+     "wording": "Mod authors: have you ever wanted to remove something you made and been unable to? What was the situation?"
+    }
+   ],
+   "spawned": [
+    "Q18"
+   ]
+  },
+  {
+   "id": "Q10",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "direction.proposals[3]",
+   "question": "What do authors and players go through when a host removes a mod or a comment?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Steam Community discussions (Skyrim, Fallout 4)",
+     "url": "https://steamcommunity.com/app/377160/discussions/",
+     "in_lens": false
+    },
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: '\"removed from nexus\" mod' (20 read; JumpSpace #2 read in full)",
+     "Steam FO4 'Mods that were deleted From Nexus' read",
+     "opposite direction, Lemmy: 'nexus removed mod' comments (screened by fetch-model filter, 0 returned): no first-person account of being glad a removal happened was surfaced; the filter path can omit, so this silence is weak",
+     "Lemmy: 'nexus mods' comments (screened by fetch-model filter, 2 returned)"
+    ],
+    "read": 34,
+    "on_question": 6
+   },
+   "evidence": [
+    "C14",
+    "C28",
+    "C29",
+    "C36",
+    "C79",
+    "C80"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 5,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "Steam Community discussions"
+   ],
+   "answer": "as of 2026-10-06: Authors get a reason that makes no sense to them: 'mod interferes with multiplayer persistence, whatever that means' (C28). Players find the mod gone and go to the author's own tracker to ask why (C29, C80). An author who stays describes living with 'the sword of Damocles' of an arbitrary ban (C36). A player believed a comment holding a fix had been removed (C14); the tool author answered that they do not delete comments on Nexus (C79, maintainer). No first-hand account of welcoming a removal was found; this record holds only the side of those who lost something.",
+   "spawned": [
+    "Q18"
+   ]
+  },
+  {
+   "id": "Q11",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "actors[3]",
+   "question": "What do people who moderate modding and gaming communities go through in that work?",
+   "places": [
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "Lemmy: 'modding discord' comments (20 read; 6 about moderating)",
+     "Lemmy: per-comment fetches of 3 moderator accounts (one instance down, 522)"
+    ],
+    "read": 23,
+    "on_question": 3
+   },
+   "evidence": [
+    "C77",
+    "C78"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 2,
+   "families": 1,
+   "family_names": [
+    "Lemmy/threadiverse"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Moderators of modding subs, servers or forums: what takes most of your time, what wears you down, and what makes it worth doing?"
+    },
+    {
+     "place": "Nexus Mods forums",
+     "wording": "Volunteer moderators and support helpers: what do you see that users never see, and how do you decide what stays?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q12",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "actors[4]",
+   "question": "What do people who build tools on top of mod hosts go through with the hosts they depend on?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "Wabbajack issue tracker",
+     "url": "https://github.com/wabbajack-tools/wabbajack/issues",
+     "in_lens": false
+    },
+    {
+     "name": "Vortex issue tracker",
+     "url": "https://github.com/Nexus-Mods/Vortex/issues",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: 'nexus api approval \"application\" mod manager' (20 read; most AI-agent specs)",
+     "GitHub issues: 'nexus api \"premium\" download links third-party manager' (15 read; off topic)",
+     "GitHub: Ajour #746 read in full (2021)",
+     "HN: comment 48128473 read"
+    ],
+    "read": 37,
+    "on_question": 3
+   },
+   "evidence": [
+    "C26",
+    "C74"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 1,
+   "families": 1,
+   "family_names": [
+    "Hacker News"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "People who have built a mod manager, installer or helper tool on top of Nexus, CurseForge or Modrinth: what was it like depending on their API or terms? Anything that changed under you?"
+    },
+    {
+     "place": "Wabbajack issue tracker",
+     "wording": "Maintainers: which changes on the hosts' side have cost you the most work or support load in the last two years?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q13",
+   "round": 1,
+   "kind": "people",
+   "raised_by": "direction.proposals[0]",
+   "question": "Which tools do players use together for a heavy setup, and where do they end up carrying things between them by hand?",
+   "places": [
+    {
+     "name": "Wabbajack issue tracker",
+     "url": "https://github.com/wabbajack-tools/wabbajack/issues",
+     "in_lens": false
+    },
+    {
+     "name": "Vortex issue tracker",
+     "url": "https://github.com/Nexus-Mods/Vortex/issues",
+     "in_lens": false
+    },
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: 'repo:wabbajack-tools/wabbajack \"no longer available\" OR \"deleted\" OR \"hidden\" mod nexus' (20 read)",
+     "GitHub issues: Vortex #23046, #21283 read in full",
+     "HN: comments 44299347, 44299328, 48128473 read",
+     "opposite direction, HN: found a player for whom the tool does carry everything (C81, Steam Workshop)"
+    ],
+    "read": 46,
+    "on_question": 13
+   },
+   "evidence": [
+    "C7",
+    "C16",
+    "C38",
+    "C47",
+    "C64",
+    "C65",
+    "C66",
+    "C67",
+    "C68",
+    "C69",
+    "C74",
+    "C81"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 10,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "Hacker News"
+   ],
+   "answer": "as of 2026-10-06: A heavy setup crosses a mod host, a manager or installer, a launcher and often a crash logger and a list. The joins fail in ways players cannot see. An installer silently logs them out of the host and the install fails into a rate-limit wait (C64, C65, C67). A launcher keeps logs where the instructions don't look (C47). A manager's folder breaks a mod (C7). Deleted mods surface as bare numbers (C69). A behaviour tool's crash forces a manual rebuild with an older tool (C16). Some players install by hand (C38, C74). These failures are where players say they will drop a tool (C66, C68). The other direction: where one tool does carry everything, players call it the 'killer feature' (C81).",
+   "spawned": [
+    "Q15",
+    "Q18"
+   ]
+  },
+  {
+   "id": "Q14",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L2",
+   "question": "Where does help and news for a mod live, and what is it like for players when it lives in a chat server?",
+   "places": [
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "Lemmy: 'modding discord' comments (20 read) and per-comment fetches (5)",
+     "GitHub issues: threads with Discord links read (Wabbajack #2110, #2627, StationTimetable #2)",
+     "HN: comment 47022252 read",
+     "opposite direction, Lemmy: looked for players who find chat support works for them; found only general statements without an experience (e.g. 'Game modding + Discord have brewed many friendships'), not citation-worthy"
+    ],
+    "read": 29,
+    "on_question": 9
+   },
+   "evidence": [
+    "C5",
+    "C20",
+    "C62",
+    "C70",
+    "C71",
+    "C72",
+    "C73"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 7,
+   "families": 3,
+   "family_names": [
+    "GitHub issue trackers",
+    "Hacker News",
+    "Lemmy/threadiverse"
+   ],
+   "answer": "as of 2026-10-06: Help and news for many mods live in Discord servers. Players join dozens of servers to reach support, one says over 100 of their 200 (C20). Others join a server 'just to download a single goddamn mod' (C70) or find a game's whole modding scene only in chat (C71, C72). What is said there cannot be found by search (C70). Crash reports end up as links into Discord threads that the author has to be in to read (C62). Questions there can go unanswered (C5). When the platform itself turns hostile, people who followed projects there leave (C73).",
+   "spawned": [
+    "Q20"
+   ]
+  },
+  {
+   "id": "Q15",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L3",
+   "question": "What do players go through to find a crash log, read it, and get it to someone who can use it?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "STEP Modifications forum",
+     "url": "https://stepmodifications.org/forum/",
+     "in_lens": false
+    },
+    {
+     "name": "r/feedthebeast",
+     "url": "https://www.reddit.com/r/feedthebeast/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub threads read in full: Fuzss #166, AutoIMM #1, Aquamirae #41",
+     "STEP thread 20025",
+     "GitHub source sample 'crash modpack' (20): 9/20 attach logs as paste links"
+    ],
+    "read": 26,
+    "on_question": 7
+   },
+   "evidence": [
+    "C32",
+    "C46",
+    "C47",
+    "C61",
+    "C83",
+    "C93",
+    "C94"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 4,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "STEP Modifications forum"
+   ],
+   "answer": "as of 2026-10-06: Many players cannot find the log (C46). Their launcher puts it somewhere the instructions don't say (C47), or the game closes and leaves nothing behind (C61). When they have a log they mostly cannot read it ('I really don't know what to look for', C32) and pass it on unread as paste links (C83). One player who was asked for a log posted one fifteen days later (C94).",
+   "spawned": [
+    "Q16"
+   ]
+  },
+  {
+   "id": "Q16",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L5",
+   "question": "How are players using AI to read crash logs, and what happens when they bring its analysis to a mod author?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "r/feedthebeast",
+     "url": "https://www.reddit.com/r/feedthebeast/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: '\"chatgpt\" crash log mod is:issue created:>2025-01-01' (20 read)",
+     "GitHub issues: '\"according to chatgpt\" OR \"chatgpt says\" OR \"chatgpt said\" crash mod' (20 read)",
+     "Lemmy: 'chatgpt crash log' comments (screened by fetch-model filter, 0 first-hand returned)",
+     "HN Algolia: 'crash log mods chatgpt' (0 hits)"
+    ],
+    "read": 40,
+    "on_question": 6
+   },
+   "evidence": [
+    "C4",
+    "C56",
+    "C57",
+    "C59"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 4,
+   "families": 1,
+   "family_names": [
+    "GitHub issue trackers"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Has anyone used ChatGPT, Claude or similar to read a Crash Logger log? Did it find the actual cause, and if you passed its analysis to the mod author, how did that go?"
+    },
+    {
+     "place": "r/feedthebeast",
+     "wording": "Mod devs: are you getting crash reports with an AI analysis attached? Does it help, get in the way, or make no difference?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q17",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L4",
+   "question": "How long does a known crash stay a problem for the next players, and what do they do in the meantime?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "STEP Modifications forum",
+     "url": "https://stepmodifications.org/forum/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub threads read in full: Pandora #504 (Aug 2025 to Mar 2026), BonsaiTrees #369, Cardsauce #154, Hypixel overlay #2",
+     "STEP thread 20025 (9 days)",
+     "opposite direction: Lethal-Reloaded #44 and MalisisDoorsReborn #8, fixed within two days"
+    ],
+    "read": 24,
+    "on_question": 11
+   },
+   "evidence": [
+    "C8",
+    "C11",
+    "C12",
+    "C13",
+    "C15",
+    "C16",
+    "C19",
+    "C34",
+    "C58",
+    "C82",
+    "C84"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 11,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "STEP Modifications forum"
+   ],
+   "answer": "as of 2026-10-06: A known crash can stay open for months. One Skyrim crash at Helgen ran from August 2025 to March 2026 with players confirming it version after version (C11, C16) until a workaround surfaced (C13). Meanwhile players skip the part of the game that crashes (C12), remove the mod (C58), switch to a replacement (C19), add 'same issue' and wait (C8), or accept a fix whose side effects they cannot judge (C15). Even when a fix is found the crashes can return (C34). The other direction: when the author is reachable and gets the data, the fix can ship in two days (C84, C82).",
+   "spawned": []
+  },
+  {
+   "id": "Q18",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L7",
+   "question": "What happens to players and list curators when a mod they rely on disappears from its host?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Wabbajack issue tracker",
+     "url": "https://github.com/wabbajack-tools/wabbajack/issues",
+     "in_lens": false
+    },
+    {
+     "name": "Vortex issue tracker",
+     "url": "https://github.com/Nexus-Mods/Vortex/issues",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: Vortex #23046, Morrowind-2020 #149, JumpSpace #2, Wabbajack #2629 read",
+     "GitHub issues: 'collection \"hidden by the author\" OR \"mod was hidden\" nexus' (15 read; noise)"
+    ],
+    "read": 39,
+    "on_question": 5
+   },
+   "evidence": [
+    "C29",
+    "C30",
+    "C31",
+    "C63",
+    "C69"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 3,
+   "families": 1,
+   "family_names": [
+    "GitHub issue trackers"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Has a mod in your load order or modlist vanished from Nexus? How did you find out, and what did you do (find a copy, replace it, drop it)?"
+    },
+    {
+     "place": "Wabbajack issue tracker",
+     "wording": "List authors: when a mod in your list is hidden or deleted upstream, what does that mean for you and your users, and how often does it happen?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q19",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L6",
+   "question": "What do mod authors want back from the people who use their mods, besides money?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Steam Community discussions (Skyrim, Fallout 4)",
+     "url": "https://steamcommunity.com/app/377160/discussions/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub: Ajour #746 and MalisisDoorsReborn #8 read in full",
+     "Steam FO4 'Mods that were deleted From Nexus' read",
+     "opposite direction: looked for authors who want nothing back; found none"
+    ],
+    "read": 44,
+    "on_question": 5
+   },
+   "evidence": [
+    "C25",
+    "C36",
+    "C52"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 2,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "Steam Community discussions"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Mod authors: apart from money, what do you want back from the people who use your mods? Reports, thanks, people to find your work, something else? What's the best thing a user has ever done for you?"
+    },
+    {
+     "place": "Nexus Mods forums",
+     "wording": "Authors: what keeps you uploading here rather than somewhere else: the audience, the friends, the tools, the pay?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q20",
+   "round": 2,
+   "kind": "people",
+   "raised_by": "L8",
+   "question": "When a group's online home closes or changes its terms, what do its leaders and members stand to lose, and how do they decide whether to move? (Asked of neighbouring communities as well as modding ones.)",
+   "places": [
+    {
+     "name": "Roblox DevForum (Guilded shutdown threads)",
+     "url": "https://devforum.roblox.com/t/update-on-guilded-and-communities/3966775",
+     "in_lens": false
+    },
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "EndeavourOS forum",
+     "url": "https://forum.endeavouros.com/",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "Steam Community discussions (Skyrim, Fallout 4)",
+     "url": "https://steamcommunity.com/app/377160/discussions/",
+     "in_lens": false
+    },
+    {
+     "name": "r/Guilded",
+     "url": "https://www.reddit.com/r/Guilded/",
+     "in_lens": false
+    },
+    {
+     "name": "r/discordapp",
+     "url": "https://www.reddit.com/r/discordapp/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "Roblox DevForum topics 3966775 (24 posts) and 3968539 (2 posts)",
+     "Lemmy: 'discord age verification server' (screened by fetch-model filter, 5 returned)",
+     "EndeavourOS topic 81618 (7 posts)",
+     "HN tree 47021421 (screened by fetch-model filter, 4 returned; truncated)",
+     "Steam FO4 thread read"
+    ],
+    "read": 45,
+    "on_question": 9
+   },
+   "evidence": [
+    "C21",
+    "C36",
+    "C41",
+    "C42",
+    "C43",
+    "C44",
+    "C73",
+    "C75",
+    "C76"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 8,
+   "families": 5,
+   "family_names": [
+    "EndeavourOS forum",
+    "Hacker News",
+    "Lemmy/threadiverse",
+    "Roblox DevForum",
+    "Steam Community discussions"
+   ],
+   "answer": "as of 2026-10-06, mostly from neighbouring communities (Roblox creator groups, a Linux project, unspecified servers) because modding groups' own places were out of reach: leaders fear losing their group's history first (C75, C76). Some post where else people can find them before deciding (C21). Some say they will leave if the check reaches them, then comply when it does (C43, C44). Members who only followed projects onto a platform leave when it turns on them (C73). The one modding voice stays where their friends are, despite the risk (C36).",
+   "spawned": []
+  },
+  {
+   "id": "Q21",
+   "round": 3,
+   "kind": "people",
+   "raised_by": "persona P1 empty item: left_because",
+   "question": "What makes players give up on a mod, a tool, or a whole setup?",
+   "places": [
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "Hacker News",
+     "url": "https://news.ycombinator.com/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub issues: '\"gave up\" crash mods skyrim' (15 read)",
+     "GitHub issues: '\"back to vanilla\" crash mod' (15 read; none first-hand about leaving)",
+     "opposite direction, GitHub: '\"finally stable\" OR \"finally works\" crash mods modlist in:comments' (10 read; no first-hand account of a setup becoming stable)",
+     "earlier threads re-read for leaving moments (Pandora #504, Wabbajack #2697)"
+    ],
+    "read": 40,
+    "on_question": 7
+   },
+   "evidence": [
+    "C12",
+    "C16",
+    "C38",
+    "C58",
+    "C66",
+    "C85",
+    "C86",
+    "C87"
+   ],
+   "contradicting": [],
+   "status": "answered",
+   "few_voices": false,
+   "expert_only": false,
+   "authors": 7,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "Hacker News"
+   ],
+   "answer": "as of 2026-10-06: Players give up on one part of a setup: a tool whose crash breaks a scene they care about ('a deal braker for me', C16), a mod they remove until it is fixed (C58), an installer they will replace (C66). Whole setups are dropped after long fixing ('I tried to fix it for 30 hours and eventually decided to give up', C85, C86), or never get going (C87). Some keep the setup and play around the broken part (C12). The time it costs can leave no time to play (C38). No first-hand account of a setup becoming stable was found to set against these.",
+   "spawned": []
+  },
+  {
+   "id": "Q22",
+   "round": 3,
+   "kind": "people",
+   "raised_by": "persona P1/P2 empty items: changed_their_mind, relationship",
+   "question": "How did players come to running heavy setups, and what moment made a tool or a list become the one they rely on and recommend?",
+   "places": [
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Wabbajack issue tracker",
+     "url": "https://github.com/wabbajack-tools/wabbajack/issues",
+     "in_lens": false
+    },
+    {
+     "name": "r/feedthebeast",
+     "url": "https://www.reddit.com/r/feedthebeast/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub Ajour #746 re-read (2021, stale)",
+     "no 2024-2026 first-hand account found on reachable sources"
+    ],
+    "read": 20,
+    "on_question": 3
+   },
+   "evidence": [
+    "C88",
+    "C89",
+    "C90"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 0,
+   "families": 0,
+   "family_names": [],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "How did you end up running a big load order or a Wabbajack list? Was there a moment it clicked, when a tool or list became the one you'd recommend to a friend?"
+    },
+    {
+     "place": "r/feedthebeast",
+     "wording": "When did a launcher or pack become 'the one' for you, and what happened that made you trust it?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q23",
+   "round": 3,
+   "kind": "people",
+   "raised_by": "persona P3 empty items: changed_their_mind, relationship, left_because",
+   "question": "What moments make a mod author keep going, step back, or stop?",
+   "places": [
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    },
+    {
+     "name": "Nexus Mods forums",
+     "url": "https://forums.nexusmods.com/",
+     "in_lens": false
+    },
+    {
+     "name": "GitHub issue trackers (mod, modpack and mod-tool repos)",
+     "url": "https://github.com/search?type=issues",
+     "in_lens": false
+    },
+    {
+     "name": "r/feedthebeast",
+     "url": "https://www.reddit.com/r/feedthebeast/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "GitHub threads re-read (Hypixel overlay #2, Ajour #746)",
+     "Lemmy comments re-read (C22, C23)"
+    ],
+    "read": 12,
+    "on_question": 3
+   },
+   "evidence": [
+    "C18",
+    "C23"
+   ],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 2,
+   "families": 2,
+   "family_names": [
+    "GitHub issue trackers",
+    "Lemmy/threadiverse"
+   ],
+   "ask": [
+    {
+     "place": "r/skyrimmods",
+     "wording": "Authors: was there a moment that made you want to keep modding, or one that made you step back? What happened?"
+    },
+    {
+     "place": "r/feedthebeast",
+     "wording": "Mod devs who have paused or archived a mod: what was going on at the time, and what would have made a difference?"
+    }
+   ],
+   "spawned": []
+  },
+  {
+   "id": "Q24",
+   "round": 3,
+   "kind": "people",
+   "raised_by": "persona P4 empty items: relationship, left_because",
+   "question": "When a group leader moves the group to a new place, who follows, who is lost, and how does the group feel a year on?",
+   "places": [
+    {
+     "name": "r/Guilded",
+     "url": "https://www.reddit.com/r/Guilded/",
+     "in_lens": false
+    },
+    {
+     "name": "r/discordapp",
+     "url": "https://www.reddit.com/r/discordapp/",
+     "in_lens": false
+    },
+    {
+     "name": "Lemmy/threadiverse",
+     "url": "https://lemmy.world/",
+     "in_lens": false
+    },
+    {
+     "name": "r/skyrimmods",
+     "url": "https://www.reddit.com/r/skyrimmods/",
+     "in_lens": false
+    }
+   ],
+   "trail": {
+    "searches": [
+     "no first-hand follow-up accounts found in the round 1 and 2 searches; Reddit unreachable"
+    ],
+    "read": 0,
+    "on_question": 0
+   },
+   "evidence": [],
+   "contradicting": [],
+   "status": "open",
+   "few_voices": true,
+   "expert_only": false,
+   "authors": 0,
+   "families": 0,
+   "family_names": [],
+   "ask": [
+    {
+     "place": "r/Guilded",
+     "wording": "A year on (or nearly) from Guilded closing: if your group moved, how many people came with you, and is the group still the same?"
+    },
+    {
+     "place": "Lemmy: lemmy.world",
+     "wording": "If you moved a gaming or modding community off Discord in 2026, how did it go? Who followed, who didn't, and would you do it again?"
+    }
+   ],
+   "spawned": []
+  }
+ ],
+ "citations": [
+  {
+   "id": "C1",
+   "url": "https://github.com/SkyrimLL/Skyrim/issues/100",
+   "date": "2024-05-28",
+   "date_from": "post",
+   "author": "OnyxtinctII",
+   "family": "GitHub issue trackers",
+   "text": "CTD occurs when starting a dialogue. I couldn't tell you why but I enabled and disabled mods one by one until the CTD stopped happening and discovered it was some sort of conflict or maybe a bug with SD+.",
+   "stake": "user",
+   "qualifies": "first-hand Skyrim AE player; names the crash and the one-by-one bisection; dated, located",
+   "stale": false
+  },
+  {
+   "id": "C2",
+   "url": "https://github.com/Seb263/SkyrimSE_ModBugReports/issues/80",
+   "date": "2026-08-26",
+   "date_from": "post",
+   "author": "Florararie",
+   "family": "GitHub issue trackers",
+   "text": "To preface, this may (honestly likely) not be the fault of anything related here. But this is moreso a shot in the dark to wrap my head around what's even causing the issue in the first place (sorry haha)\n\nThis is in a preconfigured list (Tuxborn Desktop - BFCO to be specific). I only started experiencing crashes after adding the following.",
+   "stake": "user",
+   "qualifies": "first-hand; player on a preconfigured modlist, unsure whose fault, reporting to a mod author as a shot in the dark",
+   "stale": false
+  },
+  {
+   "id": "C3",
+   "url": "https://github.com/Seb263/SkyrimSE_ModBugReports/issues/80#issuecomment-5419716473",
+   "date": "2026-08-26",
+   "date_from": "post",
+   "author": "Florararie",
+   "family": "GitHub issue trackers",
+   "text": "Feel free to close if this is too unrelated, but if you could point me in the direction of how to diagnose this further I would be extremely grateful. Thank you so much, and apologies once again.",
+   "stake": "user",
+   "qualifies": "first-hand; same author as C2, two minutes later, asking how to diagnose further; apologetic",
+   "stale": false,
+   "thread": "https://github.com/Seb263/SkyrimSE_ModBugReports/issues/80"
+  },
+  {
+   "id": "C4",
+   "url": "https://github.com/pdusen/skyrimnet-plugin-narrative-engine/issues/2",
+   "date": "2026-08-01",
+   "date_from": "post",
+   "author": "232349856",
+   "family": "GitHub issue trackers",
+   "text": "I tried to use it on my Skyrim VR setup, but got CTD on every launch. Asked Claude Code to have a look at the repo and logs and this is his responce. Would appreciate if you try to fix the problem. Or just leave it like that, just please add a note for others about incompatibility.",
+   "stake": "user",
+   "qualifies": "first-hand Skyrim VR player (1000+ mod load order per report); own lines quoted, the AI-written summary below them is not cited",
+   "stale": false
+  },
+  {
+   "id": "C5",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2627",
+   "date": "2024-10-12",
+   "date_from": "post",
+   "author": "VRsingthegamez",
+   "family": "GitHub issue trackers",
+   "text": "I have been having problems with the Squeegeepunk and have tried asking their discord to no answer. Basically, there are times when I launch my save in game, it crashes after trying to load. I saw some mods appearing as causing the crash and I tried disabling the Enviromental Textures, HD Mod, HD reworked project, and the Frame Generation mod that is included depending on the gpu or just in general. My theory is a lack of VRAM but I'm not fully sure at this point.",
+   "stake": "user",
+   "qualifies": "first-hand Cyberpunk modlist player; asked the list's Discord with no answer, then went to the installer's tracker",
+   "stale": false
+  },
+  {
+   "id": "C6",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2627#issuecomment-2408561256",
+   "date": "2024-10-12",
+   "date_from": "post",
+   "author": "EzioTheDeadPoet",
+   "family": "GitHub issue trackers",
+   "text": "this is not a WJ issue. Please go to the correct support discord or forum linked for individual list.",
+   "stake": "maintainer",
+   "qualifies": "first-hand: Wabbajack contributor redirecting a crash report; shows the player sent elsewhere",
+   "stale": false,
+   "thread": "https://github.com/wabbajack-tools/wabbajack/issues/2627"
+  },
+  {
+   "id": "C7",
+   "url": "https://github.com/BarrierTrio/Cardsauce/issues/154",
+   "date": "2026-09-12",
+   "date_from": "post",
+   "author": "nick21a",
+   "family": "GitHub issue trackers",
+   "text": "this is the error code that i keep getting idk if it is because i am running it through vortex or what but i am just confused why",
+   "stake": "user",
+   "qualifies": "first-hand Balatro mod player; crash message in hand but no understanding of it",
+   "stale": false
+  },
+  {
+   "id": "C8",
+   "url": "https://github.com/BarrierTrio/Cardsauce/issues/154#issuecomment-5768355867",
+   "date": "2026-09-21",
+   "date_from": "post",
+   "author": "YUORKI",
+   "family": "GitHub issue trackers",
+   "text": "Same issue, Bumping for visibilty",
+   "stake": "user",
+   "qualifies": "first-hand: a second player hits the same crash nine days later; shows the same crash recurring with no answer",
+   "stale": false,
+   "thread": "https://github.com/BarrierTrio/Cardsauce/issues/154"
+  },
+  {
+   "id": "C9",
+   "url": "https://github.com/Team-Argentum/Lucis/issues/8",
+   "date": "2026-09-07",
+   "date_from": "post",
+   "author": "hiimrickross",
+   "family": "GitHub issue trackers",
+   "text": "I was having difficulty with failure to load into world (this mod) or soft-locking after a couple chunks generate (C2ME) and the C2ME NeoForge author got me to install ModernFix (since it had logging that exposed more stuff I guess) and he immediately pinpointed Slabbed.",
+   "stake": "user",
+   "qualifies": "first-hand Minecraft modpack player; diagnosis came from another mod's author once better logging was installed",
+   "stale": false
+  },
+  {
+   "id": "C10",
+   "url": "https://github.com/Team-Argentum/Lucis/issues/8",
+   "date": "2026-09-07",
+   "date_from": "post",
+   "author": "hiimrickross",
+   "family": "GitHub issue trackers",
+   "text": "I see on the Curseforge page of this mod that another user reported when this mod is enabled it makes dark/black spots in chunks when genning and when traversing back and forth, so it's not just me, that's good.. Wish I saw the comment earlier lol I spent about 1h going back and forth between this and c2me and some other thing testing it.",
+   "stake": "user",
+   "qualifies": "first-hand; the 'is it just me' moment and the hour lost before finding someone else's report",
+   "stale": false
+  },
+  {
+   "id": "C11",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-3685525615",
+   "date": "2025-12-23",
+   "date_from": "post",
+   "author": "rafalswierczek",
+   "family": "GitHub issue trackers",
+   "text": "I can confirm that bug on version `4.0.4.0b-`. Why is this issue not popular enough?\nI assume that literally Skyrim is unplayable for everybody using Pandora atm. Gonna test it on 2.7 and give a feedback.\n\n[update]\nSetting up 2.7 version was a nightmare (hit or miss, no documentation, nothing on the internet). When I figured it out and Pandora worked, the game crashed at the same moment as for 4.0.4 version. The hype around this program is a joke.",
+   "stake": "user",
+   "qualifies": "first-hand Skyrim player on the same crash four months after it was reported; feelings in own words",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C12",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-3685634786",
+   "date": "2025-12-23",
+   "date_from": "post",
+   "author": "shadow147-github",
+   "family": "GitHub issue trackers",
+   "text": "I would assume the answer to that question is that after 14 years of running through Helgen, people have switched to using alternate start mods. Me for instance, I can't remember when I last almost had my head chopped off.",
+   "stake": "user",
+   "qualifies": "first-hand; player routes around a known crash rather than waiting for a fix",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C13",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-4091541650",
+   "date": "2026-03-19",
+   "date_from": "post",
+   "author": "Saipher604",
+   "family": "GitHub issue trackers",
+   "text": "I can also confirm this crash with the latest version. The one workaround that worked for me was disabling the XPMSE Patch for Pandora.",
+   "stake": "user",
+   "qualifies": "first-hand; the workaround seven months into the thread",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C14",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-4126625629",
+   "date": "2026-03-25",
+   "date_from": "post",
+   "author": "LOYINuts",
+   "family": "GitHub issue trackers",
+   "text": "yes,disabling the XPMSE Patch for Pandora will solve that. I just realize they even delete some comments about this on nexus\n[edit]\nOK probably my bad. But i do notice that comment is disappeared.",
+   "stake": "user",
+   "qualifies": "first-hand; a fix posted on Nexus that later could not be found",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C15",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-4131410738",
+   "date": "2026-03-26",
+   "date_from": "post",
+   "author": "Ricarius",
+   "family": "GitHub issue trackers",
+   "text": "Confirming this bug's continued existence, even in the new public Nexus version released earlier today. In my case, the CTD consistently happens within the span of a few seconds after exiting the Helgen cave, and disabling the XPMSE Patch remedies the issue. I'd prefer not to resort to this measure as a permanent fix as I'm uncertain what consequences disabling the patch would have for the rest of my gameplay.",
+   "stake": "user",
+   "qualifies": "first-hand; found the workaround, uneasy about what it costs",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C16",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-3707098141",
+   "date": "2026-01-03",
+   "date_from": "post",
+   "author": "Txikivasco",
+   "family": "GitHub issue trackers",
+   "text": "In v4.1.2beta bug still persists. Same spot after the \"stay close to the wall\" line. Alduin lands, then takes off and big CTD. I guess it still needs a lot of work to be on par with Nemesis. It's a shame because it does many well very well. \n\nDragon animations crashing or having to rebuild FNIS manually is a deal braker for me.",
+   "stake": "user",
+   "qualifies": "first-hand; a crash that decides whether they keep a tool",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C17",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2110",
+   "date": "2022-10-12",
+   "date_from": "post",
+   "author": "aljoxo",
+   "family": "GitHub issue trackers",
+   "text": "Some users are posting crash logs after installation in which they crash at main menu. Upon further inspection, it appears the game is not loading any plugins (SKSE or Game). \n\nWhen telling users to delete the mods folder and reinstall with 2.5.3.28, the issue does not reappear.",
+   "stake": "maintainer",
+   "qualifies": "first-hand modlist author describing what reaches them from players; tool versions since changed",
+   "stale": true
+  },
+  {
+   "id": "C18",
+   "url": "https://github.com/GrizzlT/HypixelStatsOverlayMod/issues/2#issuecomment-1519113240",
+   "date": "2023-04-23",
+   "date_from": "post",
+   "author": "GrizzlT",
+   "family": "GitHub issue trackers",
+   "text": "I haven't forgotten this project. I am quite packed with work so I don't have the time to revisit this project and set up the testing environment anymore.",
+   "stake": "user",
+   "qualifies": "first-hand mod author (the intent's Sarah) on capacity to act on a crash report four months in",
+   "stale": false,
+   "thread": "https://github.com/GrizzlT/HypixelStatsOverlayMod/issues/2"
+  },
+  {
+   "id": "C19",
+   "url": "https://github.com/GrizzlT/HypixelStatsOverlayMod/issues/2#issuecomment-1367773001",
+   "date": "2022-12-30",
+   "date_from": "post",
+   "author": "OscarFan26",
+   "family": "GitHub issue trackers",
+   "text": "This issue is still not fixed. Thank you for answering though.\n\nTo everyone who see this:\nI have a replace plan:  https://github.com/sbplat/Stats-Overlay/releases/tag/v1.1.0",
+   "stake": "user",
+   "qualifies": "first-hand player who, unfixed, points the next player to a replacement",
+   "stale": false,
+   "thread": "https://github.com/GrizzlT/HypixelStatsOverlayMod/issues/2"
+  },
+  {
+   "id": "C20",
+   "url": "https://sh.itjust.works/comment/14261662",
+   "date": "2024-10-03",
+   "date_from": "post",
+   "author": "Shadowedcross",
+   "family": "Lemmy/threadiverse",
+   "text": "I don't know, but every fucking group's reliance on Discord pisses me off. I'm very much into modding my games, the problem is that every damn mod author wants to do support only on Discord, which means probably more than half of my 200 servers are just for that.",
+   "stake": "user",
+   "qualifies": "first-hand player; where mod help lives for them",
+   "stale": false
+  },
+  {
+   "id": "C21",
+   "url": "https://lemmy.world/comment/21703862",
+   "date": "2026-01-22",
+   "date_from": "post",
+   "author": "Retro_unlimited",
+   "family": "Lemmy/threadiverse",
+   "text": "I have a nice community built on discord, as soon as they announced the age verification thing I made a post.\n\n if they pop up that for me, I'm not coming back to discord, here is other ways to contact me. I added a matrix server and signal chat, etc as a list of alternatives.",
+   "stake": "user",
+   "qualifies": "first-hand community owner on Discord's ID check; community type unspecified (not shown to be modding)",
+   "stale": false
+  },
+  {
+   "id": "C22",
+   "url": "https://lemmy.world/comment/3509378",
+   "date": "2023-09-16",
+   "date_from": "post",
+   "author": "Ganbat",
+   "family": "Lemmy/threadiverse",
+   "text": "Well, for one thing, Nexus gives modders a share of ad revenue. Under a different name, I have a mod that's a backend requirement for a big, popular mod, and that nets me a reliable few bucks a month.",
+   "stake": "user",
+   "qualifies": "first-hand mod author on what a dependency mod earned in 2023; predates Nexus's April 2024 Donation Points change, so marked stale; original instance lemmyonline.com no longer serves it, lemmy.world copy cited",
+   "stale": true
+  },
+  {
+   "id": "C23",
+   "url": "https://lemmy.ml/comment/10443808",
+   "date": "2024-04-20",
+   "date_from": "post",
+   "author": "proceduralnightshade",
+   "family": "Lemmy/threadiverse",
+   "text": "A little texture replacement mod I made in 2018 for Fallout 3 got a lot of downloads all of a sudden. Got a mail I thought was spam at first saying \"Many people are downloading your mods and your efforts have been recognised with a free Nexus Mods Premium reward.\" Like wtf is going on",
+   "stake": "user",
+   "qualifies": "first-hand mod author; the recognition that came back took the form of a site perk, read at first as spam",
+   "stale": false
+  },
+  {
+   "id": "C24",
+   "url": "https://github.com/ajour/ajour/issues/746#issuecomment-968427406",
+   "date": "2021-11-15",
+   "date_from": "post",
+   "author": "corveroth",
+   "family": "GitHub issue trackers",
+   "text": "Maybe I'm just too small-time to give a damn, but the CurseForge Reward Program never meant anything to me. I earned a whole ~15 \"points\" from my most active addons on Curse, and at $0.05 per point and cashouts only available in increments of 200 points, I never saw any of my paltry sixty-five cents before my points expired (which is a disgusting feature to have in an incentive program, to boot).",
+   "stake": "user",
+   "qualifies": "first-hand WoW addon author on CurseForge earnings; 2021 program terms have since changed, marked stale",
+   "stale": true,
+   "thread": "https://github.com/ajour/ajour/issues/746"
+  },
+  {
+   "id": "C25",
+   "url": "https://github.com/ajour/ajour/issues/746#issuecomment-969177618",
+   "date": "2021-11-15",
+   "date_from": "post",
+   "author": "Gogo1951",
+   "family": "GitHub issue trackers",
+   "text": "Some add-on creators care about money. A lot of us don't.\n\nJust having a tool that was super easy to use, that would automatically update add-ons for people... that's all I wanted and Ajour did it perfectly.",
+   "stake": "user",
+   "qualifies": "first-hand addon author on what they want from a manager; about Ajour and CurseForge's 2021 terms, marked stale like the rest of that thread",
+   "stale": true,
+   "thread": "https://github.com/ajour/ajour/issues/746"
+  },
+  {
+   "id": "C26",
+   "url": "https://github.com/ajour/ajour/issues/746",
+   "date": "2021-11-14",
+   "date_from": "post",
+   "author": "casperstorm",
+   "family": "GitHub issue trackers",
+   "text": "What does this mean for Ajour? Well, it kills my motivation, and it kills my vision for Ajour. I don't want to fight with Overwolf (anymore). It's not worth it. Overwolf has all the data which makes Ajour work, and currently, they are pulling the rug under us.",
+   "stake": "maintainer",
+   "qualifies": "first-hand developer of an addon manager built on CurseForge's 2021 API, ending it when access changed; CurseForge's API has changed since, so marked stale",
+   "stale": true
+  },
+  {
+   "id": "C28",
+   "url": "https://github.com/JW11-modder/JumpSpace/issues/2#issuecomment-4919086512",
+   "date": "2026-07-08",
+   "date_from": "post",
+   "author": "JW11-modder",
+   "family": "GitHub issue trackers",
+   "text": "Official reason was \"mod interferes with multiplayer persistence\", whatever that means.",
+   "stake": "user",
+   "qualifies": "first-hand mod author whose mod was removed from Nexus; the reason given did not make sense to them",
+   "stale": false,
+   "thread": "https://github.com/JW11-modder/JumpSpace/issues/2"
+  },
+  {
+   "id": "C29",
+   "url": "https://github.com/JW11-modder/JumpSpace/issues/2",
+   "date": "2026-06-30",
+   "date_from": "post",
+   "author": "Potatosaregreat101",
+   "family": "GitHub issue trackers",
+   "text": "hi i just saw that the mod was removed from nexus did they give you any reason as to why?",
+   "stake": "user",
+   "qualifies": "first-hand player who found a mod they used gone, and went to the author's tracker to ask",
+   "stale": false
+  },
+  {
+   "id": "C30",
+   "url": "https://github.com/Nexus-Mods/Vortex/issues/23046#issuecomment-4402217132",
+   "date": "2026-05-08",
+   "date_from": "post",
+   "author": "Tetrol88",
+   "family": "GitHub issue trackers",
+   "text": "The Nexus mods mod number is a useless reference as once they are deleted Nexus mods drops the name (and any information) of the mod - so there is no way of identifying the mod",
+   "stake": "user",
+   "qualifies": "first-hand Skyrim SE player whose installed mods were deleted upstream",
+   "stale": false,
+   "thread": "https://github.com/Nexus-Mods/Vortex/issues/23046"
+  },
+  {
+   "id": "C31",
+   "url": "https://github.com/Tyler799/Morrowind-2020/issues/149",
+   "date": "2020-07-06",
+   "date_from": "post",
+   "author": "descawed",
+   "family": "GitHub issue trackers",
+   "text": "The [Stronghold Retexture](https://www.nexusmods.com/morrowind/mods/43948/) mod in the Architecture Replacers section was hidden by the author three days ago. [His Nexus profile](https://www.nexusmods.com/users/899234) indicates that he may have left the Nexus permanently (\"I might not respond to any messages in the future\"), but also says that other people are allowed to re-upload his mods on the Nexus. If anyone still has a copy, they could re-upload and we could update the link to point to that. Otherwise, this mod should be removed from the guide or replaced with something else.",
+   "stake": "user",
+   "qualifies": "first-hand: guide follower finds a mod the guide depends on withdrawn by its author; predates the 2021 change",
+   "stale": true
+  },
+  {
+   "id": "C32",
+   "url": "https://stepmodifications.org/forum/topic/20025-crash-log",
+   "date": "2024-09-14",
+   "date_from": "post",
+   "author": "Kattmandu",
+   "family": "STEP Modifications forum",
+   "text": "I really don't know what to look for.  My playthrough keeps randomly crashing.  I even started a new game but still have CTDs occurring.",
+   "stake": "user",
+   "qualifies": "first-hand Skyrim SE player following the STEP guide; string-checked on page",
+   "stale": false
+  },
+  {
+   "id": "C33",
+   "url": "https://stepmodifications.org/forum/topic/20025-crash-log",
+   "date": "2024-09-18",
+   "date_from": "post",
+   "author": "Kattmandu",
+   "family": "STEP Modifications forum",
+   "text": "I searched for _Unhandled exception EXCEPTION_ACCESS_VIOLATION SkyrimSE_ and found a post that said it was probably due to a mod that wasn't updated to work with the latest version of PapyrusUtil.",
+   "stake": "user",
+   "qualifies": "first-hand; found a diagnosis by searching the crash text for someone else's post; string-checked",
+   "stale": false
+  },
+  {
+   "id": "C34",
+   "url": "https://stepmodifications.org/forum/topic/20025-crash-log",
+   "date": "2024-09-20",
+   "date_from": "post",
+   "author": "Kattmandu",
+   "family": "STEP Modifications forum",
+   "text": "Hmmm, still experiencing CTDs although not quite as often so maybe I have multiple mods causing it.",
+   "stake": "user",
+   "qualifies": "first-hand; the first fix did not hold; string-checked",
+   "stale": false
+  },
+  {
+   "id": "C35",
+   "url": "https://stepmodifications.org/forum/topic/20025-crash-log",
+   "date": "2024-09-21",
+   "date_from": "post",
+   "author": "z929669",
+   "family": "STEP Modifications forum",
+   "text": "I'm sure the crash log indicates the problem, but I can't understand crash logs for the most part.",
+   "stake": "maintainer",
+   "qualifies": "first-hand from the STEP forum's administrator, who helps players and says crash logs are beyond them; string-checked",
+   "stale": false
+  },
+  {
+   "id": "C36",
+   "url": "https://steamcommunity.com/app/377160/discussions/0/604152569333292508/",
+   "date": "2025-04-04",
+   "date_from": "post",
+   "author": "socialmediaaddress3",
+   "family": "Steam Community discussions",
+   "text": "I am also a mod author over there , albeit a tiny tiny one with very very basic stuff, and I'll keep hosting my stuff on Nexus because that is where I \"live\", and made many online friends.\nit is however less pleasant than it could be, as we all feel the sword of Damocles hanging over our heads of a possible arbitrary ban by a zealous ideologue.",
+   "stake": "user",
+   "qualifies": "first-hand Fallout 4 mod author on why they stay and what they fear; fetched via summarizing model, text re-checked in a second fetch",
+   "stale": false
+  },
+  {
+   "id": "C37",
+   "url": "https://steamcommunity.com/app/377160/discussions/0/604152569333292508/",
+   "date": "2025-04-04",
+   "date_from": "post",
+   "author": "socialmediaaddress3",
+   "family": "Steam Community discussions",
+   "text": "Yes, some mod authors got offended a couple years back with the thing about losing control of their mods and not being allowed to delete them. this was certainly a big factor. And the \"collections\" did not go over well with some too.\nThe last issue I for one, feel is overblown.",
+   "stake": "user",
+   "qualifies": "first-hand mod author's own view of the 2021 change (the view is theirs; the departures are second-hand)",
+   "stale": false
+  },
+  {
+   "id": "C38",
+   "url": "https://news.ycombinator.com/item?id=44299347",
+   "date": "2025-06-17",
+   "date_from": "post",
+   "author": "zeagle",
+   "family": "Hacker News",
+   "text": "Tho I do wish there was more mod packs for games like oblivion or fallout new vegas as I'll spend an evening getting it all to play nice then not have time to play games and for a few weeks.",
+   "stake": "user",
+   "qualifies": "first-hand player on the cost of assembling a heavy setup by hand",
+   "stale": false
+  },
+  {
+   "id": "C41",
+   "url": "https://devforum.roblox.com/t/update-on-guilded-and-communities/3966775/14",
+   "date": "2025-09-29",
+   "date_from": "post",
+   "author": "Wingardxxm",
+   "family": "Roblox DevForum",
+   "text": "I understand the reasoning but can we please transition towards discord for CFP? I love the transparency through guilded and how easy it was to do things through it. As useful as the devforum is, I think something like guilded was really useful in regards to getting notified with different 1:1 and betas as well as communicating with staff.",
+   "stake": "user",
+   "qualifies": "first-hand member of a creator program community hosted on Guilded, on losing it; fetched via summarizing model",
+   "stale": false
+  },
+  {
+   "id": "C42",
+   "url": "https://devforum.roblox.com/t/update-on-guilded-and-communities/3966775/23",
+   "date": "2025-09-29",
+   "date_from": "post",
+   "author": "pictureu",
+   "family": "Roblox DevForum",
+   "text": "and im assuming legacy UGC creators wont be moved to the new programs communication server, while i understand why this would happen it would be a shame if the people who were the most active in the programs chat were left behind.",
+   "stake": "user",
+   "qualifies": "first-hand creator-program member on who gets left behind when the home closes; fetched via summarizing model",
+   "stale": false
+  },
+  {
+   "id": "C43",
+   "url": "https://forum.endeavouros.com/t/discord-added-the-age-verification-update/81618",
+   "date": "2026-09-23",
+   "date_from": "post",
+   "author": "rudy-in",
+   "family": "EndeavourOS forum",
+   "text": "I'm not really sure about leaving discord but if this thing rolls out to my device then i'm definitely leaving discord and shifting my project's community to discourse as well sighs",
+   "stake": "user",
+   "qualifies": "first-hand leader of a project community (a Linux project, not a modding group) on Discord's renewed age check; string-checked",
+   "stale": false
+  },
+  {
+   "id": "C44",
+   "url": "https://forum.endeavouros.com/t/discord-added-the-age-verification-update/81618/3",
+   "date": "2026-09-23",
+   "date_from": "post",
+   "author": "rudy-in",
+   "family": "EndeavourOS forum",
+   "text": "i had to verify my age a few minutes ago\u2026",
+   "stake": "user",
+   "qualifies": "same author, twenty minutes later: the check reached them",
+   "stale": false
+  },
+  {
+   "id": "C45",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166#issuecomment-4616822923",
+   "date": "2026-06-03",
+   "date_from": "post",
+   "author": "Fuzss",
+   "family": "GitHub issue trackers",
+   "text": "Can\u2019t help,you without the log. ",
+   "stake": "user",
+   "qualifies": "first-hand mod author's whole reply to a crash report that arrived without a log",
+   "stale": false,
+   "thread": "https://github.com/Fuzss/enchanting-infuser/issues/166"
+  },
+  {
+   "id": "C46",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166#issuecomment-4616845221",
+   "date": "2026-06-03",
+   "date_from": "post",
+   "author": "trainfan79",
+   "family": "GitHub issue trackers",
+   "text": "how do I get the log of the world crashing?",
+   "stake": "user",
+   "qualifies": "first-hand player asked for a log they do not know how to find",
+   "stale": false,
+   "thread": "https://github.com/Fuzss/enchanting-infuser/issues/166"
+  },
+  {
+   "id": "C47",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166#issuecomment-4616970184",
+   "date": "2026-06-03",
+   "date_from": "post",
+   "author": "trainfan79",
+   "family": "GitHub issue trackers",
+   "text": "it isn't showing up, probably due to the fact that I launch the game through the Modrinth app",
+   "stake": "user",
+   "qualifies": "first-hand; the launcher put the log somewhere the instructions did not",
+   "stale": false,
+   "thread": "https://github.com/Fuzss/enchanting-infuser/issues/166"
+  },
+  {
+   "id": "C48",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166#issuecomment-4617253546",
+   "date": "2026-06-03",
+   "date_from": "post",
+   "author": "trainfan79",
+   "family": "GitHub issue trackers",
+   "text": "hello?",
+   "stake": "user",
+   "qualifies": "first-hand; an hour after the last reply, waiting",
+   "stale": false,
+   "thread": "https://github.com/Fuzss/enchanting-infuser/issues/166"
+  },
+  {
+   "id": "C49",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166#issuecomment-4636955874",
+   "date": "2026-06-06",
+   "date_from": "post",
+   "author": "dimitrishepherd99-max",
+   "family": "GitHub issue trackers",
+   "text": "I have been having the same issue",
+   "stake": "user",
+   "qualifies": "first-hand second player, three days later, who supplied the log the first could not",
+   "stale": false,
+   "thread": "https://github.com/Fuzss/enchanting-infuser/issues/166"
+  },
+  {
+   "id": "C50",
+   "url": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8#issuecomment-5668348381",
+   "date": "2026-09-14",
+   "date_from": "post",
+   "author": "pcolb1",
+   "family": "GitHub issue trackers",
+   "text": "Could you please provide the `latest.log` from immediately after each issue occurs, along with:\n\n* the exact Malisis Doors (Reborn) version\n* Forge/NeoForge version\n* your mod list\n* the full crash/error message\n* whether the 26.2 issue occurs in singleplayer or on a server",
+   "stake": "user",
+   "qualifies": "first-hand mod author listing what a crash report needs to be actionable",
+   "stale": false,
+   "thread": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8"
+  },
+  {
+   "id": "C51",
+   "url": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8#issuecomment-5668348381",
+   "date": "2026-09-14",
+   "date_from": "post",
+   "author": "pcolb1",
+   "family": "GitHub issue trackers",
+   "text": "Without the logs there's unfortunately not enough information to identify what is failing.",
+   "stake": "user",
+   "qualifies": "same author, same reply",
+   "stale": false,
+   "thread": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8"
+  },
+  {
+   "id": "C52",
+   "url": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8#issuecomment-5696785257",
+   "date": "2026-09-16",
+   "date_from": "post",
+   "author": "pcolb1",
+   "family": "GitHub issue trackers",
+   "text": "I'm also removing the comment on CurseForge as we are tracking properly here.\n\nI really do appreciate the time you've taken to raise this as only with feedback from people can I improve my mods.",
+   "stake": "user",
+   "qualifies": "first-hand mod author: the same report arrived in two places; values reports that come with data",
+   "stale": false,
+   "thread": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8"
+  },
+  {
+   "id": "C53",
+   "url": "https://github.com/0ceal0t/Dalamud-VFXEditor/issues/338",
+   "date": "2026-04-26",
+   "date_from": "post",
+   "author": "yuyaaraki-hash",
+   "family": "GitHub issue trackers",
+   "text": "If you are able to replace these files on your end without causing a crash, then the issue may be specific to my environment.\n\nI apologize for the trouble, but I would appreciate it if you could look into this and let me know if there is anything I should check or do differently.",
+   "stake": "user",
+   "qualifies": "first-hand FFXIV mod user; the 'is it my setup' doubt, apologetic",
+   "stale": false
+  },
+  {
+   "id": "C54",
+   "url": "https://github.com/0ceal0t/Dalamud-VFXEditor/issues/338#issuecomment-4357806652",
+   "date": "2026-05-01",
+   "date_from": "post",
+   "author": "taco1932",
+   "family": "GitHub issue trackers",
+   "text": "did you test with only those swaps active and absolutely nothing else? did you try going into CC with the file swap active in the editor instead of a mod loader? does the crash happen with your own sound swaps in different environments?",
+   "stake": "maintainer",
+   "qualifies": "first-hand tool contributor walking a player through isolating a crash",
+   "stale": false,
+   "thread": "https://github.com/0ceal0t/Dalamud-VFXEditor/issues/338"
+  },
+  {
+   "id": "C55",
+   "url": "https://github.com/Sollace/Unicopia/issues/602#issuecomment-4363753312",
+   "date": "2026-05-02",
+   "date_from": "post",
+   "author": "Sollace",
+   "family": "GitHub issue trackers",
+   "text": "Please report issues you encounter whilst using connector to them first. This is very likely some incompatibility with one of the other mods your using though.",
+   "stake": "user",
+   "qualifies": "first-hand mod author redirecting a crash that sits between mods",
+   "stale": false,
+   "thread": "https://github.com/Sollace/Unicopia/issues/602"
+  },
+  {
+   "id": "C56",
+   "url": "https://github.com/Serpens66/Stronghold-Crusader-DE-Mods/issues/2",
+   "date": "2026-09-23",
+   "date_from": "post",
+   "author": "JiuyeAyan",
+   "family": "GitHub issue trackers",
+   "text": "However I met game crash twice when I was playing SCDE, and I asked Chatgpt to find out what's the cause of the crash.\nIt says it was because of Serps mod, and this is the report generated by Chatgpt:",
+   "stake": "user",
+   "qualifies": "first-hand player (also a mod author) bringing an AI-written crash analysis to another author; only their own lines cited",
+   "stale": false
+  },
+  {
+   "id": "C57",
+   "url": "https://github.com/davenonymous/BonsaiTrees/issues/369",
+   "date": "2025-08-09",
+   "date_from": "post",
+   "author": "serioos",
+   "family": "GitHub issue trackers",
+   "text": "I tried running only Vinery and Bonsai tree mod together and it crashes before even the menu loads up. I took the crash log to ChatGPT and it told me this is the cause:",
+   "stake": "user",
+   "qualifies": "first-hand Minecraft player who narrowed to two mods, then asked an AI to read the log",
+   "stale": false
+  },
+  {
+   "id": "C58",
+   "url": "https://github.com/davenonymous/BonsaiTrees/issues/369#issuecomment-3267264833",
+   "date": "2025-09-08",
+   "date_from": "post",
+   "author": "ModernGamingWorld",
+   "family": "GitHub issue trackers",
+   "text": "I also ran into this issue and had to remove this mod till it got fixed for us to use both mods together",
+   "stake": "user",
+   "qualifies": "first-hand second player a month later: same crash, gave up one mod",
+   "stale": false,
+   "thread": "https://github.com/davenonymous/BonsaiTrees/issues/369"
+  },
+  {
+   "id": "C59",
+   "url": "https://github.com/FoundationGames/Splinecart/issues/53",
+   "date": "2026-04-24",
+   "date_from": "post",
+   "author": "MC-Boy1122",
+   "family": "GitHub issue trackers",
+   "text": "Game log(Here im using coastercart): https://mclo.gs/1Yu2YJk\n\nChatGPT analysis(here i was using splinecart): https://chatgpt.com/share/69ebb5fa-de70-83ea-bd6d-6ebd8420715a",
+   "stake": "user",
+   "qualifies": "first-hand player attaching an AI analysis as the report",
+   "stale": false
+  },
+  {
+   "id": "C60",
+   "url": "https://github.com/FoundationGames/Splinecart/issues/53#issuecomment-4409516656",
+   "date": "2026-05-08",
+   "date_from": "post",
+   "author": "musicbynumbers",
+   "family": "GitHub issue trackers",
+   "text": "I've got the same issue but I'm using the neoforge fork of spinecart (coaster carts) and getting the same issue but can't find a way to contact him so will leave my link here to the create issue that explains the crash in more detail and also my crash log too.",
+   "stake": "user",
+   "qualifies": "first-hand player who cannot reach the right author and leaves the trail where they can",
+   "stale": false,
+   "thread": "https://github.com/FoundationGames/Splinecart/issues/53"
+  },
+  {
+   "id": "C61",
+   "url": "https://github.com/InsanityGod/AutoIMM/issues/1",
+   "date": "2026-10-02",
+   "date_from": "post",
+   "author": "Mechanax",
+   "family": "GitHub issue trackers",
+   "text": "This is a bit of an odd one. I'm not really sure how to get more info as to what's causing this without disabling mods one by one. The game just closes with nothing showing in the logs:",
+   "stake": "user",
+   "qualifies": "first-hand player with a large mod list and an empty log",
+   "stale": false
+  },
+  {
+   "id": "C62",
+   "url": "https://github.com/dor557/StationTimetable/issues/2",
+   "date": "2026-10-04",
+   "date_from": "post",
+   "author": "dazimmermann",
+   "family": "GitHub issue trackers",
+   "text": "Are you on Discord?  I posted some crash reports I had attempting to use this with other mods.  I haven't isolated exactly which of the mods is conflicting, but thought I'd share the link here so you can review the info.",
+   "stake": "user",
+   "qualifies": "first-hand player whose crash reports live in a Discord thread, pointing the author there",
+   "stale": false
+  },
+  {
+   "id": "C63",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2629",
+   "date": "2024-10-17",
+   "date_from": "post",
+   "author": "GregariousJamie",
+   "family": "GitHub issue trackers",
+   "text": "Hello hello, I'm one of those guys who keeps *every* mod on one of my drives since I refuse to pay for premium (and you know, I might *need* that mod i downloaded years ago, y'know?)",
+   "stake": "user",
+   "qualifies": "first-hand modlist player who hoards archives against later loss",
+   "stale": false
+  },
+  {
+   "id": "C64",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2875",
+   "date": "2026-01-12",
+   "date_from": "post",
+   "author": "KylerN45",
+   "family": "GitHub issue trackers",
+   "text": "\"I'm always frustrated when \" I click install on a list, only to be met with failed downloads and forced to wait 10-ish minutes as Nexus has logged me out on the Wabbajack platform. I have to log in again, wait some time, then try again.",
+   "stake": "user",
+   "qualifies": "first-hand modlist player at the seam between installer and host",
+   "stale": false
+  },
+  {
+   "id": "C65",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2697",
+   "date": "2025-02-14",
+   "date_from": "post",
+   "author": "CatGamer23",
+   "family": "GitHub issue trackers",
+   "text": "Yes, it's frustrating to try to download a modpack and it fails because it hits the API limit, and ends up DoSing Nexus, causing me to have a ~10 minute \"ban\"",
+   "stake": "user",
+   "qualifies": "first-hand modlist player at the same seam",
+   "stale": false
+  },
+  {
+   "id": "C66",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2697",
+   "date": "2025-02-14",
+   "date_from": "post",
+   "author": "CatGamer23",
+   "family": "GitHub issue trackers",
+   "text": "Not using Wabbajack. As of right now, WJ is unusable in it's current state, please fix this. Until then, I'll be looking for another tool.",
+   "stake": "user",
+   "qualifies": "first-hand; the point of leaving a tool",
+   "stale": false
+  },
+  {
+   "id": "C67",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2814",
+   "date": "2025-06-19",
+   "date_from": "post",
+   "author": "Piranha91",
+   "family": "GitHub issue trackers",
+   "text": "When Wabbajack self-updates, it logs me out of my Nexus account. I usually forget to check and try to install my mod list, which of course fails. I then try to log into Nexus but it tells me to wait 10 mins because of the suspicious amount of API requests coming from my IP address. This is very annoying.",
+   "stake": "user",
+   "qualifies": "first-hand modlist player at the same seam",
+   "stale": false
+  },
+  {
+   "id": "C68",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues/2814",
+   "date": "2025-06-19",
+   "date_from": "post",
+   "author": "Piranha91",
+   "family": "GitHub issue trackers",
+   "text": "Downloading everything manually and playing the list when I finish in a year or two.",
+   "stake": "user",
+   "qualifies": "first-hand; the alternative they see, in their words",
+   "stale": false
+  },
+  {
+   "id": "C69",
+   "url": "https://github.com/Nexus-Mods/Vortex/issues/23046#issuecomment-4410768696",
+   "date": "2026-05-09",
+   "date_from": "post",
+   "author": "Tetrol88",
+   "family": "GitHub issue trackers",
+   "text": "I hope there is a way to turn this useless \"feature\" off - just keeps popping up erroneous warnings, as well as others that may well be true (old \"removed from Nexus\" mods) but make no difference (who cares that there is a discontinued mod in the list). Just makes you check an untrackable list of numbers",
+   "stake": "user",
+   "qualifies": "first-hand Skyrim SE player on being told about removed mods without names",
+   "stale": false,
+   "thread": "https://github.com/Nexus-Mods/Vortex/issues/23046"
+  },
+  {
+   "id": "C70",
+   "url": "https://sopuli.xyz/comment/4355114",
+   "date": "2023-11-06",
+   "date_from": "post",
+   "author": "JohnEdwa",
+   "family": "Lemmy/threadiverse",
+   "text": "So, so many modding projects live entirely on discord. I hate having to join a server just to download a single goddamn mod, and then you can't find any info about them because google can't index the discussions.",
+   "stake": "user",
+   "qualifies": "first-hand player on mod projects living in chat",
+   "stale": false
+  },
+  {
+   "id": "C71",
+   "url": "https://sh.itjust.works/comment/17457021",
+   "date": "2025-03-21",
+   "date_from": "post",
+   "author": "Madbrad200",
+   "family": "Lemmy/threadiverse",
+   "text": "My latest horror (slight exaggeration) was finding pretty much the entire modding scene for Balatro is contained to discord\n\nwtf? If I wanna download mods for a game I have to prowl through a *discord* \"forum\"? It's awful, what's wrong with nexus or steam workshop",
+   "stake": "user",
+   "qualifies": "first-hand Balatro player looking for mods",
+   "stale": false
+  },
+  {
+   "id": "C72",
+   "url": "https://lemmy.world/comment/3530600",
+   "date": "2023-09-17",
+   "date_from": "post",
+   "author": "Chailles",
+   "family": "Lemmy/threadiverse",
+   "text": "Mods uploaded to github does really suck for discoverability though. There's the roguelike Cataclysm: Dark Days Ahead. The modding scene exists entirely on Github and you'd basically never find them unless you go searching for mods on their Discord channel.",
+   "stake": "user",
+   "qualifies": "first-hand player on finding mods outside a host",
+   "stale": false
+  },
+  {
+   "id": "C73",
+   "url": "https://news.ycombinator.com/item?id=47022252",
+   "date": "2026-02-15",
+   "date_from": "post",
+   "author": "PostOnce",
+   "family": "Hacker News",
+   "text": "I very hesitantly used discord occasionally because some projects I wanted to keep up with moved there. I gave up a few times since I kept getting autobanned by a broken algorithm (i.e., based on my ip or phone number, not anything I'd said) until I contacted their devs and they manually fixed it. Obviously, I am never going to consider using discord again after this shit-tsunami. Back to irc and signal groups.",
+   "stake": "user",
+   "qualifies": "first-hand member following projects onto Discord, leaving at the ID change",
+   "stale": false
+  },
+  {
+   "id": "C74",
+   "url": "https://news.ycombinator.com/item?id=48128473",
+   "date": "2026-05-13",
+   "date_from": "post",
+   "author": "mfinelli",
+   "family": "Hacker News",
+   "text": "But basically my original idea to just install the files directly into the game directory stems from the fact that when I switched to linux for gaming and not having success with MO2 that's literally what I was doing. I would download the mod from nexus and unzip/tar it into the game directory manually. When I wanted to uninstall or update I'd find the original archive list the files in it and then delete them from my game directory.",
+   "stake": "user",
+   "qualifies": "first-hand Linux player turned mod-tool developer (applied for Nexus approval per same comment)",
+   "stale": false
+  },
+  {
+   "id": "C75",
+   "url": "https://devforum.roblox.com/t/ability-to-safely-and-locally-download-all-of-our-chatmedia-conversationslogs-from-guilded-serversdms/3968539",
+   "date": "2025-09-30",
+   "date_from": "post",
+   "author": "birdmartinyt",
+   "family": "Roblox DevForum",
+   "text": "As a Guilded Server Owner, it is currently too hard to safely download all my Guilded chat conversations from my servers and dms locally to my devices, because of the announced shut down of the service. And I'm not the only one who wants to do that, a lot of people used Guilded for storing important information, such as development on Roblox experiences, UGC items and more. Losing that information is something I and other would NOT want to lose.",
+   "stake": "user",
+   "qualifies": "first-hand Guilded server owner (Roblox creator community, not a modding group) on what a closing home takes with it; string-checked",
+   "stale": false
+  },
+  {
+   "id": "C76",
+   "url": "https://devforum.roblox.com/t/ability-to-safely-and-locally-download-all-of-our-chatmedia-conversationslogs-from-guilded-serversdms/3968539/2",
+   "date": "2025-10-23",
+   "date_from": "post",
+   "author": "Abroxus",
+   "family": "Roblox DevForum",
+   "text": "We need the ability to collect data from our Guilded channels, it's unprofessional from a Roblox standpoint to acquire a messaging app to then close it down without any tools to collect data.",
+   "stake": "user",
+   "qualifies": "first-hand member of a Roblox creator group on Guilded; string-checked; the need is cited, not the mechanism",
+   "stale": false
+  },
+  {
+   "id": "C77",
+   "url": "https://sh.itjust.works/comment/603473",
+   "date": "2023-07-02",
+   "date_from": "post",
+   "author": "Atomic",
+   "family": "Lemmy/threadiverse",
+   "text": "I help moderate a small discord channel, Maybe I'm a sucker too. But I help so our outfit can have a place to hang out outside of the game, share ideas and plan events.",
+   "stake": "user",
+   "qualifies": "first-hand volunteer moderator of a gaming group's server, on why they do it",
+   "stale": false
+  },
+  {
+   "id": "C78",
+   "url": "https://sh.itjust.works/comment/10155909",
+   "date": "2024-03-22",
+   "date_from": "post",
+   "author": "kboy101222",
+   "family": "Lemmy/threadiverse",
+   "text": "I got invited by a friend to moderate a default subreddit. I lasted less than a week. The types of things people post on there that the users never see is *horrifying* and whenever I can afford therapy it will be getting brought up.",
+   "stake": "user",
+   "qualifies": "first-hand volunteer moderator (Reddit, not a modding group) on what removal work exposes moderators to",
+   "stale": false
+  },
+  {
+   "id": "C79",
+   "url": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504#issuecomment-4126816874",
+   "date": "2026-03-25",
+   "date_from": "post",
+   "author": "Monitor221hz",
+   "family": "GitHub issue trackers",
+   "text": "We do not delete comments on nexus",
+   "stake": "maintainer",
+   "qualifies": "first-hand tool author answering a player who thought a fix comment was removed",
+   "stale": false,
+   "thread": "https://github.com/Monitor221hz/Pandora-Behaviour-Engine-Plus/issues/504"
+  },
+  {
+   "id": "C80",
+   "url": "https://github.com/JW11-modder/JumpSpace/issues/2#issuecomment-4919377537",
+   "date": "2026-07-08",
+   "date_from": "post",
+   "author": "LordIgnis",
+   "family": "GitHub issue trackers",
+   "text": "that means someone likely reported it cause someone joined a random lobby with it and started rage hacking in a pve game? doesn't make any sense, its an absolutely bullshit reason to trash a mod especially when you already had a notice in the description about it being for solo lobbies or something along those lines anyways",
+   "stake": "user",
+   "qualifies": "first-hand player reacting to a removal of a mod they used",
+   "stale": false,
+   "thread": "https://github.com/JW11-modder/JumpSpace/issues/2"
+  },
+  {
+   "id": "C81",
+   "url": "https://news.ycombinator.com/item?id=44299328",
+   "date": "2025-06-17",
+   "date_from": "post",
+   "author": "SOLAR_FIELDS",
+   "family": "Hacker News",
+   "text": "The auto-update package management functionality of Steam Workshop is its killer feature. I can click a single button and get the latest updated versions of all my mods. I'm usually opposed to Steam on principle, opting instead for DRM free options for my games, but it's basically impossible to maintain any decent amount of mods without a manager like what Steam Workshop offers",
+   "stake": "user",
+   "qualifies": "first-hand RimWorld player where the tools do fit together; the other direction for Q13",
+   "stale": false
+  },
+  {
+   "id": "C82",
+   "url": "https://github.com/ludvdber/Lethal-Reloaded/issues/44#issuecomment-6000445233",
+   "date": "2026-10-05",
+   "date_from": "post",
+   "author": "MihaelStipic",
+   "family": "GitHub issue trackers",
+   "text": "Seems like they fixed it now. It was definitely Wesley Moons, they keep updating it these days.",
+   "stake": "user",
+   "qualifies": "first-hand modpack player whose crash went away two days later with upstream updates; the other direction for Q5",
+   "stale": false,
+   "thread": "https://github.com/ludvdber/Lethal-Reloaded/issues/44"
+  },
+  {
+   "id": "C83",
+   "url": "https://github.com/ObscuriaLithium/aquamirae/issues/41",
+   "date": "2026-08-22",
+   "date_from": "post",
+   "author": "he1iotropes",
+   "family": "GitHub issue trackers",
+   "text": "the game crashes upon loading. something something at net.minecraft.client.sounds.MusicManager.startPlaying(MusicManager.java:55)",
+   "stake": "user",
+   "qualifies": "first-hand Minecraft player with about 270 mods; attaches logs and mod list as paste links without reading them",
+   "stale": false
+  },
+  {
+   "id": "C84",
+   "url": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8#issuecomment-5699931984",
+   "date": "2026-09-16",
+   "date_from": "post",
+   "author": "pcolb1",
+   "family": "GitHub issue trackers",
+   "text": "Both the 1.20.1 and 26.2 issues should be fixed in the 1.0.14 release that I'm shipping now.",
+   "stake": "user",
+   "qualifies": "first-hand mod author: two days from report to fix once the data arrived",
+   "stale": false,
+   "thread": "https://github.com/pcolb1/MalisisDoorsReborn/issues/8"
+  },
+  {
+   "id": "C85",
+   "url": "https://github.com/dabinn/cyberpunk-vr-port/issues/21",
+   "date": "2026-09-18",
+   "date_from": "post",
+   "author": "rarends100",
+   "family": "GitHub issue trackers",
+   "text": "In the game, there is a bug that deforms the left arm (I suspect the arm bone) I tried to fix it for 30 hours and eventually decided to give up.",
+   "stake": "user",
+   "qualifies": "first-hand Cyberpunk VR mod player on the point of giving up; the issue's longer analysis is not cited",
+   "stale": false
+  },
+  {
+   "id": "C86",
+   "url": "https://github.com/dabinn/cyberpunk-vr-port/issues/21",
+   "date": "2026-09-18",
+   "date_from": "post",
+   "author": "rarends100",
+   "family": "GitHub issue trackers",
+   "text": "At that point, I could not figure out what to do and had made too many changes to the base code for it to be stable, so I scrapped all of them.",
+   "stake": "user",
+   "qualifies": "same author, same report",
+   "stale": false
+  },
+  {
+   "id": "C87",
+   "url": "https://github.com/limo-app/limo/issues/181",
+   "date": "2025-04-24",
+   "date_from": "post",
+   "author": "Veprovina",
+   "family": "GitHub issue trackers",
+   "text": "I can't get any of the tools to work. \n\nPandora native Linux doesn't find any plugins and crashes if i press the \"play\" start thing.",
+   "stake": "user",
+   "qualifies": "first-hand Linux Skyrim SE player at the start of setting up a toolchain",
+   "stale": false
+  },
+  {
+   "id": "C88",
+   "url": "https://github.com/ajour/ajour/issues/746#issuecomment-969153213",
+   "date": "2021-11-15",
+   "date_from": "post",
+   "author": "mmolad",
+   "family": "GitHub issue trackers",
+   "text": "I remember the first time I hit \"update all\" and it iterated through every addon and updated in under 2 seconds.  I assumed something went wrong.  I don't even load web pages that fast.",
+   "stake": "user",
+   "qualifies": "first-hand WoW player on the moment a manager won them over; the tool is gone since 2021, marked stale",
+   "stale": true,
+   "thread": "https://github.com/ajour/ajour/issues/746"
+  },
+  {
+   "id": "C89",
+   "url": "https://github.com/ajour/ajour/issues/746#issuecomment-968668195",
+   "date": "2021-11-15",
+   "date_from": "post",
+   "author": "imHitchens",
+   "family": "GitHub issue trackers",
+   "text": "I love Ajour. It's the fastest, easiest and hardest to screw up addon manager there ever was, making it the obvious client to recommend to anyone new to the game or activities requiring addons.  \n  \nIt was also the one project that finally got me active on github.",
+   "stake": "user",
+   "qualifies": "first-hand player: relied on and recommended a tool; stale (tool ended 2021)",
+   "stale": true,
+   "thread": "https://github.com/ajour/ajour/issues/746"
+  },
+  {
+   "id": "C90",
+   "url": "https://github.com/ajour/ajour/issues/746#issuecomment-968490248",
+   "date": "2021-11-15",
+   "date_from": "post",
+   "author": "Walkerbo",
+   "family": "GitHub issue trackers",
+   "text": "I have used Ajour since its launch and have found it to be a very light and well-designed app.\nI have also converted my family to using it exclusively.",
+   "stake": "user",
+   "qualifies": "first-hand player: from launch to recommending; stale (tool ended 2021)",
+   "stale": true,
+   "thread": "https://github.com/ajour/ajour/issues/746"
+  },
+  {
+   "id": "C91",
+   "url": "https://stepmodifications.org/forum/topic/20025-crash-log",
+   "date": "2024-09-17",
+   "date_from": "post",
+   "author": "Kattmandu",
+   "family": "STEP Modifications forum",
+   "text": "I think one of the four QuickLoot EE mods, in the screenshot below, is what is causing the crashing.",
+   "stake": "user",
+   "qualifies": "first-hand; the first suspect, three days in; string-checked",
+   "stale": false
+  },
+  {
+   "id": "C92",
+   "url": "https://github.com/Team-Argentum/Lucis/issues/8",
+   "date": "2026-09-07",
+   "date_from": "post",
+   "author": "hiimrickross",
+   "family": "GitHub issue trackers",
+   "text": "I tried Lucis with Slabbed removed, and now it worked too! So I'm not sure what Slabbed is doing.. But dang!",
+   "stake": "user",
+   "qualifies": "first-hand; the outcome after another author pinpointed the cause",
+   "stale": false
+  },
+  {
+   "id": "C93",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166",
+   "date": "2026-06-03",
+   "date_from": "post",
+   "author": "trainfan79",
+   "family": "GitHub issue trackers",
+   "text": "1. Tried to open the enchantment infuser's ui\n2. kicks me out of the world",
+   "stake": "user",
+   "qualifies": "first-hand Minecraft player's whole description of the crash, in a template that also asked for a crash report they filled with 'network protocol error'",
+   "stale": false
+  },
+  {
+   "id": "C94",
+   "url": "https://github.com/Fuzss/enchanting-infuser/issues/166#issuecomment-4747007439",
+   "date": "2026-06-18",
+   "date_from": "post",
+   "author": "trainfan79",
+   "family": "GitHub issue trackers",
+   "text": "this is the log I found",
+   "stake": "user",
+   "qualifies": "first-hand; fifteen days after being asked, the player posts a log (dated 2025-04-21, a different session)",
+   "stale": false,
+   "thread": "https://github.com/Fuzss/enchanting-infuser/issues/166"
+  }
+ ],
+ "learnings": [
+  {
+   "id": "L1",
+   "round": 1,
+   "from": [
+    "Q1",
+    "C1",
+    "C10",
+    "C32"
+   ],
+   "learning": "Players with a crashing setup work alone first: they switch mods off one at a time, search the crash text, and blame their own setup. Finding that someone else has the same crash is a moment of relief, and it decides whether they keep going.",
+   "evidence": [
+    "C1",
+    "C2",
+    "C10",
+    "C32",
+    "C53",
+    "C61"
+   ],
+   "spawned": [
+    "Q15",
+    "Q17"
+   ]
+  },
+  {
+   "id": "L2",
+   "round": 1,
+   "from": [
+    "Q2",
+    "C5",
+    "C6",
+    "C20",
+    "C55"
+   ],
+   "learning": "Help for one crash is spread over many places: the list's Discord, each mod's tracker, host comments, forums. Players get passed from one to another and sometimes nobody answers.",
+   "evidence": [
+    "C5",
+    "C6",
+    "C20",
+    "C48",
+    "C55",
+    "C62"
+   ],
+   "spawned": [
+    "Q14"
+   ]
+  },
+  {
+   "id": "L3",
+   "round": 1,
+   "from": [
+    "Q2",
+    "Q3",
+    "C45",
+    "C46",
+    "C50"
+   ],
+   "learning": "Authors can only act on a report that carries a log, versions and a mod list. Players often cannot find or read that log, so the first exchange is the author asking for something the player does not know how to give.",
+   "evidence": [
+    "C45",
+    "C46",
+    "C47",
+    "C50",
+    "C51"
+   ],
+   "spawned": [
+    "Q15"
+   ]
+  },
+  {
+   "id": "L4",
+   "round": 1,
+   "from": [
+    "Q5",
+    "C10",
+    "C13",
+    "C14"
+   ],
+   "learning": "A crash that someone has already worked out stays hidden in a thread on one site. The next player finds it after an hour, after months, or not at all, and a fix in a comment can seem to vanish.",
+   "evidence": [
+    "C8",
+    "C10",
+    "C13",
+    "C14",
+    "C15",
+    "C33",
+    "C49"
+   ],
+   "spawned": [
+    "Q17"
+   ]
+  },
+  {
+   "id": "L5",
+   "round": 1,
+   "from": [
+    "Q1",
+    "C4",
+    "C57"
+   ],
+   "learning": "Since 2025 some players hand their crash logs to an AI and bring its analysis to the mod author as the report.",
+   "evidence": [
+    "C4",
+    "C56",
+    "C57",
+    "C59"
+   ],
+   "spawned": [
+    "Q16"
+   ]
+  },
+  {
+   "id": "L6",
+   "round": 1,
+   "from": [
+    "Q4",
+    "C23",
+    "C52"
+   ],
+   "learning": "What authors get back in money is small or comes as site perks, as far as reachable sources show. What one author says they value is reports they can act on.",
+   "evidence": [
+    "C23",
+    "C52"
+   ],
+   "spawned": [
+    "Q19"
+   ]
+  },
+  {
+   "id": "L7",
+   "round": 1,
+   "from": [
+    "Q6",
+    "Q9",
+    "Q10",
+    "C30",
+    "C28"
+   ],
+   "learning": "When a mod disappears, by the author's choice or by the host's removal, the players and list curators who relied on it are left with a gap and often no name or reason. Authors' control over their work and players' continuity pull against each other.",
+   "evidence": [
+    "C28",
+    "C29",
+    "C30",
+    "C63",
+    "C69"
+   ],
+   "spawned": [
+    "Q18"
+   ]
+  },
+  {
+   "id": "L8",
+   "round": 1,
+   "from": [
+    "Q7",
+    "Q8",
+    "C75",
+    "C43"
+   ],
+   "learning": "When a group's platform closes or adds an ID check, leaders worry first about losing the group's history and members. Some comply when the check reaches them. Modding groups' own accounts of this were out of reach for this run.",
+   "evidence": [
+    "C21",
+    "C43",
+    "C44",
+    "C75",
+    "C76"
+   ],
+   "spawned": [
+    "Q20"
+   ]
+  },
+  {
+   "id": "L9",
+   "round": 2,
+   "from": [
+    "Q13",
+    "C64",
+    "C65",
+    "C67"
+   ],
+   "learning": "The places where players' tools meet fail where players cannot see it: installers logged out of the host, rate limits, logs the launcher hides, deleted mods shown as numbers. These are the moments players name when they say they will drop a tool.",
+   "evidence": [
+    "C47",
+    "C64",
+    "C65",
+    "C66",
+    "C67",
+    "C68",
+    "C69"
+   ],
+   "spawned": []
+  },
+  {
+   "id": "L10",
+   "round": 2,
+   "from": [
+    "Q15",
+    "C83",
+    "C61"
+   ],
+   "learning": "Players start from different places before any report is written. In the GitHub sample, Minecraft reports often carry launcher-uploaded log links (a source-sample observation, not a player's account), while the Skyrim players read here work from a crash logger's output. Either way the data ends up on paste sites and in Discord threads that can expire or stay unseen.",
+   "evidence": [
+    "C32",
+    "C61",
+    "C62",
+    "C83"
+   ],
+   "spawned": []
+  },
+  {
+   "id": "L11",
+   "round": 2,
+   "from": [
+    "Q19",
+    "Q20",
+    "C36"
+   ],
+   "learning": "People stay on a platform where their friends and audience are, even while they fear arbitrary removal. Belonging holds them more than terms do.",
+   "evidence": [
+    "C36",
+    "C73"
+   ],
+   "spawned": []
+  }
+ ],
+ "stories": [
+  {
+   "id": "S1",
+   "author": "Kattmandu",
+   "situation": {
+    "text": "Playing Skyrim SE built from the STEP guide; the playthrough kept crashing to desktop, even after starting a new game",
+    "citations": [
+     "C32"
+    ]
+   },
+   "trying_to": {
+    "text": "Understand the crash log and stop the crashes",
+    "citations": [
+     "C32"
+    ]
+   },
+   "did": [
+    {
+     "text": "Asked the STEP forum to help read the crash log",
+     "citations": [
+      "C32"
+     ]
+    },
+    {
+     "text": "Searched the crash text and found a post blaming a mod not updated for the latest PapyrusUtil",
+     "citations": [
+      "C33"
+     ]
+    },
+    {
+     "text": "Suspected the QuickLoot EE mods",
+     "citations": [
+      "C91"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Crashes continued, less often",
+     "citations": [
+      "C34"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "I really don't know what to look for",
+     "citations": [
+      "C32"
+     ]
+    },
+    {
+     "words": "Hmmm",
+     "citations": [
+      "C34"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Concluded several mods might be causing it",
+    "citations": [
+     "C34"
+    ]
+   }
+  },
+  {
+   "id": "S2",
+   "author": "hiimrickross",
+   "situation": {
+    "text": "Minecraft modpack with Lucis and C2ME; the world failed to load or soft-locked",
+    "citations": [
+     "C9"
+    ]
+   },
+   "trying_to": {
+    "text": "Get the world to load with both mods",
+    "citations": [
+     "C9"
+    ]
+   },
+   "did": [
+    {
+     "text": "Went to the C2ME NeoForge author, who had them install ModernFix for its logging",
+     "citations": [
+      "C9"
+     ]
+    },
+    {
+     "text": "Spent about an hour switching between the two mods and another, testing",
+     "citations": [
+      "C10"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "The C2ME author pinpointed a third mod, Slabbed, immediately",
+     "citations": [
+      "C9"
+     ]
+    },
+    {
+     "text": "With Slabbed removed, Lucis worked",
+     "citations": [
+      "C92"
+     ]
+    },
+    {
+     "text": "Later found another user's report of the same symptom on the mod's CurseForge page",
+     "citations": [
+      "C10"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "But dang!",
+     "citations": [
+      "C92"
+     ]
+    },
+    {
+     "words": "so it's not just me, that's good",
+     "citations": [
+      "C10"
+     ]
+    },
+    {
+     "words": "Wish I saw the comment earlier lol",
+     "citations": [
+      "C10"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Reported the cause and the remaining symptom on the Lucis tracker",
+    "citations": [
+     "C9",
+     "C10"
+    ]
+   }
+  },
+  {
+   "id": "S3",
+   "author": "trainfan79",
+   "situation": {
+    "text": "Minecraft on Fabric; opening one mod's block kicked them out of the world",
+    "citations": [
+     "C93"
+    ]
+   },
+   "trying_to": {
+    "text": "Report the crash to the mod's author",
+    "citations": [
+     "C93"
+    ]
+   },
+   "did": [
+    {
+     "text": "Filed a report with the crash message they had",
+     "citations": [
+      "C93"
+     ]
+    },
+    {
+     "text": "Asked how to get the log of the world crashing",
+     "citations": [
+      "C46"
+     ]
+    },
+    {
+     "text": "Looked where told; the log was not there",
+     "citations": [
+      "C47"
+     ]
+    },
+    {
+     "text": "Waited, then posted 'hello?'",
+     "citations": [
+      "C48"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "The log did not show up, probably because they launch through the Modrinth app",
+     "citations": [
+      "C47"
+     ]
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "Fifteen days later posted a log they had found",
+    "citations": [
+     "C94"
+    ]
+   }
+  },
+  {
+   "id": "S4",
+   "author": "Florararie",
+   "situation": {
+    "text": "Playing a preconfigured Skyrim list (Tuxborn); crashes began after adding three mods",
+    "citations": [
+     "C2"
+    ]
+   },
+   "trying_to": {
+    "text": "Work out what is causing the crashes",
+    "citations": [
+     "C2"
+    ]
+   },
+   "did": [
+    {
+     "text": "Reported to one of the added mods' trackers as a shot in the dark",
+     "citations": [
+      "C2"
+     ]
+    },
+    {
+     "text": "Asked to be pointed toward how to diagnose further",
+     "citations": [
+      "C3"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [
+    {
+     "words": "sorry haha",
+     "citations": [
+      "C2"
+     ]
+    },
+    {
+     "words": "apologies once again",
+     "citations": [
+      "C3"
+     ]
+    },
+    {
+     "words": "I would be extremely grateful",
+     "citations": [
+      "C3"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S5",
+   "author": "rafalswierczek",
+   "situation": {
+    "text": "Skyrim with Pandora 4.0.4, crashing at the same point in Helgen as others in the thread",
+    "citations": [
+     "C11"
+    ]
+   },
+   "trying_to": {
+    "text": "Get past the crash",
+    "citations": [
+     "C11"
+    ]
+   },
+   "did": [
+    {
+     "text": "Confirmed the bug, then set up the older Pandora 2.7 to test",
+     "citations": [
+      "C11"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Setting up 2.7 was hit or miss with no documentation; once working, the game crashed at the same moment",
+     "citations": [
+      "C11"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "Why is this issue not popular enough?",
+     "citations": [
+      "C11"
+     ]
+    },
+    {
+     "words": "a nightmare",
+     "citations": [
+      "C11"
+     ]
+    },
+    {
+     "words": "The hype around this program is a joke.",
+     "citations": [
+      "C11"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S6",
+   "author": "Ricarius",
+   "situation": {
+    "text": "Skyrim with the new public Nexus release of Pandora; crash seconds after leaving the Helgen cave",
+    "citations": [
+     "C15"
+    ]
+   },
+   "trying_to": {
+    "text": "Stop the crash without breaking anything else",
+    "citations": [
+     "C15"
+    ]
+   },
+   "did": [
+    {
+     "text": "Disabled the XPMSE patch, the workaround posted in the thread",
+     "citations": [
+      "C15"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "The crash stopped",
+     "citations": [
+      "C15"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "I'd prefer not to resort to this measure as a permanent fix",
+     "citations": [
+      "C15"
+     ]
+    },
+    {
+     "words": "uncertain what consequences disabling the patch would have",
+     "citations": [
+      "C15"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S7",
+   "author": "Tetrol88",
+   "situation": {
+    "text": "Skyrim SE through Vortex 2.0.0, which began warning about mods by Nexus number",
+    "citations": [
+     "C30"
+    ]
+   },
+   "trying_to": {
+    "text": "Find out which mods the warnings meant",
+    "citations": [
+     "C30"
+    ]
+   },
+   "did": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "happened": [
+    {
+     "text": "The mods had been deleted on Nexus and their names dropped, so there was no way to identify them",
+     "citations": [
+      "C30"
+     ]
+    },
+    {
+     "text": "The warnings kept coming, some for mods not in their list",
+     "citations": [
+      "C69"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "a useless reference",
+     "citations": [
+      "C30"
+     ]
+    },
+    {
+     "words": "this useless \"feature\"",
+     "citations": [
+      "C69"
+     ]
+    },
+    {
+     "words": "who cares that there is a discontinued mod in the list",
+     "citations": [
+      "C69"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Hopes for a way to turn the warning off",
+    "citations": [
+     "C69"
+    ]
+   }
+  },
+  {
+   "id": "S8",
+   "author": "Piranha91",
+   "situation": {
+    "text": "Installing a Wabbajack list after Wabbajack self-updated and logged them out of Nexus",
+    "citations": [
+     "C67"
+    ]
+   },
+   "trying_to": {
+    "text": "Install their mod list",
+    "citations": [
+     "C67"
+    ]
+   },
+   "did": [
+    {
+     "text": "Started the install, which failed; tried to log into Nexus",
+     "citations": [
+      "C67"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Told to wait 10 minutes because of the API requests from their IP",
+     "citations": [
+      "C67"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "This is very annoying.",
+     "citations": [
+      "C67"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Sees the alternative as downloading everything by hand and playing the list in a year or two",
+    "citations": [
+     "C68"
+    ]
+   }
+  },
+  {
+   "id": "S9",
+   "author": "CatGamer23",
+   "situation": {
+    "text": "Downloading a modpack through Wabbajack",
+    "citations": [
+     "C65"
+    ]
+   },
+   "trying_to": {
+    "text": "Get the modpack installed",
+    "citations": [
+     "C65"
+    ]
+   },
+   "did": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "happened": [
+    {
+     "text": "The download hit the API limit and they got a ~10 minute ban",
+     "citations": [
+      "C65"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "frustrating",
+     "citations": [
+      "C65"
+     ]
+    },
+    {
+     "words": "WJ is unusable in it's current state",
+     "citations": [
+      "C66"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Looking for another tool",
+    "citations": [
+     "C66"
+    ]
+   }
+  },
+  {
+   "id": "S10",
+   "author": "KylerN45",
+   "situation": {
+    "text": "Starting a Wabbajack list install while logged out of Nexus without knowing it",
+    "citations": [
+     "C64"
+    ]
+   },
+   "trying_to": {
+    "text": "Install a list",
+    "citations": [
+     "C64"
+    ]
+   },
+   "did": [
+    {
+     "text": "Logged in again, waited, tried again",
+     "citations": [
+      "C64"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Failed downloads and a forced 10-minute wait",
+     "citations": [
+      "C64"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "I'm always frustrated",
+     "citations": [
+      "C64"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S11",
+   "author": "pcolb1",
+   "situation": {
+    "text": "Author of Malisis Doors Reborn; a player reported crashes on two game versions",
+    "citations": [
+     "C50"
+    ]
+   },
+   "trying_to": {
+    "text": "Identify what is failing",
+    "citations": [
+     "C51"
+    ]
+   },
+   "did": [
+    {
+     "text": "Asked for the latest.log, versions, mod list, full error and whether it was singleplayer",
+     "citations": [
+      "C50"
+     ]
+    },
+    {
+     "text": "Removed the duplicate report from CurseForge to track it in one place",
+     "citations": [
+      "C52"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "With the versions in hand, shipped fixes for both in the next release two days later",
+     "citations": [
+      "C84"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "only with feedback from people can I improve my mods",
+     "citations": [
+      "C52"
+     ]
+    },
+    {
+     "words": "I really do appreciate the time you've taken",
+     "citations": [
+      "C52"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Shipping release 1.0.14",
+    "citations": [
+     "C84"
+    ]
+   }
+  },
+  {
+   "id": "S12",
+   "author": "Fuzss",
+   "situation": {
+    "text": "Mod author receiving a crash report with no log",
+    "citations": [
+     "C45"
+    ]
+   },
+   "trying_to": {
+    "text": "Help the player",
+    "citations": [
+     "C45"
+    ]
+   },
+   "did": [
+    {
+     "text": "Replied that they cannot help without the log",
+     "citations": [
+      "C45"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S13",
+   "author": "GrizzlT",
+   "situation": {
+    "text": "Author of a Hypixel overlay mod with a crash issue open for four months",
+    "citations": [
+     "C18"
+    ]
+   },
+   "trying_to": {
+    "text": "Keep the project alive",
+    "citations": [
+     "C18"
+    ]
+   },
+   "did": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "happened": [
+    {
+     "text": "No time to set up the testing environment again",
+     "citations": [
+      "C18"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "quite packed with work",
+     "citations": [
+      "C18"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S14",
+   "author": "JW11-modder",
+   "situation": {
+    "text": "Author whose mod JumpSpace was removed from Nexus",
+    "citations": [
+     "C28"
+    ]
+   },
+   "trying_to": {
+    "text": "Explain the removal to users who asked",
+    "citations": [
+     "C28"
+    ]
+   },
+   "did": [
+    {
+     "text": "Passed on the official reason",
+     "citations": [
+      "C28"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [
+    {
+     "words": "whatever that means",
+     "citations": [
+      "C28"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S15",
+   "author": "socialmediaaddress3",
+   "situation": {
+    "text": "Small Fallout 4 mod author on Nexus who has watched other authors banned or leave",
+    "citations": [
+     "C36",
+     "C37"
+    ]
+   },
+   "trying_to": {
+    "text": "Keep hosting where they have friends",
+    "citations": [
+     "C36"
+    ]
+   },
+   "did": [
+    {
+     "text": "Keeps hosting on Nexus",
+     "citations": [
+      "C36"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [
+    {
+     "words": "the sword of Damocles hanging over our heads",
+     "citations": [
+      "C36"
+     ]
+    },
+    {
+     "words": "overblown",
+     "citations": [
+      "C37"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Staying, because that is where they 'live'",
+    "citations": [
+     "C36"
+    ]
+   }
+  },
+  {
+   "id": "S16",
+   "author": "birdmartinyt",
+   "situation": {
+    "text": "Owner of Guilded servers when the shutdown was announced",
+    "citations": [
+     "C75"
+    ]
+   },
+   "trying_to": {
+    "text": "Save all their servers' and DMs' conversations locally",
+    "citations": [
+     "C75"
+    ]
+   },
+   "did": [
+    {
+     "text": "Asked on the Roblox DevForum for a way to do it",
+     "citations": [
+      "C75"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Found it too hard to download safely",
+     "citations": [
+      "C75"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "something I and other would NOT want to lose",
+     "citations": [
+      "C75"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S17",
+   "author": "rudy-in",
+   "situation": {
+    "text": "Leads a project community on Discord when the age check returned in September 2026",
+    "citations": [
+     "C43"
+    ]
+   },
+   "trying_to": {
+    "text": "Decide whether to leave Discord",
+    "citations": [
+     "C43"
+    ]
+   },
+   "did": [
+    {
+     "text": "Said they would move the project's community to Discourse if the check reached them",
+     "citations": [
+      "C43"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Twenty minutes later had to verify their age",
+     "citations": [
+      "C44"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "sighs",
+     "citations": [
+      "C43"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S18",
+   "author": "Retro_unlimited",
+   "situation": {
+    "text": "Has a community built on Discord when age verification was announced",
+    "citations": [
+     "C21"
+    ]
+   },
+   "trying_to": {
+    "text": "Keep their people reachable",
+    "citations": [
+     "C21"
+    ]
+   },
+   "did": [
+    {
+     "text": "Posted to the community a list of other ways to reach them, a Matrix server and a Signal chat",
+     "citations": [
+      "C21"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "Not coming back to Discord if the check is shown to them",
+    "citations": [
+     "C21"
+    ]
+   }
+  },
+  {
+   "id": "S19",
+   "author": "PostOnce",
+   "situation": {
+    "text": "Used Discord reluctantly because projects they followed moved there",
+    "citations": [
+     "C73"
+    ]
+   },
+   "trying_to": {
+    "text": "Keep up with those projects",
+    "citations": [
+     "C73"
+    ]
+   },
+   "did": [
+    {
+     "text": "Contacted Discord's developers after repeated automatic bans",
+     "citations": [
+      "C73"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Was autobanned several times by an algorithm, then fixed by hand",
+     "citations": [
+      "C73"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "never going to consider using discord again",
+     "citations": [
+      "C73"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Back to IRC and Signal groups",
+    "citations": [
+     "C73"
+    ]
+   }
+  },
+  {
+   "id": "S20",
+   "author": "VRsingthegamez",
+   "situation": {
+    "text": "Playing the Squeegeepunk Cyberpunk list; saves sometimes crashed on load",
+    "citations": [
+     "C5"
+    ]
+   },
+   "trying_to": {
+    "text": "Find what makes the save crash",
+    "citations": [
+     "C5"
+    ]
+   },
+   "did": [
+    {
+     "text": "Asked the list's Discord, then disabled suspect mods, overwrote, verified and reinstalled",
+     "citations": [
+      "C5"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "No answer on Discord; still crashing",
+     "citations": [
+      "C5"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "not fully sure at this point",
+     "citations": [
+      "C5"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Reported it on the Wabbajack tracker",
+    "citations": [
+     "C5"
+    ]
+   }
+  },
+  {
+   "id": "S21",
+   "author": "232349856",
+   "situation": {
+    "text": "Skyrim VR setup; a new plugin crashed the game on every launch",
+    "citations": [
+     "C4"
+    ]
+   },
+   "trying_to": {
+    "text": "Get the plugin working, or warn others",
+    "citations": [
+     "C4"
+    ]
+   },
+   "did": [
+    {
+     "text": "Asked Claude Code to look at the repo and logs and posted its answer",
+     "citations": [
+      "C4"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "Asked the author to fix it or add an incompatibility note",
+    "citations": [
+     "C4"
+    ]
+   }
+  },
+  {
+   "id": "S22",
+   "author": "serioos",
+   "situation": {
+    "text": "Minecraft with two mods that crash together before the menu",
+    "citations": [
+     "C57"
+    ]
+   },
+   "trying_to": {
+    "text": "Find the cause",
+    "citations": [
+     "C57"
+    ]
+   },
+   "did": [
+    {
+     "text": "Ran only the two mods together",
+     "citations": [
+      "C57"
+     ]
+    },
+    {
+     "text": "Took the crash log to ChatGPT",
+     "citations": [
+      "C57"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S23",
+   "author": "OnyxtinctII",
+   "situation": {
+    "text": "Skyrim AE crashing to desktop at the start of dialogue",
+    "citations": [
+     "C1"
+    ]
+   },
+   "trying_to": {
+    "text": "Find the cause",
+    "citations": [
+     "C1"
+    ]
+   },
+   "did": [
+    {
+     "text": "Enabled and disabled mods one by one until the crash stopped",
+     "citations": [
+      "C1"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Found a conflict or bug in one mod",
+     "citations": [
+      "C1"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "I couldn't tell you why",
+     "citations": [
+      "C1"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Reported it to that mod's tracker with the crash log",
+    "citations": [
+     "C1"
+    ]
+   }
+  },
+  {
+   "id": "S24",
+   "author": "rarends100",
+   "situation": {
+    "text": "Cyberpunk in VR with a mod; an arm-deforming bug",
+    "citations": [
+     "C85"
+    ]
+   },
+   "trying_to": {
+    "text": "Fix the bug",
+    "citations": [
+     "C85"
+    ]
+   },
+   "did": [
+    {
+     "text": "Tried to fix it for 30 hours, changing the base code",
+     "citations": [
+      "C85",
+      "C86"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Could not figure out what to do; the changes made it unstable",
+     "citations": [
+      "C86"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "eventually decided to give up",
+     "citations": [
+      "C85"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Scrapped all the changes",
+    "citations": [
+     "C86"
+    ]
+   }
+  },
+  {
+   "id": "S25",
+   "author": "Mechanax",
+   "situation": {
+    "text": "A large mod list that closes on boot with nothing in the logs",
+    "citations": [
+     "C61"
+    ]
+   },
+   "trying_to": {
+    "text": "Get more information about the cause",
+    "citations": [
+     "C61"
+    ]
+   },
+   "did": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "happened": [
+    {
+     "text": "No log output to go on",
+     "citations": [
+      "C61"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "not really sure",
+     "citations": [
+      "C61"
+     ]
+    }
+   ],
+   "next": {
+    "text": "Planning to disable mods one by one",
+    "citations": [
+     "C61"
+    ]
+   }
+  },
+  {
+   "id": "S26",
+   "author": "zeagle",
+   "situation": {
+    "text": "Plays Oblivion and New Vegas with mods assembled by hand",
+    "citations": [
+     "C38"
+    ]
+   },
+   "trying_to": {
+    "text": "Get the mods to play nice",
+    "citations": [
+     "C38"
+    ]
+   },
+   "did": [
+    {
+     "text": "Spends an evening assembling",
+     "citations": [
+      "C38"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "No time left to play for a few weeks",
+     "citations": [
+      "C38"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "I do wish there was more mod packs",
+     "citations": [
+      "C38"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S27",
+   "author": "Txikivasco",
+   "situation": {
+    "text": "Skyrim with Pandora 4.1.2beta, still crashing at Helgen",
+    "citations": [
+     "C16"
+    ]
+   },
+   "trying_to": {
+    "text": "Keep using Pandora",
+    "citations": [
+     "C16"
+    ]
+   },
+   "did": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "happened": [
+    {
+     "text": "The same crash at the same spot",
+     "citations": [
+      "C16"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "It's a shame because it does many well very well",
+     "citations": [
+      "C16"
+     ]
+    },
+    {
+     "words": "a deal braker for me",
+     "citations": [
+      "C16"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S28",
+   "author": "shadow147-github",
+   "situation": {
+    "text": "Long-time Skyrim player in the Pandora Helgen thread",
+    "citations": [
+     "C12"
+    ]
+   },
+   "trying_to": {
+    "text": "Explain why the crash is not more widely reported",
+    "citations": [
+     "C12"
+    ]
+   },
+   "did": [
+    {
+     "text": "Uses alternate start mods and skips Helgen",
+     "citations": [
+      "C12"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S29",
+   "author": "Shadowedcross",
+   "situation": {
+    "text": "Mods their games; mod support lives on Discord",
+    "citations": [
+     "C20"
+    ]
+   },
+   "trying_to": {
+    "text": "Get support for mods",
+    "citations": [
+     "C20"
+    ]
+   },
+   "did": [
+    {
+     "text": "Joined a server per mod",
+     "citations": [
+      "C20"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "More than half of 200 servers are for mod support",
+     "citations": [
+      "C20"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "pisses me off",
+     "citations": [
+      "C20"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S30",
+   "author": "JohnEdwa",
+   "situation": {
+    "text": "Looking for mods whose projects live on Discord",
+    "citations": [
+     "C70"
+    ]
+   },
+   "trying_to": {
+    "text": "Download a mod",
+    "citations": [
+     "C70"
+    ]
+   },
+   "did": [
+    {
+     "text": "Has to join a server for a single mod",
+     "citations": [
+      "C70"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "Cannot find information through search",
+     "citations": [
+      "C70"
+     ]
+    }
+   ],
+   "felt": [
+    {
+     "words": "I hate",
+     "citations": [
+      "C70"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S31",
+   "author": "Saipher604",
+   "situation": {
+    "text": "Skyrim with the latest Pandora, hitting the Helgen crash",
+    "citations": [
+     "C13"
+    ]
+   },
+   "trying_to": {
+    "text": "Get past the crash",
+    "citations": [
+     "C13"
+    ]
+   },
+   "did": [
+    {
+     "text": "Disabled the XPMSE patch for Pandora",
+     "citations": [
+      "C13"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "The workaround worked",
+     "citations": [
+      "C13"
+     ]
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S32",
+   "author": "yuyaaraki-hash",
+   "situation": {
+    "text": "FFXIV with replaced sound files applied through a mod loader; the game crashed in one PvP mode",
+    "citations": [
+     "C53"
+    ]
+   },
+   "trying_to": {
+    "text": "Find out whether the crash is their environment or the tool",
+    "citations": [
+     "C53"
+    ]
+   },
+   "did": [
+    {
+     "text": "Reported to the tool's tracker, asking what to check or do differently",
+     "citations": [
+      "C53"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [
+    {
+     "words": "I apologize for the trouble",
+     "citations": [
+      "C53"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S33",
+   "author": "ModernGamingWorld",
+   "situation": {
+    "text": "Minecraft with two mods that crash together",
+    "citations": [
+     "C58"
+    ]
+   },
+   "trying_to": {
+    "text": "Use both mods",
+    "citations": [
+     "C58"
+    ]
+   },
+   "did": [
+    {
+     "text": "Removed one mod until it is fixed",
+     "citations": [
+      "C58"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S34",
+   "author": "GregariousJamie",
+   "situation": {
+    "text": "Installs Wabbajack lists without Nexus premium",
+    "citations": [
+     "C63"
+    ]
+   },
+   "trying_to": {
+    "text": "Keep access to every mod they have downloaded",
+    "citations": [
+     "C63"
+    ]
+   },
+   "did": [
+    {
+     "text": "Keeps every mod archive on one drive",
+     "citations": [
+      "C63"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  },
+  {
+   "id": "S35",
+   "author": "Abroxus",
+   "situation": {
+    "text": "Member of a group on Guilded after the shutdown announcement",
+    "citations": [
+     "C76"
+    ]
+   },
+   "trying_to": {
+    "text": "Collect their group's data from Guilded channels",
+    "citations": [
+     "C76"
+    ]
+   },
+   "did": [
+    {
+     "text": "Added their voice to the request for a way to collect it",
+     "citations": [
+      "C76"
+     ]
+    }
+   ],
+   "happened": [
+    {
+     "text": "",
+     "citations": []
+    }
+   ],
+   "felt": [
+    {
+     "words": "it's unprofessional",
+     "citations": [
+      "C76"
+     ]
+    }
+   ],
+   "next": {
+    "text": "",
+    "citations": []
+   }
+  }
+ ],
+ "persona_groups": [
+  {
+   "id": "P1",
+   "name": "Players troubleshooting their own heavy setup",
+   "stories": [
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S20",
+    "S21",
+    "S22",
+    "S23",
+    "S24",
+    "S25",
+    "S26",
+    "S27",
+    "S28",
+    "S29",
+    "S30",
+    "S31",
+    "S32",
+    "S33"
+   ],
+   "authors": 20,
+   "who": {
+    "text": "Players running large or curated mod setups (Skyrim, Cyberpunk, Minecraft packs, Balatro) who hit a crash and become their own troubleshooters before anyone else is involved",
+    "citations": [
+     "C1",
+     "C2",
+     "C5",
+     "C9",
+     "C32",
+     "C61"
+    ]
+   },
+   "goals": [
+    {
+     "text": "Get back to playing: the world loads, the save loads, the scene plays",
+     "citations": [
+      "C9",
+      "C5",
+      "C11"
+     ]
+    },
+    {
+     "text": "Find out whether it is them or the mods",
+     "citations": [
+      "C10",
+      "C53"
+     ]
+    },
+    {
+     "text": "Understand the log",
+     "citations": [
+      "C32",
+      "C3"
+     ]
+    }
+   ],
+   "behaviors": [
+    {
+     "text": "Disable mods one by one or back out recent additions",
+     "citations": [
+      "C1",
+      "C2",
+      "C61"
+     ]
+    },
+    {
+     "text": "Search the crash text for someone else's post",
+     "citations": [
+      "C33"
+     ]
+    },
+    {
+     "text": "Hand the log to an AI",
+     "citations": [
+      "C4",
+      "C57"
+     ]
+    },
+    {
+     "text": "Report to whichever tracker seems closest, often apologising",
+     "citations": [
+      "C2",
+      "C53"
+     ]
+    },
+    {
+     "text": "Route around the crash or remove the mod",
+     "citations": [
+      "C12",
+      "C58"
+     ]
+    },
+    {
+     "text": "Join many Discord servers for support",
+     "citations": [
+      "C20",
+      "C70"
+     ]
+    }
+   ],
+   "mental_model": {
+    "text": "It is probably my setup; somewhere there is one mod at fault and someone may already know which",
+    "citations": [
+     "C2",
+     "C53",
+     "C57",
+     "C34"
+    ]
+   },
+   "frustrations": [
+    {
+     "quote": "I really don't know what to look for.",
+     "citation": "C32"
+    },
+    {
+     "quote": "Why is this issue not popular enough?",
+     "citation": "C11"
+    },
+    {
+     "quote": "Wish I saw the comment earlier lol I spent about 1h going back and forth",
+     "citation": "C10"
+    },
+    {
+     "quote": "you can't find any info about them because google can't index the discussions",
+     "citation": "C70"
+    },
+    {
+     "quote": "how do I get the log of the world crashing?",
+     "citation": "C46"
+    }
+   ],
+   "changed_their_mind": {
+    "text": "Finding someone else with the same crash turns doubt into relief: 'so it's not just me, that's good'",
+    "citations": [
+     "C10"
+    ]
+   },
+   "relationship": [
+    {
+     "stage": "relying",
+     "text": "Keep a setup going for years by routing around known problems",
+     "citations": [
+      "C12"
+     ]
+    },
+    {
+     "stage": "leaving",
+     "text": "Drop a tool or a setup after a crash that breaks what they care about or after long fixing",
+     "citations": [
+      "C16",
+      "C85"
+     ]
+    }
+   ],
+   "doesnt_care_about": [
+    {
+     "text": "The part of the game that crashes, when they can skip it",
+     "citations": [
+      "C12"
+     ]
+    }
+   ],
+   "left_because": [
+    {
+     "text": "A crash in a scene they care about with no fix",
+     "citations": [
+      "C16"
+     ]
+    },
+    {
+     "text": "Thirty hours of fixing that made things less stable",
+     "citations": [
+      "C85",
+      "C86"
+     ]
+    }
+   ],
+   "quotes": [
+    {
+     "quote": "so it's not just me, that's good",
+     "citation": "C10"
+    },
+    {
+     "quote": "The hype around this program is a joke.",
+     "citation": "C11"
+    },
+    {
+     "quote": "I'd prefer not to resort to this measure as a permanent fix",
+     "citation": "C15"
+    },
+    {
+     "quote": "I tried to fix it for 30 hours and eventually decided to give up.",
+     "citation": "C85"
+    }
+   ],
+   "empty": [
+    {
+     "item": "relationship: first hearing, trying, adopting, recommending",
+     "question": "Q22: How did players come to running heavy setups, and what moment made a tool or a list become the one they rely on and recommend?"
+    }
+   ]
+  },
+  {
+   "id": "P2",
+   "name": "Players installing curated lists through installers and hosts",
+   "stories": [
+    "S7",
+    "S8",
+    "S9",
+    "S10",
+    "S34"
+   ],
+   "authors": 5,
+   "who": {
+    "text": "Players who install whole mod lists through Wabbajack or Vortex against Nexus, and meet the failures where those tools hand off to each other",
+    "citations": [
+     "C64",
+     "C65",
+     "C67",
+     "C30"
+    ]
+   },
+   "goals": [
+    {
+     "text": "Click install and get the list",
+     "citations": [
+      "C64",
+      "C67"
+     ]
+    },
+    {
+     "text": "Keep an installed list tidy and current",
+     "citations": [
+      "C30"
+     ]
+    }
+   ],
+   "behaviors": [
+    {
+     "text": "Start installs, then log in again and wait out rate limits",
+     "citations": [
+      "C64",
+      "C67"
+     ]
+    },
+    {
+     "text": "Keep every downloaded archive against later loss",
+     "citations": [
+      "C63"
+     ]
+    },
+    {
+     "text": "Search their own folders for a mod's number",
+     "citations": [
+      "C30"
+     ]
+    }
+   ],
+   "mental_model": {
+    "text": "The tool should carry everything; when it fails, the failure is the tool's",
+    "citations": [
+     "C66",
+     "C69"
+    ]
+   },
+   "frustrations": [
+    {
+     "quote": "I'm always frustrated when \" I click install on a list, only to be met with failed downloads",
+     "citation": "C64"
+    },
+    {
+     "quote": "This is very annoying.",
+     "citation": "C67"
+    },
+    {
+     "quote": "Just makes you check an untrackable list of numbers",
+     "citation": "C69"
+    }
+   ],
+   "changed_their_mind": {
+    "text": "",
+    "citations": []
+   },
+   "relationship": [
+    {
+     "stage": "leaving",
+     "text": "Look for another tool when the installer keeps failing",
+     "citations": [
+      "C66"
+     ]
+    }
+   ],
+   "doesnt_care_about": [
+    {
+     "text": "Mods that were discontinued, once they are out of the list",
+     "citations": [
+      "C69"
+     ]
+    }
+   ],
+   "left_because": [
+    {
+     "text": "Repeated failed downloads and bans",
+     "citations": [
+      "C65",
+      "C66"
+     ]
+    }
+   ],
+   "quotes": [
+    {
+     "quote": "Downloading everything manually and playing the list when I finish in a year or two.",
+     "citation": "C68"
+    },
+    {
+     "quote": "I might *need* that mod i downloaded years ago, y'know?",
+     "citation": "C63"
+    }
+   ],
+   "empty": [
+    {
+     "item": "changed_their_mind",
+     "question": "Q22: How did players come to running heavy setups, and what moment made a tool or a list become the one they rely on and recommend?"
+    },
+    {
+     "item": "relationship: first hearing through relying",
+     "question": "Q22"
+    }
+   ]
+  },
+  {
+   "id": "P3",
+   "name": "Mod authors fielding reports and removals",
+   "stories": [
+    "S11",
+    "S12",
+    "S13",
+    "S14",
+    "S15"
+   ],
+   "authors": 5,
+   "who": {
+    "text": "People who make and maintain mods, receiving crash reports on GitHub, CurseForge and Nexus, sometimes seeing their work removed",
+    "citations": [
+     "C45",
+     "C50",
+     "C18",
+     "C28",
+     "C36"
+    ]
+   },
+   "goals": [
+    {
+     "text": "Get reports they can act on",
+     "citations": [
+      "C50",
+      "C52"
+     ]
+    },
+    {
+     "text": "Keep hosting where their friends and audience are",
+     "citations": [
+      "C36"
+     ]
+    }
+   ],
+   "behaviors": [
+    {
+     "text": "Ask for logs, versions and mod lists",
+     "citations": [
+      "C50",
+      "C45"
+     ]
+    },
+    {
+     "text": "Collapse duplicate reports into one place",
+     "citations": [
+      "C52"
+     ]
+    },
+    {
+     "text": "Ship fixes quickly once the data arrives",
+     "citations": [
+      "C84"
+     ]
+    },
+    {
+     "text": "Step back when work fills their time",
+     "citations": [
+      "C18"
+     ]
+    }
+   ],
+   "mental_model": {
+    "text": "A report without a log is a report they cannot help with; feedback with data is how mods improve",
+    "citations": [
+     "C45",
+     "C51",
+     "C52"
+    ]
+   },
+   "frustrations": [
+    {
+     "quote": "Can\u2019t help,you without the log. ",
+     "citation": "C45"
+    },
+    {
+     "quote": "Official reason was \"mod interferes with multiplayer persistence\", whatever that means.",
+     "citation": "C28"
+    },
+    {
+     "quote": "we all feel the sword of Damocles hanging over our heads of a possible arbitrary ban",
+     "citation": "C36"
+    }
+   ],
+   "changed_their_mind": {
+    "text": "",
+    "citations": []
+   },
+   "relationship": [
+    {
+     "stage": "relying",
+     "text": "Stay on the host where they 'live' and made friends",
+     "citations": [
+      "C36"
+     ]
+    }
+   ],
+   "doesnt_care_about": [],
+   "left_because": [
+    {
+     "text": "Work leaving no time to set up testing again",
+     "citations": [
+      "C18"
+     ]
+    }
+   ],
+   "quotes": [
+    {
+     "quote": "only with feedback from people can I improve my mods",
+     "citation": "C52"
+    },
+    {
+     "quote": "I'll keep hosting my stuff on Nexus because that is where I \"live\", and made many online friends.",
+     "citation": "C36"
+    }
+   ],
+   "empty": [
+    {
+     "item": "changed_their_mind",
+     "question": "Q23: What moments make a mod author keep going, step back, or stop?"
+    },
+    {
+     "item": "relationship: first hearing through recommending",
+     "question": "Q23"
+    },
+    {
+     "item": "what they earn and how they feel about it",
+     "question": "Q4: What do mod authors get back from their mods (money, points, perks), and how do they feel about it?"
+    },
+    {
+     "item": "doesnt_care_about",
+     "question": "Q19: What do mod authors want back from the people who use their mods, besides money?"
+    }
+   ]
+  },
+  {
+   "id": "P4",
+   "name": "Leaders and members of groups whose platform changes under them (neighbouring communities)",
+   "stories": [
+    "S16",
+    "S17",
+    "S18",
+    "S19",
+    "S35"
+   ],
+   "authors": 5,
+   "who": {
+    "text": "People who run or belong to online groups on Guilded or Discord when the platform closes or adds an ID check; the voices reached are Roblox creators, a Linux project and unspecified communities, not modding groups",
+    "citations": [
+     "C75",
+     "C43",
+     "C21",
+     "C73"
+    ]
+   },
+   "goals": [
+    {
+     "text": "Keep the group's history",
+     "citations": [
+      "C75",
+      "C76"
+     ]
+    },
+    {
+     "text": "Keep members reachable",
+     "citations": [
+      "C21"
+     ]
+    }
+   ],
+   "behaviors": [
+    {
+     "text": "Post alternative ways to reach them",
+     "citations": [
+      "C21"
+     ]
+    },
+    {
+     "text": "Say they will leave if the check reaches them",
+     "citations": [
+      "C43",
+      "C21"
+     ]
+    },
+    {
+     "text": "Comply when it does",
+     "citations": [
+      "C44"
+     ]
+    },
+    {
+     "text": "Ask the platform for a way to take their data",
+     "citations": [
+      "C75",
+      "C76"
+     ]
+    }
+   ],
+   "mental_model": {
+    "text": "The platform owns the place; the group's history and contacts are what they stand to lose",
+    "citations": [
+     "C75",
+     "C76"
+    ]
+   },
+   "frustrations": [
+    {
+     "quote": "Losing that information is something I and other would NOT want to lose.",
+     "citation": "C75"
+    },
+    {
+     "quote": "I am never going to consider using discord again after this shit-tsunami.",
+     "citation": "C73"
+    }
+   ],
+   "changed_their_mind": {
+    "text": "The moment the check reached them: one leader who had said they would leave verified instead",
+    "citations": [
+     "C43",
+     "C44"
+    ]
+   },
+   "relationship": [
+    {
+     "stage": "leaving",
+     "text": "Members who followed projects onto a platform leave it for older tools",
+     "citations": [
+      "C73"
+     ]
+    }
+   ],
+   "doesnt_care_about": [],
+   "left_because": [
+    {
+     "text": "Repeated automatic bans and then the ID change",
+     "citations": [
+      "C73"
+     ]
+    }
+   ],
+   "quotes": [
+    {
+     "quote": "if this thing rolls out to my device then i'm definitely leaving discord",
+     "citation": "C43"
+    },
+    {
+     "quote": "i had to verify my age a few minutes ago\u2026",
+     "citation": "C44"
+    }
+   ],
+   "empty": [
+    {
+     "item": "modding groups' own accounts",
+     "question": "Q7 and Q8: what did modding groups and their leaders do when Guilded closed and when Discord demanded ID?"
+    },
+    {
+     "item": "relationship after a move",
+     "question": "Q24: When a group leader moves the group to a new place, who follows, who is lost, and how does the group feel a year on?"
+    },
+    {
+     "item": "doesnt_care_about",
+     "question": "Q24"
+    }
+   ]
+  }
+ ],
+ "journeys": [
+  {
+   "persona": "P1",
+   "stages": [
+    {
+     "name": "Crash",
+     "stories": 7,
+     "did": [
+      {
+       "text": "The game closes, a save will not load, or a world kicks them out",
+       "citations": [
+        "C1",
+        "C5",
+        "C32",
+        "C93"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "Is it just me?",
+       "citations": [
+        "C10",
+        "C53"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "I really don't know what to look for",
+       "citations": [
+        "C32"
+       ]
+      },
+      {
+       "words": "I couldn't tell you why",
+       "citations": [
+        "C1"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "The game, the crash logger or launcher log",
+       "citations": [
+        "C32",
+        "C47"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "The game closes and leaves nothing in the logs",
+       "citations": [
+        "C61"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To know whether it is their setup",
+       "citations": [
+        "C53",
+        "C10"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Alone with it",
+     "stories": 10,
+     "did": [
+      {
+       "text": "Disable mods one by one, back out new mods, reinstall, search the crash text, ask an AI",
+       "citations": [
+        "C1",
+        "C2",
+        "C5",
+        "C33",
+        "C57",
+        "C4"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "Somewhere one mod is at fault",
+       "citations": [
+        "C34",
+        "C57"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "Hmmm",
+       "citations": [
+        "C34"
+       ]
+      },
+      {
+       "words": "not fully sure at this point",
+       "citations": [
+        "C5"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Mod manager, search engine, ChatGPT or Claude",
+       "citations": [
+        "C33",
+        "C57",
+        "C4"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "It takes an hour, an evening, or thirty hours",
+       "citations": [
+        "C10",
+        "C38",
+        "C85"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To find the cause without testing everything by hand",
+       "citations": [
+        "C61"
+       ]
+      }
+     ],
+     "duration": "an hour to thirty hours"
+    },
+    {
+     "name": "Asking",
+     "stories": 6,
+     "did": [
+      {
+       "text": "Post to the list's Discord, a mod's tracker, the forum",
+       "citations": [
+        "C2",
+        "C5",
+        "C32",
+        "C20"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "This may not even be your mod's fault",
+       "citations": [
+        "C2"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "sorry haha",
+       "citations": [
+        "C2"
+       ]
+      },
+      {
+       "words": "I would be extremely grateful",
+       "citations": [
+        "C3"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Discord servers, GitHub trackers, STEP forum, CurseForge and Nexus comments",
+       "citations": [
+        "C20",
+        "C5",
+        "C32",
+        "C10"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "No answer, or sent elsewhere, or asked for a log they cannot find",
+       "citations": [
+        "C5",
+        "C46",
+        "C47",
+        "C48"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "Someone who can read the log and is in the same place",
+       "citations": [
+        "C9",
+        "C46"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Finding the others",
+     "stories": 4,
+     "did": [
+      {
+       "text": "Discover the same report elsewhere, add 'same issue', or confirm across versions",
+       "citations": [
+        "C10",
+        "C11",
+        "C16"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "Why is this not more widely known?",
+       "citations": [
+        "C11"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "so it's not just me, that's good",
+       "citations": [
+        "C10"
+       ]
+      },
+      {
+       "words": "Why is this issue not popular enough?",
+       "citations": [
+        "C11"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Issue threads, CurseForge comments",
+       "citations": [
+        "C10",
+        "C11"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "The answer was there earlier and they did not see it",
+       "citations": [
+        "C10"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To see that others have it and what they tried",
+       "citations": [
+        "C10",
+        "C13"
+       ]
+      }
+     ],
+     "duration": "minutes to months"
+    },
+    {
+     "name": "Living with it",
+     "stories": 7,
+     "did": [
+      {
+       "text": "Apply a workaround, skip the scene, remove the mod, or give up",
+       "citations": [
+        "C13",
+        "C15",
+        "C12",
+        "C58",
+        "C85"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "What does this workaround cost me?",
+       "citations": [
+        "C15"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "I'd prefer not to resort to this measure",
+       "citations": [
+        "C15"
+       ]
+      },
+      {
+       "words": "a deal braker for me",
+       "citations": [
+        "C16"
+       ]
+      },
+      {
+       "words": "eventually decided to give up",
+       "citations": [
+        "C85"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "The thread where the workaround was posted",
+       "citations": [
+        "C13"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "Workarounds with unknown side effects; crashes that come back",
+       "citations": [
+        "C15",
+        "C34"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To know whether a workaround is safe for the rest of the game",
+       "citations": [
+        "C15"
+       ]
+      }
+     ]
+    }
+   ],
+   "moments_of_truth": [
+    {
+     "moment": "The first reply to a crash report",
+     "success": {
+      "text": "Another author with better logging pinpointed the cause at once and the world loaded",
+      "citations": [
+       "C9",
+       "C92"
+      ]
+     },
+     "failure": {
+      "text": "No answer on the list's Discord; a 'hello?' an hour after being asked for a log they could not find",
+      "citations": [
+       "C5",
+       "C48"
+      ]
+     }
+    },
+    {
+     "moment": "Finding someone else with the same crash",
+     "success": {
+      "text": "Relief that it is not just them",
+      "citations": [
+       "C10"
+      ]
+     },
+     "failure": {
+      "text": "Months of confirmations with no fix, then trying an older version that crashes the same way",
+      "citations": [
+       "C11"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "persona": "P2",
+   "stages": [
+    {
+     "name": "Install",
+     "stories": 3,
+     "did": [
+      {
+       "text": "Click install on a list",
+       "citations": [
+        "C64",
+        "C67",
+        "C65"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ],
+     "felt": [
+      {
+       "words": "I'm always frustrated",
+       "citations": [
+        "C64"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Wabbajack, Nexus login",
+       "citations": [
+        "C64",
+        "C67"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "Logged out without knowing; downloads fail; rate-limited for about 10 minutes",
+       "citations": [
+        "C64",
+        "C65",
+        "C67"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To know before starting that the install will work",
+       "citations": [
+        "C64",
+        "C67"
+       ]
+      }
+     ],
+     "duration": "about 10 minutes of waiting per failure"
+    },
+    {
+     "name": "Keep it running",
+     "stories": 2,
+     "did": [
+      {
+       "text": "Update; read warnings about deleted mods; keep old archives",
+       "citations": [
+        "C30",
+        "C63"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "I might need that mod later",
+       "citations": [
+        "C63"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "a useless reference",
+       "citations": [
+        "C30"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Vortex, their archive drive",
+       "citations": [
+        "C30",
+        "C63"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "Deleted mods shown only as numbers",
+       "citations": [
+        "C30",
+        "C69"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To know which mod a warning means",
+       "citations": [
+        "C30"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Leave or work around",
+     "stories": 2,
+     "did": [
+      {
+       "text": "Look for another tool, or picture doing it by hand",
+       "citations": [
+        "C66",
+        "C68"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ],
+     "felt": [
+      {
+       "words": "unusable",
+       "citations": [
+        "C66"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Other installers",
+       "citations": [
+        "C66"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "Their time",
+       "citations": [
+        "C68"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ]
+    }
+   ],
+   "moments_of_truth": [
+    {
+     "moment": "Clicking install",
+     "success": {
+      "text": "Where one tool carries everything, it is called the 'killer feature' (a RimWorld player on Steam Workshop, outside this group's stories)",
+      "citations": [
+       "C81"
+      ]
+     },
+     "failure": {
+      "text": "Hundreds of failed downloads and a forced wait",
+      "citations": [
+       "C64",
+       "C65"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "persona": "P3",
+   "stages": [
+    {
+     "name": "A report arrives",
+     "stories": 2,
+     "did": [
+      {
+       "text": "Read a report that may lack a log",
+       "citations": [
+        "C45",
+        "C50"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "Without the logs there's not enough information",
+       "citations": [
+        "C51"
+       ]
+      }
+     ],
+     "felt": [],
+     "touchpoints": [
+      {
+       "text": "GitHub issues, CurseForge comments",
+       "citations": [
+        "C50",
+        "C52"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "No log; the same report in two places",
+       "citations": [
+        "C45",
+        "C52"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "Reports that carry the log, versions and mod list",
+       "citations": [
+        "C50"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Working it",
+     "stories": 2,
+     "did": [
+      {
+       "text": "Ask for data; collapse duplicates; ship a fix",
+       "citations": [
+        "C50",
+        "C52",
+        "C84"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ],
+     "felt": [
+      {
+       "words": "I really do appreciate the time you've taken",
+       "citations": [
+        "C52"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Their tracker and release channel",
+       "citations": [
+        "C84"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "No time to set up testing again",
+       "citations": [
+        "C18"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "Time",
+       "citations": [
+        "C18"
+       ]
+      }
+     ],
+     "duration": "two days when the data arrives; months when it does not"
+    },
+    {
+     "name": "When the host acts",
+     "stories": 2,
+     "did": [
+      {
+       "text": "Pass on a removal reason; keep hosting despite the risk",
+       "citations": [
+        "C28",
+        "C36"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "whatever that means",
+       "citations": [
+        "C28"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "the sword of Damocles",
+       "citations": [
+        "C36"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Nexus",
+       "citations": [
+        "C28",
+        "C36"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "Reasons that make no sense to them",
+       "citations": [
+        "C28"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "A reason they can understand",
+       "citations": [
+        "C28"
+       ]
+      }
+     ]
+    }
+   ],
+   "moments_of_truth": [
+    {
+     "moment": "A crash report arrives",
+     "success": {
+      "text": "The data arrives and the fix ships two days later",
+      "citations": [
+       "C50",
+       "C84"
+      ]
+     },
+     "failure": {
+      "text": "Can't help without the log",
+      "citations": [
+       "C45"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "persona": "P4",
+   "stages": [
+    {
+     "name": "The announcement",
+     "stories": 4,
+     "did": [
+      {
+       "text": "Read that the platform will close or check IDs",
+       "citations": [
+        "C75",
+        "C43",
+        "C21"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "Will this reach me?",
+       "citations": [
+        "C43"
+       ]
+      }
+     ],
+     "felt": [
+      {
+       "words": "sighs",
+       "citations": [
+        "C43"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Guilded, Discord",
+       "citations": [
+        "C75",
+        "C43"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "History and contacts at risk",
+       "citations": [
+        "C75"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "To keep the group's history",
+       "citations": [
+        "C75",
+        "C76"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Deciding",
+     "stories": 3,
+     "did": [
+      {
+       "text": "Post alternatives; say they will leave; ask for their data",
+       "citations": [
+        "C21",
+        "C43",
+        "C75"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ],
+     "felt": [
+      {
+       "words": "would NOT want to lose",
+       "citations": [
+        "C75"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "Matrix, Signal, Discourse",
+       "citations": [
+        "C21",
+        "C43"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "Too hard to save their conversations",
+       "citations": [
+        "C75"
+       ]
+      }
+     ],
+     "could_help": [
+      {
+       "text": "Their members able to find them",
+       "citations": [
+        "C21"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "When it reaches them",
+     "stories": 2,
+     "did": [
+      {
+       "text": "Verify, or leave",
+       "citations": [
+        "C44",
+        "C73"
+       ]
+      }
+     ],
+     "thought": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ],
+     "felt": [
+      {
+       "words": "never going to consider using discord again",
+       "citations": [
+        "C73"
+       ]
+      }
+     ],
+     "touchpoints": [
+      {
+       "text": "IRC, Signal",
+       "citations": [
+        "C73"
+       ]
+      }
+     ],
+     "hurt": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ],
+     "could_help": [
+      {
+       "text": "",
+       "citations": []
+      }
+     ]
+    }
+   ],
+   "moments_of_truth": [
+    {
+     "moment": "The check reaches the leader",
+     "success": {
+      "text": "",
+      "citations": []
+     },
+     "failure": {
+      "text": "A leader who said they would leave verified twenty minutes later",
+      "citations": [
+       "C43",
+       "C44"
+      ]
+     }
+    }
+   ]
+  }
+ ],
+ "crawl_list": [
+  {
+   "name": "r/skyrimmods",
+   "url": "https://www.reddit.com/r/skyrimmods/"
+  },
+  {
+   "name": "r/feedthebeast",
+   "url": "https://www.reddit.com/r/feedthebeast/"
+  },
+  {
+   "name": "r/fo4 and r/FalloutMods",
+   "url": "https://www.reddit.com/r/FalloutMods/"
+  },
+  {
+   "name": "r/modding",
+   "url": "https://www.reddit.com/r/modding/"
+  },
+  {
+   "name": "r/Guilded",
+   "url": "https://www.reddit.com/r/Guilded/"
+  },
+  {
+   "name": "r/discordapp",
+   "url": "https://www.reddit.com/r/discordapp/"
+  },
+  {
+   "name": "Nexus Mods forums",
+   "url": "https://forums.nexusmods.com/"
+  },
+  {
+   "name": "Nexus Mods news comments (2021 collections and deletion notice)",
+   "url": "https://www.nexusmods.com/news/14538"
+  },
+  {
+   "name": "STEP Modifications forum",
+   "url": "https://stepmodifications.org/forum/"
+  },
+  {
+   "name": "AFK Mods forum",
+   "url": "https://www.afkmods.com/"
+  },
+  {
+   "name": "Steam Community discussions, Skyrim",
+   "url": "https://steamcommunity.com/app/72850/discussions/"
+  },
+  {
+   "name": "Steam Community discussions, Fallout 4",
+   "url": "https://steamcommunity.com/app/377160/discussions/"
+  },
+  {
+   "name": "Wabbajack issue tracker",
+   "url": "https://github.com/wabbajack-tools/wabbajack/issues"
+  },
+  {
+   "name": "Vortex issue tracker",
+   "url": "https://github.com/Nexus-Mods/Vortex/issues"
+  },
+  {
+   "name": "Mod Organizer 2 issue tracker",
+   "url": "https://github.com/ModOrganizer2/modorganizer/issues"
+  },
+  {
+   "name": "Lemmy: lemmy.world search",
+   "url": "https://lemmy.world/search"
+  },
+  {
+   "name": "Hacker News",
+   "url": "https://news.ycombinator.com/"
+  },
+  {
+   "name": "Roblox DevForum, Guilded shutdown topics",
+   "url": "https://devforum.roblox.com/t/update-on-guilded-and-communities/3966775"
+  },
+  {
+   "name": "EndeavourOS forum, Discord age verification topic",
+   "url": "https://forum.endeavouros.com/t/discord-added-the-age-verification-update/81618"
+  },
+  {
+   "name": "Planet Minecraft blogs (author perspectives on CurseForge)",
+   "url": "https://www.planetminecraft.com/blog/curseforge-review/"
+  },
+  {
+   "name": "Modrinth issue tracker",
+   "url": "https://github.com/modrinth/code/issues"
+  }
+ ],
+ "notes": "For the operator:\n1. Reach: Reddit, the Nexus Mods site and forums, and Discord were all out of reach (WebFetch refused, mirrors 403/TLS, Nexus 403, Discord unsearchable), and eavesdrop was off by instruction. The record therefore leans on GitHub issue trackers. That skews it toward players and authors who file technical issues, and it is heavy on Minecraft packs. The persona groups describe that population. Most open questions (pay, the 2021 Nexus change, Guilded, Discord ID checks, moderation) wait on exactly those places. Recommendation: approve a network fetch for Reddit (reddit JSON or arctic-shift) for the re-listen pass, or crawl the crawl_list places, before personas are written for authors and group leaders. A direct network fetch was blocked by a hook asking for your approval; this run did not confirm it.\n2. Reading of the intent: 'their community platform died under corporate ownership in 2025' is read as Guilded (bought by Roblox in 2021, shut 2025-12-19). That is my reading; if another platform was meant, Q7 should be re-asked.\n3. Stake choice: mod authors describing their own author experience (reports received, pay, removals) are recorded with stake 'user', by analogy with the rule that a service's own customers are users. Recorded as 'maintainer', Q19 would be expert_only and Q3 and Q4 would stay open with expert_only answers. Volunteer helpers and tool contributors talking about other people's crashes are recorded as 'maintainer'.\n4. Counting: GitHub issue trackers count as one source family however many repos are involved. Stale items (pre-change conditions: CurseForge 2021 terms, Ajour, Nexus Donation Points before April 2024, a 2020 withdrawal, a 2022 Wabbajack report) are kept in the evidence lists but do not count toward any answer.\n5. Neighbouring voices: Q7, Q8 and Q11 found only voices from neighbouring communities (Roblox creator groups, a Linux project, a Reddit default sub). They stay open with direct asks aimed at modding places. Q20 was asked of neighbours on purpose and is answered from them, so P4 is a neighbour persona. Only one voice in it (C36) is from modding.\n6. Control hygiene: the vault's service-design/ezmode artifacts and the intent's source words file were not read, so this Discovery is independent of the hand-made design it will be compared with.\n7. Verbatim: every quote from a non-GitHub page was fetched through a per-item API or string-checked in a second fetch, because the fetch tool invented one forum post during the run (see sources)."
+}

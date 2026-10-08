@@ -1,0 +1,142 @@
+{
+  "meta": {
+    "title": "The operator who keeps re-teaching the same agent",
+    "set": "legion",
+    "actor": "P4",
+    "status": "draft",
+    "date": "2026-10-06",
+    "author": "sd-write-persona"
+  },
+  "built_from": {
+    "discovery": "01a1145d-dcd4-71c3-867b-fd6b5a7a3abe",
+    "group": "P4",
+    "stories": 11,
+    "authors": 11,
+    "run_date": "2026-10-06"
+  },
+  "identity": {
+    "description": "They work every day with one coding agent (Claude Code, Codex, Opencode) on one long-running project of their own: a webapp with servers, keys and branches, database migrations, stored procedures, a desktop widget, software for a live race [C11, C5, C100, C14, C109, C62, C117]. They write rules and memories for it in CLAUDE.md, AGENTS.md and memory files, and in each new session they correct it again [C11, C5, C23, C62, C80]. Their sessions are long and many: a 14-hour session, 4.5 hours on one problem, 9 sessions on one task in an afternoon, 12-18 hours a day with 59 compactions in 26 days [C20, C109, C14, C106]. Using the agent daily and for hours is what shapes them; it is why the repeats add up to hours a week [C12, C121, C80]. They meet the service only through what their agent does next; the agent is the one that remembers or forgets [C11, C15, C108]. (11 authors)",
+    "mental_model": "\"Every rule in this system was added in direct response to a specific documented failure. Every rule has been violated again after being added.\" [C23] A rule written down and loaded should govern; when it does not, they write it again more strongly, up to a \"final warning\", until they stop believing in written rules and enforce by hooks instead [C23, C1, C108, C6]. (4 authors)",
+    "quote": "\"a rule the model writes down and does not follow is worse than no rule, because it presents as a solved problem.\" [C20] (1 voice; the same experience in C108, C15, C1: 4 authors)"
+  },
+  "goals": [
+    "To have what they have established stay established, so that a fact told once about their project is still known in the next session instead of being rediscovered or asked again [C11, C14, C102]. (3 authors)",
+    "To have a correction stick after one telling, rather than the fifth, the sixth or the fiftieth [C5, C11, C118, C1]. (4 authors)",
+    "To trust what the agent tells them without re-checking every statement [C20, C101, C63, C109]. (4 authors)",
+    "To spend their hours on the project itself (the race, the webapp, the work) and not on supervising and re-explaining to the agent [C12, C109, C119]. (3 authors)"
+  ],
+  "behaviors": [
+    {
+      "text": "Write a rule after each failure and strengthen it when it is broken again: memory notes marked \"final warning\", a 700-line CLAUDE.md rule contract [C23, C1, C5, C108]. (4 authors)"
+    },
+    {
+      "text": "Count the repeats and the violations: 13 recorded violations, 5+ cycles for the same facts, 4-6 corrections per data type, about 50 corrections of one label, 66 logged violation reports [C1, C11, C5, C118, C117]. (4 authors)"
+    },
+    {
+      "text": "Build their own memory machinery around the agent: an injected memory layer, PreToolUse/PostToolUse/Stop hooks, a compaction watcher that logs the user's last words [C15, C6, C107, C106]. (3 authors)"
+    },
+    {
+      "text": "Keep their own record of what went wrong, outside what the agent reads: a feedback file the agent does not read at session start, a corpus of violation reports, a log of compactions [C120, C118, C107]. (3 authors)"
+    },
+    {
+      "text": "Stop taking the agent's word and challenge or verify its claims, at the cost of the session [C109, C62, C20]. (3 authors)"
+    },
+    {
+      "text": "File what they learn immediately, before compaction can take it: \"never batch -- compaction will eat them\" [C106]. (1 author, thin)"
+    },
+    {
+      "text": "After a stumble, ask the agent what it was trying to do and what was missing, and put a pointer into CLAUDE.md or a skill [C80]. (1 author, thin)"
+    }
+  ],
+  "frustrations": [
+    {
+      "text": "\"This wastes hours of the user's time every week.\" [C12] The same cost elsewhere: \"4.5 hours refuting the model's inventions instead of racing\" [C109], 9 sessions on one task in one afternoon [C14], the same schema gaps raised 4-6 times per data type [C5]. (4 authors)"
+    },
+    {
+      "text": "\"The memory is there. Claude reads the injection block. And then suggests pkill genmon anyway.\" [C15] Also: \"It was read. It was quoted. It governed nothing.\" [C108]; \"acknowledges the rule, writes memory notes about it, and then violates it again in the same session\" [C1]; \"Every rule has been violated again after being added.\" [C23] (4 authors)"
+    },
+    {
+      "text": "\"a wrong list is still wrong. It used a disclaimer as a substitute for verification.\" [C101] Also: \"From my side there is no way to tell a checked statement from a recalled one.\" [C20]; \"false confidence\" [C63]; \"Making false claims about its own previous outputs (\\\"this was approved\\\", \\\"this was corrected\\\")\" [C121] (4 authors)"
+    },
+    {
+      "text": "\"whats the point of a memory idk man.\" [C19] Also: \"after 5 cycles of the same broken promise, the tool feels unreliable\" [C13]; \"get none, and lose trust in the system\" [C7] (3 authors)"
+    }
+  ],
+  "needs": [
+    "A correction they give once has to be in front of the agent the next time the same step comes up; when it is not, they give it 5, 6 or 50 times, and the agent re-proposes the command that already failed [C11, C5, C118, C15]. (4 authors)",
+    "A rule that is written and loaded has to actually govern what the agent does; being read and quoted is not enough, which is why they turn to hooks that block tool calls [C108, C15, C1, C6]. (4 authors)",
+    "They need to tell what the agent checked from what it only recalled; a recalled answer with a hedge reads as fact and gives them false confidence [C20, C101, C63, C121]. (4 authors)",
+    "What they decided has to stay decided, so they are not asked to decide it again as if it were new [C102, C11]. (2 authors, thin)"
+  ],
+  "changed_their_mind": "From writing memories to enforcing with hooks: \"The user has a hook system at `~/.claude/hooks/` (PreToolUse, PostToolUse, Stop hooks) that blocks tool calls and enforces constraints mechanically. Hooks work. Memories do not.\" [C6] (1 author, thin)",
+  "moment_of_truth": {
+    "description": "The second time the operator has to correct the same thing [C5, C11, C118]. It decides whether they keep believing the memory: the trust cost is cumulative across repeats [C13]. (3 authors)",
+    "success": "\"the moment a correction lands it gets written out as its own entry, with an author and a date, and later sessions read it back before they start. The count went to one.\" [C10] (1 author, thin; reported by someone outside the group, stake unknown)",
+    "failure": "\"after 5 cycles of the same broken promise, the tool feels unreliable\" [C13]; \"Users write memories expecting behavioral change, get none, and lose trust in the system.\" [C7]; \"whats the point of a memory idk man.\" [C19] (3 authors)"
+  },
+  "relationship_stages": [
+    {
+      "stage": "Teaching the agent",
+      "they_do": "State a fact or rule, have the agent save it to memory, and expect its behaviour to change [C11, C5, C7, C23]. (3 authors)",
+      "service_provides": "(planned) What was tried and what failed, there when the same step comes up [C15]. (1 author, thin)"
+    },
+    {
+      "stage": "Correcting again",
+      "they_do": "Open a new session on the same work, find the agent starting from scratch or ignoring what was injected, and re-explain, counting the repeats [C14, C15, C11, C1, C5, C118]. (5 authors)",
+      "service_provides": "(planned) One telling is enough: each correction written as its own dated entry and read back by later sessions [C10]. (1 author, thin)"
+    },
+    {
+      "stage": "Relying, where it works",
+      "they_do": "Keep small pointers in CLAUDE.md that go on paying: \"more and more tasks are solved by agent intelligence or these happy path hints\" [C79, C80]. (1 author, thin)",
+      "service_provides": "(planned) Nothing in the group's material names what the service adds here."
+    },
+    {
+      "stage": "Stopping trusting",
+      "they_do": "Verify every statement and refute the agent's inventions, unable to tell checked from recalled [C20, C109, C62, C100]. (4 authors)",
+      "service_provides": "(planned) To know which statements were checked [C20]. (1 author, thin)"
+    },
+    {
+      "stage": "Working around",
+      "they_do": "Build hooks, memory layers, compaction logs and their own feedback files [C6, C15, C106, C120]. (4 authors)"
+    },
+    {
+      "stage": "Leaving",
+      "they_do": "End the session and ask for a fresh one, stop relying on memories in favour of hooks, or cancel the account [C119, C6, C117]. (3 authors)"
+    }
+  ],
+  "doesnt_care_about": [],
+  "would_leave_if": [
+    "The same correction will not stick however often it is given: after about 50 tellings that \"never propagated to source-of-truth files\" one cancelled the account [C118, C117]; after 4-6 corrections per data type another stopped relying on memories and enforced with hooks [C5, C6]; and after a 14-hour session with the same memory updated \"for a third time\" another ended the session [C19, C119]. (3 authors)",
+    "Supervising the agent stops being worth it: \"the assistant's reliability had degraded past the point where supervising it was worth it\" [C119]; the account cancelled the same night the parting feedback was filed [C117]. (2 authors, thin)"
+  ],
+  "quotes": [
+    "\"From my side there is no way to tell a checked statement from a recalled one.\" [C20] (1 voice)",
+    "\"after 5 cycles of the same broken promise, the tool feels unreliable\" [C13] (1 voice)",
+    "\"It was read. It was quoted. It governed nothing.\" [C108] (1 voice)",
+    "\"As primitive as it is, CLAUDE.md is the best we have for long-term adaptive memory.\" [C79] (1 voice)",
+    "\"Mid-session: file insights immediately (never batch -- compaction will eat them)\" [C106] (1 voice)",
+    "\"Claude later presented the same point as a newly discovered pitfall and asked me to decide it again.\" [C102] (1 voice)"
+  ],
+  "open_questions": [
+    {
+      "item": "doesnt_care_about",
+      "question": "Q19: What do agents and operators not care to have remembered: what would they gladly let go of, or never want delivered to them? (open; asks drafted and unsent)"
+    },
+    {
+      "item": "relationship_stages: first hearing of a tool like this, and recommending it",
+      "question": "The stories begin with the operator already using memory and end with working around or leaving; none shows how they first heard of a memory tool or recommending one. Discovery raised no question for these stages."
+    },
+    {
+      "item": "relationship_stages: Relying, service_provides",
+      "question": "Only one author shows memory paying off (CLAUDE.md pointers); what the service would add for an operator for whom it already works is not in the material. Discovery raised no question for it."
+    },
+    {
+      "item": "changed_their_mind",
+      "question": "Rests on one author (hooks over memories); the material holds no second account of the moment an operator changed their mind. Discovery raised no question for it."
+    },
+    {
+      "item": "Reddit and Hacker News operator voices",
+      "question": "Discovery notes that Reddit was unreachable and the eavesdrop agent-memory-hn corpus unreadable this run; evidence leans on the GitHub claude-code tracker."
+    }
+  ]
+}

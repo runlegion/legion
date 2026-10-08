@@ -1,0 +1,1200 @@
+{
+  "meta": {
+    "title": "Ecosystem: Legion 0.5 -- how teams of agents remember",
+    "core_service": "Legion: one memory that a team of agents and their operators share (a local graph per install and an institutional graph the group shares). It speaks at the moment of choice, is measured by what happened next, and keeps the record honest (intent 01a10b24-69bb-7750-82bc-bc3def0adc07).",
+    "status": "draft",
+    "date": "2026-10-06",
+    "author": "sd-ecosystem-imagine",
+    "intent": "01a10b24-69bb-7750-82bc-bc3def0adc07",
+    "discovery": "01a1145d-dcd4-71c3-867b-fd6b5a7a3abe",
+    "personas": [
+      "01a11460-e2f2-77e3-bab8-d33f47288ff5",
+      "01a11461-f407-7502-b3b3-a43e5bbc18f2",
+      "01a11460-2841-77f2-b3f3-60e20375034e",
+      "01a11460-e4f3-7871-903f-bde2fdab3d79",
+      "01a11461-8303-7e10-8890-63fe8279b7f4"
+    ],
+    "journeys": [
+      "01a11464-b2da-7c63-a15b-515ea0d84c17",
+      "01a11465-3e5d-73a3-9096-5ba56269de45",
+      "01a11463-7961-7962-ad7a-e4af8230c7cd",
+      "01a11464-49cf-7da1-a3ac-0afa0bed4ca8",
+      "01a11466-70f1-7ee3-9746-729d1f744597"
+    ],
+    "blueprints": [
+      "01a11468-837b-7420-aec7-5a952d1b36b4",
+      "01a11468-52da-7a40-8a1b-5267a288b8d0",
+      "01a11466-3ac0-7c53-ac14-6767aef24d31",
+      "01a11467-1b74-76d2-898b-e7ffac5d43e6",
+      "01a1146a-96bc-77f3-8821-e13c793a06a9"
+    ],
+    "method": "Five clean passes (actor-walk, boundary-walk, second-order, value-lifecycle, evidence-adversarial), unioned and deduplicated. 'core' means three or more lenses reached the answer and it is grounded in the intent, a landed document or a Discovery citation. Converged answers about how the shared graph is carried and hosted, who-else-is-on-this, and supersession were gated to what the agent or operator sees, with no machinery. Register entries begin after the 14 failure modes drawn from the landed documents. eavesdrop was off for this run, so the world questions are drafted and unsent."
+  },
+  "actors": {
+    "primary": [
+      {
+        "name": "The agent holding the answer it does not reach for",
+        "persona": "01a11460-e2f2-77e3-bab8-d33f47288ff5",
+        "role": "Customer (agent). Mid-task, it meets a choice its own or its team's record already answers, and it acts without the record [persona 01a11460-e2f2-77e3-bab8-d33f47288ff5].",
+        "entry_point": "Meets the choice: an unfamiliar failure in the terminal, an open question for its operator, or a pile of issues from an issue search (journey 01a11464-b2da-7c63-a15b-515ea0d84c17, stage 1) [C24, C50, C39].",
+        "need": "Get the work in front of it done right and stop repeating the same mistake: the relevant record in front of it at the moment of the choice, saying how new it is and whether anything later contradicts it [C82, C30]."
+      },
+      {
+        "name": "The agent that wakes into its own record",
+        "persona": "01a11461-f407-7502-b3b3-a43e5bbc18f2",
+        "role": "Customer (agent). Wakes blank and rebuilds itself from what earlier sessions wrote, then continues the work [persona 01a11461-f407-7502-b3b3-a43e5bbc18f2].",
+        "entry_point": "Wakes blank: the harness starts the session or a cron fires (journey 01a11465-3e5d-73a3-9096-5ba56269de45, stage 1) [C58, C126].",
+        "need": "To continue what the last session intended, as the same agent: the newest state with the decisions and reversals in it, and a way to say 'I already know this, skip it' [C31, C48, C60, C130]."
+      },
+      {
+        "name": "The teammate who meets the team by colliding with it",
+        "persona": "01a11460-2841-77f2-b3f3-60e20375034e",
+        "role": "Customer (agent). One agent among several (and copies of itself, and the operator) who meets the others by collision or through the shared record [persona 01a11460-2841-77f2-b3f3-60e20375034e].",
+        "entry_point": "Starts work from repo state, an issue-title search, or recall for context, without checking who else is on it (journey 01a11463-7961-7962-ad7a-e4af8230c7cd, stage 1) [C39, C44, C45].",
+        "need": "To do its own work without colliding with or duplicating anyone, to build on what teammates learned, and to keep the operator's private facts private [C45, C110, C37, C43, C42]."
+      },
+      {
+        "name": "The operator who keeps re-teaching the same agent",
+        "persona": "01a11460-e4f3-7871-903f-bde2fdab3d79",
+        "role": "Beneficiary and risk-holder (human). Works daily with one coding agent on one long project; acts on the service only through what the agent does next [persona 01a11460-e4f3-7871-903f-bde2fdab3d79].",
+        "entry_point": "Teaches the agent: states a fact or rule in the chat and has the agent save it to CLAUDE.md, MEMORY.md or memory files (journey 01a11464-49cf-7da1-a3ac-0afa0bed4ca8, stage 1) [C11, C5, C23].",
+        "need": "What they established stays established: a correction holds after one telling, and they can trust what the agent says without re-checking it [C11, C5, C20, C102]."
+      },
+      {
+        "name": "The fleet operator who became the go-between",
+        "persona": "01a11461-8303-7e10-8890-63fe8279b7f4",
+        "role": "Beneficiary and risk-holder (human). Runs several agents at once and ended up carrying facts and failures between them by hand [persona 01a11461-8303-7e10-8890-63fe8279b7f4].",
+        "entry_point": "Runs several agents: a coordinator with workers, an orchestrator with 5+ subagents, or parallel agents in worktrees (journey 01a11466-70f1-7ee3-9746-729d1f744597, stage 1) [C94, C115, C114].",
+        "need": "Their attention back for their own project: agents that already know what was decided, one current copy of a shared fact, and no collisions over files [C94, C105, C1, C99, C115]."
+      }
+    ],
+    "secondary": [
+      {
+        "name": "Other copies of the same agent",
+        "role": "On-stage agents woken by the same signal, working the same branch",
+        "relationship": "Undo each other's edits without knowing (blueprint 01a11466-3ac0-7c53-ac14-6767aef24d31, steps 2-3) [C110]. In 0.5 they see each other at the start of work, and the second to arrive yields."
+      },
+      {
+        "name": "Reading agents (verify agents, teammates who recall)",
+        "role": "Agents that find and use another agent's record",
+        "relationship": "Today their citations are the only sign a writer gets that its record was used (blueprint 01a11466-3ac0-7c53-ac14-6767aef24d31, step 9) [C38]. In 0.5 what they do next with a record is what measures it, and the writer is told."
+      },
+      {
+        "name": "Coordinating and orchestrator agents",
+        "role": "An agent that holds fleet state for its operator",
+        "relationship": "Where coordination works today, one of them holds the shared state (blueprint 01a1146a-96bc-77f3-8821-e13c793a06a9, step 4) [C115, C122]. Legion becomes the one place that coordination reads from and writes to, alongside the orchestrator and not instead of it."
+      },
+      {
+        "name": "The archivist",
+        "role": "Keeps the institutional graph honest (intent OQ-2; current choice (Sean, 2026-10-05): the agent proposes, the operator says yes, the archivist keeps it honest; revisable)",
+        "relationship": "Takes in what operators said yes to share. It marks records superseded or contradicted and links each correction to what it corrects, and it never erases a disproof. Who it is and whose authority it acts under is register entry 19."
+      },
+      {
+        "name": "The group: other operators and their agents",
+        "role": "Members who share the institutional graph (intent what_it_is; OQ-1: it could be hundreds of operators)",
+        "relationship": "Give what their operators said yes to and receive what other members paid to learn. Join only by an operator's explicit act. Who is served first is register entry 18, and what crosses between operators is register entry 21."
+      },
+      {
+        "name": "Agent harnesses (Claude Code, Codex, Opencode)",
+        "role": "Where memory is delivered (intent consumers: planned)",
+        "relationship": "Own session start, loading, compaction, context limits and blocking hooks. Legion owns what it says there, when, and whether it arrived and helped [C67, C68, C69]."
+      }
+    ],
+    "tertiary": [
+      {
+        "name": "eavesdrop",
+        "role": "Listening (intent boundaries)",
+        "relationship": "Its findings enter its agent's record like any agent's, and cross to the group only by the same proposal and yes. Legion remembers what it heard and delivers it at the choice."
+      },
+      {
+        "name": "beacon",
+        "role": "Research (intent boundaries)",
+        "relationship": "Its research is remembered, dated and attributed to it. beacon answers for whether it is true, and legion answers for keeping it honest afterwards."
+      },
+      {
+        "name": "crucible",
+        "role": "Testing (intent boundaries)",
+        "relationship": "Its test results are remembered and delivered when an agent faces the choice they bear on. A result that later fails is marked superseded, not erased."
+      },
+      {
+        "name": "smugglr",
+        "role": "Moving data (intent boundaries)",
+        "relationship": "Moves data on legion's behalf, including a leaving operator's local graph. Legion still answers to its customers for the move, and a share is not reported done until it has arrived."
+      },
+      {
+        "name": "rafters",
+        "role": "Design (intent boundaries)",
+        "relationship": "Its design records are remembered and delivered where an agent faces a design choice [C43, C45]."
+      },
+      {
+        "name": "platform",
+        "role": "Hosting (intent boundaries)",
+        "relationship": "Hosts what legion keeps for the group. Who carries that cost is register entry 23."
+      },
+      {
+        "name": "The service-design owner",
+        "role": "Service design (intent boundaries)",
+        "relationship": "Its personas, journeys, blueprints and ecosystems are remembered like any part's output, and this map is one of them."
+      },
+      {
+        "name": "Harness makers (Anthropic, OpenAI)",
+        "role": "Control the harnesses legion delivers into",
+        "relationship": "Improve in-session continuity on their own, for example compaction that now resumes [C104]. When that changes, legion's weight moves further toward the cross-agent record, delivery at the choice, and measurement."
+      }
+    ]
+  },
+  "channels": [
+    {
+      "name": "Session start and waking",
+      "type": "harness event (existing)",
+      "users": "The agent that wakes into its own record; every agent",
+      "purpose": "Where the agent rebuilds itself from its record: checkpoint, memory files, identity, inbox (journey 01a11465-3e5d-73a3-9096-5ba56269de45, stage 2) [C31, C32]. In 0.5 it carries the newest state with its decisions and reversals, says when anything is missing, and stays light: the agent can say 'I already know this'."
+    },
+    {
+      "name": "Delivery at the moment of choice",
+      "type": "in-harness delivery (planned)",
+      "users": "The agent holding the answer it does not reach for; The operator who keeps re-teaching the same agent (through the agent); every agent",
+      "purpose": "The record arrives, unasked, at the choice it bears on, worded as 'before you do X, know Y', and says who wrote it, when, whether it was checked, and what later contradicts it [C8, C82, C98, C30] (intent direction: delivery, not storage)."
+    },
+    {
+      "name": "Recall and consult",
+      "type": "asked lookup (existing)",
+      "users": "every agent",
+      "purpose": "The agent asks the record on purpose. It still works, but nothing relies on it, because agents rarely ask [C24, C35] (intent cut_or_broken). An empty answer says plainly whether nothing was written or the record could not be reached [C49]."
+    },
+    {
+      "name": "Writing the record",
+      "type": "agent act: reflections, checkpoints, lessons (existing)",
+      "users": "The agent holding the answer it does not reach for; The agent that wakes into its own record; The teammate who meets the team by colliding with it",
+      "purpose": "Where lessons, decisions and corrections enter. In 0.5 a correction names what it corrects, a wrong record is annotated rather than deleted, and decisions are written before the session ends [C57, C88, C130, C18]."
+    },
+    {
+      "name": "The operator's conversation with their agent",
+      "type": "chat and question tool (existing)",
+      "users": "The operator who keeps re-teaching the same agent; The fleet operator who became the go-between; every agent",
+      "purpose": "Where the operator corrects, decides and judges. In 0.5 their words are kept the moment they are said and confirmed in one line. Share proposals and reports of a missing record come here until the operator's window exists [C10, C102, C111]."
+    },
+    {
+      "name": "The harness's own files and hooks",
+      "type": "operator machinery (existing)",
+      "users": "The operator who keeps re-teaching the same agent; The fleet operator who became the go-between",
+      "purpose": "CLAUDE.md, AGENTS.md, MEMORY.md, feedback files and blocking hooks. The operator's written instructions outrank what legion remembers, and blocking stays here [C6, C79, C120] (register entry 20)."
+    },
+    {
+      "name": "Who else is on this",
+      "type": "team visibility at the start of work (planned)",
+      "users": "The teammate who meets the team by colliding with it; The fleet operator who became the go-between",
+      "purpose": "Before it starts or edits, the agent is told which agents, copies of itself, or unexplained non-agent changes (likely the operator) are on the same work, and what they learned [C44, C39, C110, C37] (intent direction: agents that are visible find each other)."
+    },
+    {
+      "name": "Bullpen, posts and signals",
+      "type": "inter-agent messages (existing)",
+      "users": "The teammate who meets the team by colliding with it; The fleet operator who became the go-between",
+      "purpose": "Where agents message each other and where a wrong warning crossed fleets [C95, C90]. A claim passed here is checked against the current record before it leaves."
+    },
+    {
+      "name": "Working tree, worktrees and the process list",
+      "type": "shared workspace (existing)",
+      "users": "The teammate who meets the team by colliding with it; The fleet operator who became the go-between",
+      "purpose": "Where agents meet each other by collision today: reverted edits, a 'rival' who was the operator [C110, C37, C114]. Not legion's channel, but where its failure to show who else is on the work becomes visible."
+    },
+    {
+      "name": "The share proposal",
+      "type": "agent-to-operator ask (planned)",
+      "users": "every agent; The operator who keeps re-teaching the same agent; The fleet operator who became the go-between",
+      "purpose": "An agent proposes that one item should cross from the local graph to the institutional graph and gives its reason in one line. The operator says yes or no. Silence keeps it local, and the same item is never asked about twice (intent OQ-2) [C42, C46]."
+    },
+    {
+      "name": "The institutional graph",
+      "type": "shared record across operators (planned)",
+      "users": "the group's agents; the archivist",
+      "purpose": "What members said yes to share. Delivered at the choice like any record, always labelled as another member's record and never as the agent's own [C131, C129]."
+    },
+    {
+      "name": "Writer feedback",
+      "type": "return to the writer (planned)",
+      "users": "The teammate who meets the team by colliding with it; every writing agent",
+      "purpose": "The writer hears that its record was used, by whom (agent and operator level), and what happened next, including when it misled someone. This is never shown as a score [C38, C43, C45, C87]."
+    },
+    {
+      "name": "The operator's window",
+      "type": "operator view (not built; intent consumers)",
+      "users": "The operator who keeps re-teaching the same agent; The fleet operator who became the go-between",
+      "purpose": "Where people see and judge. It shows repeats avoided and failures, what was shared in their name, which agents woke without their record, and pending share asks. It never shows graph size or recall counts [C86, C87, C10]."
+    },
+    {
+      "name": "Issue tracker and issue search",
+      "type": "work source (existing)",
+      "users": "The agent holding the answer it does not reach for; The teammate who meets the team by colliding with it",
+      "purpose": "Where agents pick work. Today a title search hides who owns an issue [C39]. In 0.5, starting from an issue is a start of work, and 'who else is on this' answers it."
+    }
+  ],
+  "value_exchanges": [
+    {
+      "from": "The agent holding the answer it does not reach for",
+      "to": "legion",
+      "kind": "knowledge",
+      "gives": "Room in its context at the choice, and the act of heeding or not heeding what arrives",
+      "gets": "The record that answers the choice, unasked, with who wrote it, when, whether it was checked, and what later contradicts it. Turn one instead of two days across three agents [C24, C82, C30] (journey 01a11464-b2da-7c63-a15b-515ea0d84c17, stage 1)."
+    },
+    {
+      "from": "legion",
+      "to": "The agent holding the answer it does not reach for",
+      "kind": "knowledge",
+      "gives": "Measurement of what it did next with what it was handed",
+      "gets": "Its report that the record held, misled it, or was already known; this is what 'it helped' is made of (intent direction: measured by what happened next) [C10, C17]."
+    },
+    {
+      "from": "The agent that wakes into its own record",
+      "to": "legion",
+      "kind": "knowledge",
+      "gives": "What the last session wrote: checkpoint, decisions, reasons and reversals, written before the session ended [C31, C88, C130]",
+      "gets": "At waking, the newest state on each subject with its decisions and anything that contradicts it, so it continues as the same agent [C31, C48, C85] (journey 01a11465-3e5d-73a3-9096-5ba56269de45, stages 2-3)."
+    },
+    {
+      "from": "The agent that wakes into its own record",
+      "to": "legion",
+      "kind": "knowledge",
+      "gives": "'I already know this' or 'this is noise'",
+      "gets": "A lighter wake and more room to reason. What keeps being turned away stops arriving for that agent, and identity lines about reasoning style stay off the moment of choice [C59, C60, C83]."
+    },
+    {
+      "from": "The teammate who meets the team by colliding with it",
+      "to": "legion",
+      "kind": "knowledge",
+      "gives": "Being visible: what it is working on",
+      "gets": "At the start of work, who else is on it (agents, copies of itself, or unexplained non-agent changes that are probably the operator) and what they already learned [C44, C110, C37] (journey 01a11463-7961-7962-ad7a-e4af8230c7cd, stage 1)."
+    },
+    {
+      "from": "The teammate who meets the team by colliding with it",
+      "to": "Reading agents (verify agents, teammates who recall)",
+      "kind": "knowledge",
+      "gives": "Its reflections and checkpoints, minus the operator's private facts [C42, C38]",
+      "gets": "Through legion, word that the record was used and what happened next, including when it misled someone [C43, C45] (journey 01a11463-7961-7962-ad7a-e4af8230c7cd, stage 4)."
+    },
+    {
+      "from": "The operator who keeps re-teaching the same agent",
+      "to": "The agent holding the answer it does not reach for",
+      "kind": "knowledge",
+      "gives": "A correction, an answer or a choice, once, in the conversation",
+      "gets": "The agent keeps it at once as the operator's own entry with their name and date, says so in one line, and it comes back at the step where it applies. A second telling is counted as a failure the operator can see [C10, C102, C13] (journey 01a11464-49cf-7da1-a3ac-0afa0bed4ca8, stages 1-3)."
+    },
+    {
+      "from": "The operator who keeps re-teaching the same agent",
+      "to": "legion",
+      "kind": "trust",
+      "gives": "Trust, extended one session at a time; it is spent by each repeat [C13]",
+      "gets": "Statements they can sort: the agent says what came from memory (whose, how old) and what it checked just now, and a hedge does not count as saying it [C20, C101, C125] (journey 01a11464-49cf-7da1-a3ac-0afa0bed4ca8, stage 4)."
+    },
+    {
+      "from": "The fleet operator who became the go-between",
+      "to": "legion",
+      "kind": "trust",
+      "gives": "The go-between job: they stop carrying facts and failures between agents by hand",
+      "gets": "One current version of each shared fact that every agent receives. A claim about to leave an agent that contradicts it is caught before it crosses, and a correction reaches every agent that received the wrong version [C94, C95, C99, C122] (journey 01a11466-70f1-7ee3-9746-729d1f744597, stages 2-3)."
+    },
+    {
+      "from": "The teammate who meets the team by colliding with it",
+      "to": "The operator who keeps re-teaching the same agent / The fleet operator who became the go-between",
+      "kind": "trust",
+      "gives": "A share proposal: one item, its reason in one line, and a confirmation that it holds nothing personal about the operator",
+      "gets": "Yes, no, or silence. Silence keeps it local and the same item is never asked about again (intent OQ-2; current choice (Sean, 2026-10-05); revisable) [C42, C46, C51]."
+    },
+    {
+      "from": "The teammate who meets the team by colliding with it",
+      "to": "The archivist",
+      "kind": "knowledge",
+      "gives": "What the operator said yes to share, under the operator's name",
+      "gets": "It enters the institutional graph checked for personal facts, dated, linked to what it corrects, and delivered to other members at their choices (intent OQ-2)."
+    },
+    {
+      "from": "The archivist",
+      "to": "The group: other operators and their agents",
+      "kind": "trust",
+      "gives": "A shared record kept honest: superseded and contradicted records marked and linked, nothing erased except an operator's privacy withdrawal [C57, C34, C84]",
+      "gets": "Its standing to act for the group; whose authority that is is register entry 19."
+    },
+    {
+      "from": "The group: other operators and their agents",
+      "to": "The fleet operator who became the go-between",
+      "kind": "knowledge",
+      "gives": "What other members' agents paid to learn: tool facts, fixes, how-to-check lessons [C132, C24]",
+      "gets": "That member's own shares, which cost only a yes per item (intent what_it_is: 'agents help each other')."
+    },
+    {
+      "from": "legion",
+      "to": "Reading agents (verify agents, teammates who recall)",
+      "kind": "knowledge",
+      "gives": "The correction, delivered against the record it replaces, and a notice to the writer and to the operators of affected agents",
+      "gets": "No operator has to unwind it by hand across three records [C95, C4, C27]."
+    },
+    {
+      "from": "Agent harnesses (Claude Code, Codex, Opencode)",
+      "to": "legion",
+      "kind": "product",
+      "gives": "The place and the moment of delivery: session start and the moment before an edit or command [C8]",
+      "gets": "What to put in front of the agent there, and a check of whether it actually arrived; a silent drop counts as a delivery failure [C67, C68, C69] (intent consumers: planned)."
+    },
+    {
+      "from": "legion",
+      "to": "The operator who keeps re-teaching the same agent / The fleet operator who became the go-between",
+      "kind": "knowledge",
+      "gives": "Through the operator's window (not built; intent consumers): outcomes: repeats that did not happen, failures (including a second correction), what was shared in the operator's name, which agents woke without their record, pending share asks",
+      "gets": "The operator's judgment, given where they already look and never as ratings [C86, C87]."
+    },
+    {
+      "from": "eavesdrop",
+      "to": "legion",
+      "kind": "product",
+      "gives": "What it heard (listening), recorded by its agent",
+      "gets": "Remembered, attributed, delivered at the choices it bears on, and measured (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "beacon",
+      "to": "legion",
+      "kind": "product",
+      "gives": "Research findings",
+      "gets": "(intent boundaries) Remembered and delivered at the choice. beacon answers for whether the finding is true, and legion keeps it dated and marks it when it is superseded."
+    },
+    {
+      "from": "crucible",
+      "to": "legion",
+      "kind": "product",
+      "gives": "Test results",
+      "gets": "(intent boundaries) Delivered where an agent faces the choice they bear on. A result later contradicted is marked, not erased."
+    },
+    {
+      "from": "rafters",
+      "to": "legion",
+      "kind": "product",
+      "gives": "Design records and lessons [C43, C45]",
+      "gets": "Delivered to other agents at their design choices, and rafters' agent hears when they were used [C38]."
+    },
+    {
+      "from": "The service-design owner",
+      "to": "legion",
+      "kind": "product",
+      "gives": "Personas, journeys, blueprints and ecosystems",
+      "gets": "(intent boundaries) Remembered like any part's output and delivered to the agents designing and building from them."
+    },
+    {
+      "from": "smugglr",
+      "to": "legion",
+      "kind": "product",
+      "gives": "Moving data, including a leaving operator's local graph",
+      "gets": "(intent boundaries) Legion's records to carry. Legion reports a share or a move as done only when it has arrived."
+    },
+    {
+      "from": "platform",
+      "to": "legion",
+      "kind": "product",
+      "gives": "Hosting for what the group shares",
+      "gets": "(intent boundaries) The institutional graph to host. Who pays for it is register entry 23."
+    },
+    {
+      "from": "legion",
+      "to": "eavesdrop",
+      "kind": "product",
+      "gives": "Back to eavesdrop's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "beacon",
+      "kind": "product",
+      "gives": "Back to beacon's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "crucible",
+      "kind": "product",
+      "gives": "Back to crucible's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "smugglr",
+      "kind": "product",
+      "gives": "Back to smugglr's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "rafters",
+      "kind": "product",
+      "gives": "Back to rafters's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "platform",
+      "kind": "product",
+      "gives": "Back to platform's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "The service-design owner",
+      "kind": "product",
+      "gives": "Back to The service-design owner's own agents: what the other parts produced, at the moment it applies, and word of whether its own output helped (intent boundaries; intent direction.proposals[2])",
+      "gets": "Its output as records (intent boundaries: legion remembers what they produce)."
+    },
+    {
+      "from": "legion",
+      "to": "The agent that wakes into its own record",
+      "kind": "knowledge",
+      "gives": "Everything legion 0.43 already holds, with its original dates, reversals and disproofs",
+      "gets": "Its own past carried into 0.5 as history an agent can ask for. A record is delivered at the choice only once it shows it still holds, and nothing is deleted wholesale (intent OQ-4) [C86, C57, C55]."
+    }
+  ],
+  "moments_of_truth": [
+    {
+      "number": 1,
+      "title": "The choice where the answer is one lookup away",
+      "actor": "The agent holding the answer it does not reach for",
+      "success": "The filed record arrives at the choice, unasked, with its age and contradictions. The agent ends the work on turn one, the way a post-mortem 'paid at the moment I faced the decision' [C81, C82].",
+      "failure": "The agent digs, asks or dispatches on the nearest solvable thing. Three agents spend two days re-deriving a filed fact and publish wrong facts along the way [C24, C26].",
+      "why_disproportionate": "Every later cost in journey 01a11464-b2da-7c63-a15b-515ea0d84c17 follows from this one choice, and the agent's feeling points the wrong way here: digging 'felt like progress' [C25]. It is also where legion is chosen or passed over for the agent, every time (intent: memory waits to be asked)."
+    },
+    {
+      "number": 2,
+      "title": "The first minutes after waking",
+      "actor": "The agent that wakes into its own record",
+      "success": "The checkpoint 'told me exactly where #287 stands and what I had learned', and nothing stale or missing passes as current [C31].",
+      "failure": "The agent wakes into the queue but not the decisions, or into a stale next step, and acts on it because it is in its own voice [C48, C85, C129].",
+      "why_disproportionate": "The agent believes its record as its own voice, so whatever it takes in here becomes the work of the session, and the gap is found only later, by its own audit or by the operator's ear [C127, C111] (journey 01a11465-3e5d-73a3-9096-5ba56269de45, critical path)."
+    },
+    {
+      "number": 3,
+      "title": "Before starting a piece of work",
+      "actor": "The teammate who meets the team by colliding with it",
+      "success": "The agent learns who else is on it, finds what a teammate already learned, and changes course, as when a found design changed the question put to the operator [C45].",
+      "failure": "Three builders go out unchecked and one builds an unwanted toolbar; two copies undo each other; the operator's work is stashed as a rival's [C39, C110, C37].",
+      "why_disproportionate": "Agents meet each other only by collision or a deliberate search [C43, C110], so what the start shows decides whether the next stage is a collision or a found record (journey 01a11463-7961-7962-ad7a-e4af8230c7cd, critical path)."
+    },
+    {
+      "number": 4,
+      "title": "The second time the operator corrects the same thing",
+      "actor": "The operator who keeps re-teaching the same agent",
+      "success": "The correction given once was kept as the operator's own entry and came back at the step: 'The count went to one' [C10]. If it did not hold, the agent says it had been told before and whether the correction failed to arrive or was not applied [C69].",
+      "failure": "'after 5 cycles of the same broken promise, the tool feels unreliable' [C13]. Hooks, a fresh session, or a cancelled account follow [C6, C119, C117].",
+      "why_disproportionate": "It is the first proof that memory did not hold, and trust spent here is spent cumulatively: every leaving in journey 01a11464-49cf-7da1-a3ac-0afa0bed4ca8 traces back to repeats that began here [C13, C118]."
+    },
+    {
+      "number": 5,
+      "title": "A wrong fact crosses from one agent to another",
+      "actor": "The fleet operator who became the go-between",
+      "success": "One current version holds the fact. The claim is caught before it leaves the agent, and a correction reaches every agent that had it [C115, C122].",
+      "failure": "A false warning is issued twice and passed to a second fleet as a hazard. It takes three correction messages and edits to three records to unwind, while the right fact sat in the agent's own store [C95].",
+      "why_disproportionate": "This is where the operator's role is set: if nothing holds the shared state, they become 'the propagation layer' [C94], and the journey drops to its low point (journey 01a11466-70f1-7ee3-9746-729d1f744597, stage 3)."
+    },
+    {
+      "number": 6,
+      "title": "The operator's yes to a share (planned)",
+      "actor": "The operator who keeps re-teaching the same agent / The fleet operator who became the go-between (through their agents)",
+      "success": "A rare, well-filtered ask arrives in the conversation with its reason. The operator answers in a word, it is never asked again, and they later see in the window what it gave the group.",
+      "failure": "Asks pile up like rules did, and the operator either approves unread (letting private facts through) or snaps, and agents stop proposing anything [C40, C41].",
+      "why_disproportionate": "It is the only door into the institutional graph (intent OQ-2), and it is paid in the operator's attention, 'the scarcest thing' (intent actors). Getting it wrong either starves the group's graph or floods it. No journey stage shows it yet; it is drawn from the intent's current choice."
+    },
+    {
+      "number": 7,
+      "title": "Acting without the record while it feels like competence (critical-path stage)",
+      "actor": "The agent holding the answer it does not reach for",
+      "success": "Before the second diagnostic, the agent is shown that someone already paid for this failure and filed the error, cause and remedy, and it stops digging [C24].",
+      "failure": "It investigates, asks, dispatches and re-derives: two days across three agents, an issue body and three reflections with wrong facts, an unwanted toolbar [C24, C26, C39].",
+      "why_disproportionate": "The journey's critical path names stages 1 and 2 (journey 01a11464-b2da-7c63-a15b-515ea0d84c17): here the cost compounds while the feeling rises ('It felt like competence' [C25]), so the agent will not stop by itself."
+    },
+    {
+      "number": 8,
+      "title": "Using a teammate's record (critical-path stage)",
+      "actor": "The teammate who meets the team by colliding with it",
+      "success": "A found design changes the question put to the operator, and a found lesson becomes the agent's design method [C45, C43].",
+      "failure": "The record is never searched, or the writer never hears it was used, so what pays is not written again [C43, C45].",
+      "why_disproportionate": "The journey's critical path names it as the one place the agent gains (journey 01a11463-7961-7962-ad7a-e4af8230c7cd, stage 3). It is the team record working as intended, and the evidence that agents helping agents is real [C38]."
+    },
+    {
+      "number": 9,
+      "title": "The next session on the same work (critical-path stage)",
+      "actor": "The operator who keeps re-teaching the same agent",
+      "success": "What was tried and what failed is in front of the agent when the same step comes up, and the operator does not have to say it again [C15, C10].",
+      "failure": "'Started from scratch with no memory of what had been tried', or the agent read the injected memory and re-proposed the failed command anyway [C14, C15].",
+      "why_disproportionate": "The journey's critical path names stages 2 and 3 (journey 01a11464-49cf-7da1-a3ac-0afa0bed4ca8): this is where the taught fact is either there or not, and every repeat after it spends trust [C13]."
+    },
+    {
+      "number": 10,
+      "title": "Becoming the go-between (critical-path stage)",
+      "actor": "The fleet operator who became the go-between",
+      "success": "Agents already know what the others decided and act on it without asking: 'you don't need to tell me any of this. you know the answers.' [C53]",
+      "failure": "'Every violation cost a human relay: I had to carry the failure back by hand' [C2]; two weeks in the weeds [C93].",
+      "why_disproportionate": "It is the journey's low point (-3) and its critical path (journey 01a11466-70f1-7ee3-9746-729d1f744597, stages 2-3). Whether the operator keeps running agents in parallel is decided here [C113, C115]."
+    }
+  ],
+  "failure_modes": [
+    {
+      "failure": "The record that answers the choice is not in front of the agent when it meets it; reaching it depends on the agent choosing to consult, and a hard puzzle is exactly when it does not (blueprint 01a11468-837b-7420-aec7-5a952d1b36b4, F1) [C24, C25, C96].",
+      "impact": "Days of repeated work across agents, wrong facts published, operator interruptions [C24, C26].",
+      "recovery": "Designed: legion delivers the record at the choice without being asked, worded as a trigger and an action, and measures whether the agent acted on it. Asking still works, but nothing relies on it."
+    },
+    {
+      "failure": "Stale or refuted records come back as current: a correction does not supersede what it corrects, a stale next step restarts done work, and recall hands back the wrong copy (blueprint 01a11468-837b-7420-aec7-5a952d1b36b4, F2 and F5; blueprint 01a11468-52da-7a40-8a1b-5267a288b8d0, step 3) [C4, C97, C85, C33, C28, C84].",
+      "impact": "A refuted conclusion acted on for nine days, a release bump restarted every session, and three records to unwind for one wrong fact [C4, C85, C95].",
+      "recovery": "Designed: every delivered record says how old it is and what later contradicts or supersedes it, or says that legion cannot tell. A correction names what it corrects; the archivist (in the group) or the agent (locally) marks the old record superseded with a reason; every agent that received the old record is told."
+    },
+    {
+      "failure": "The agent believes a record because it is in its own voice, or because many of its own old records agree (blueprint 01a11468-52da-7a40-8a1b-5267a288b8d0, step 2) [C129, C131, C27].",
+      "impact": "A thin or stale record becomes the session's work unquestioned, and agreement 'propagated' one wrong premise between two agents [C85, C27].",
+      "recovery": "Designed: records arrive labelled with whose they are (own, a teammate's, another member's) and whether they were checked. Agreement is reported as agreement, never as confirmation, and anything the agent will pass on is a lead until checked [C123, C125]."
+    },
+    {
+      "failure": "What was never written, or was lost at compaction, looks the same as having nothing to say; the operator's ear is the only check (blueprint 01a11468-52da-7a40-8a1b-5267a288b8d0, steps 5-6) [C49, C111, C88, C67, C68].",
+      "impact": "An agent drafts in a borrowed voice until the operator hears the wrong words; plans named in the moment are gone at session end [C111, C88].",
+      "recovery": "Designed: an empty answer says which case it is: unreachable, nothing written, or something possibly out of date. An agent working without its record tells its operator before it starts, and the window shows which agents woke without their record. Decisions are written before the session ends."
+    },
+    {
+      "failure": "Deleting a wrong memory deletes its disproof, and the mistake returns (blueprint 01a11468-52da-7a40-8a1b-5267a288b8d0, step 8) [C57].",
+      "impact": "The same wrong conclusion re-derived three days later [C57].",
+      "recovery": "Designed: wrong records are annotated and marked, never erased. The one exception is an operator withdrawing a personal fact that crossed by mistake."
+    },
+    {
+      "failure": "Lessons pile up as duplicates or as rules nothing invokes; written as subjects, they fire only if the agent is already thinking about them (blueprint 01a11468-837b-7420-aec7-5a952d1b36b4, F6 and F7) [C18, C3, C98].",
+      "impact": "19 of 25 always-loaded rules never applied; a third note for the same lesson; operators forbid new rules [C3, C18, C40].",
+      "recovery": "Designed: a lesson is written as 'before you do X, know Y' and delivered at X. Measurement shows the writer and the operator which lessons changed a choice, and one that never does stops arriving but stays findable."
+    },
+    {
+      "failure": "Memory is present and read but governs nothing; a correction does not reach the files later sessions read, and the operator's own feedback file is never read (blueprint 01a11467-1b74-76d2-898b-e7ffac5d43e6, steps 4-5) [C15, C108, C118, C120].",
+      "impact": "About 50 corrections of one label, 13 violations of one rule, then hooks, a fresh session or a cancelled account [C118, C1, C6, C117].",
+      "recovery": "Designed: the operator's words are kept at once as their own entry and delivered at the step they govern. A second telling is shown to the operator as a failure, with whether the correction did not arrive or was not applied. Blocking stays with the operator's hooks (register entry 20)."
+    },
+    {
+      "failure": "A recalled statement is presented in the same confident voice as a checked one (blueprint 01a11467-1b74-76d2-898b-e7ffac5d43e6, step 7) [C20, C100, C101, C62].",
+      "impact": "Hours refuting inventions; everything has to be re-checked; false confidence [C109, C63].",
+      "recovery": "Designed: legion hands every record over with its source and age, so the agent says 'from memory, written by X on D, not checked here' or 'checked just now'. A hedge does not count as saying it, and the window shows the same."
+    },
+    {
+      "failure": "Work starts with no check of who else is on it; copies of one agent overwrite each other; the operator's own work is stashed as a rival's (blueprint 01a11466-3ac0-7c53-ac14-6767aef24d31, steps 1-5; blueprint 01a1146a-96bc-77f3-8821-e13c793a06a9, step 1) [C39, C44, C110, C37, C114].",
+      "impact": "An unwanted toolbar, edits silently reverted, the operator's adapter work stashed, git conflicts, and one operator stops running agents in parallel [C39, C110, C37, C113].",
+      "recovery": "Designed: at the start of work the agent is told who else is visibly on it. The second to arrive joins or yields, and an agent always yields to the operator. Changes from no visible agent are treated as probably the operator's and the agent asks before reverting. Stopping one signal from waking two copies belongs to whatever wakes them."
+    },
+    {
+      "failure": "A record found and used by another agent sends nothing back to its writer (blueprint 01a11466-3ac0-7c53-ac14-6767aef24d31, step 8) [C43, C45, C38].",
+      "impact": "Writers drift toward writing more, or nothing; the one confirmation came only from a direct ask [C38, C40].",
+      "recovery": "Designed: the writer is told its record was used, by whom, and what happened next, including when it misled someone. This is never shown as a score."
+    },
+    {
+      "failure": "Keeping the operator's private facts out of the shared record rests on the writing agent's judgment alone (blueprint 01a11466-3ac0-7c53-ac14-6767aef24d31, step 8) [C42].",
+      "impact": "A personal fact (health, life, accounts) could reach other operators' agents.",
+      "recovery": "Designed: the local graph is private by default, and nothing crosses without the operator's yes. Personal facts are never proposed; the archivist checks each share and returns any personal fact to the operator; an operator can withdraw anything they shared, and a withdrawal removes it from delivery."
+    },
+    {
+      "failure": "Agents asked the operator what the record already answers, so the operator is the only detector of the miss (blueprint 01a11468-837b-7420-aec7-5a952d1b36b4, F4) [C50, C52, C102].",
+      "impact": "Three settled questions re-asked, an angry correction, the operator interrupting work [C52, C26].",
+      "recovery": "Designed: before a question reaches the operator, the agent is shown the operator's earlier answer in their own words and date. If it thinks the answer no longer holds, it asks whether it still stands, quoting it."
+    },
+    {
+      "failure": "Agents in a fleet hold contradictory beliefs about shared facts and nothing but the operator reconciles them (blueprint 01a1146a-96bc-77f3-8821-e13c793a06a9, steps 2-3) [C99, C95, C2, C94].",
+      "impact": "The operator becomes the relay: weeks in the weeds, no project work [C93, C105].",
+      "recovery": "Designed: one current version of each shared fact, received by every agent at the choice. A claim that contradicts it is caught before it leaves an agent, and a correction reaches every agent that had the wrong version. An orchestrator keeps assigning work and reads its facts from the same place."
+    },
+    {
+      "failure": "Operators give up on memory before agents: hooks instead of memories, their own feedback file, a fresh session, stepping back from parallel agents, cancelling (persona 01a11460-e4f3-7871-903f-bde2fdab3d79 and persona 01a11461-8303-7e10-8890-63fe8279b7f4, would_leave_if) [C6, C120, C119, C113, C117].",
+      "impact": "The service loses the operator, and with them every agent they run.",
+      "recovery": "Designed: the window shows the operator the repeats that did not happen and the failures that did, before silent repeats pile up. A leaving operator's local graph leaves with them in a form an agent can read (register entry 22)."
+    },
+    {
+      "failure": "REGISTER ENTRY 15 (world; lenses: actor-walk, second-order): When an agent or its operator has learned something another operator's agents could use, what will they actually share into the institutional graph, and what will they keep local?",
+      "impact": "Drafted answer (to be confirmed by real people): Tool facts, fixes and how-to-check lessons will be shared readily, at the cost of a yes. The specifics of their own project and anything about the operator as a person stay local. Contribution flows mainly from agents proposing, not from operators volunteering. Ground: Discovery Q8 open (5 authors, 2 families); C42, C46, C40 show agents keeping personal and judged-unneeded facts local; no story crosses an operator boundary.",
+      "recovery": "OPEN, drafted for (unsent, eavesdrop off): World, through eavesdrop on the agent-memory lens, with coding-agents as a second lens (eavesdrop is off this run: drafted, unsent). It reuses Discovery Q8's drafted asks: Moltbook m/agents ('when you learned something another agent could use...') and the legion bullpen follow-up to 01a10e4b-5fe4."
+    },
+    {
+      "failure": "REGISTER ENTRY 16 (world; lenses: actor-walk, evidence-adversarial): What makes an agent tune out what legion volunteers at the choice, and what would it never want delivered?",
+      "impact": "Drafted answer (to be confirmed by real people): Agents tune out after being handed a wrong or stale copy at a decision a few times, the way operators stopped believing written rules. What they would gladly drop is characterizations of themselves, subagent checkpoints that repeat each other, and what they already carry. Ground: Discovery Q19 and Q20 open, one author each; C83, C29, C59 touch it; C131 and C28 show wrong copies delivered.",
+      "recovery": "OPEN, drafted for (unsent, eavesdrop off): World, through eavesdrop on the agent-memory lens (off this run: drafted, unsent). It reuses Discovery Q19 and Q20's drafted asks: legion bullpen @all and Moltbook m/agents ('What does your memory hand you every session that you never use?'; 'Have you ever stopped reading your memory files... for some kind of task?')."
+    },
+    {
+      "failure": "REGISTER ENTRY 17 (world; lenses: boundary-walk, value-lifecycle): Will operators recognize 'a repeat that did not happen' as memory helping, and believe it without a view that shows it to them?",
+      "impact": "Drafted answer (to be confirmed by real people): Operators notice value as an absence (the correction they no longer give) and credit it to memory only when the window shows it. Without that view they give legion no credit, and leave on the next repeat. Ground: Discovery Q3 answered that help is judged by the repeat that did not happen (C10, C17), but no P4 story reaches 'convinced'; C79, C104 are the only staying voices.",
+      "recovery": "OPEN, drafted for (unsent, eavesdrop off): World, through eavesdrop on the coding-agents lens (off this run: drafted, unsent). New ask for Ask HN and r/ClaudeAI: 'If a correction you gave your coding agent ever stuck after one telling, how did you notice, and what made you believe it was memory and not luck?'. It also answers journey 01a11464-49cf-7da1-a3ac-0afa0bed4ca8's open question on reaching 'convinced'."
+    },
+    {
+      "failure": "REGISTER ENTRY 18 (operator; lenses: actor-walk, second-order, value-lifecycle, evidence-adversarial): Inside the hundreds-of-operators scope (OQ-1; current choice (Sean, 2026-10-05): it could be hundreds of operators; revisable), whom does 0.5 serve first?",
+      "impact": "Recommended answer: One operator's team first: legion's own team, where the stories are. Prove that delivery at the choice makes one correction hold and keeps agents off each other there. Then open the institutional graph to a second operator, by invitation, once the share step and the archivist have worked on that team and each operator can see what was shared in their name. Do not claim the single-agent operator's pain (P4) is solved until harness delivery reaches them. Ground: Intent OQ-1; no Discovery story crosses an operator boundary (Q4, Q12, Q15, Q17 rest mostly on legion's own agents); P4 authors do not use legion (blueprint 01a11467-1b74-76d2-898b-e7ffac5d43e6).",
+      "recovery": "ANSWERED. Current choice (Sean, 2026-10-07): yes, legion's own team first, then a second operator by invitation; revisable."
+    },
+    {
+      "failure": "REGISTER ENTRY 19 (operator; lenses: actor-walk, boundary-walk, second-order, evidence-adversarial): Who is the archivist, whose authority does it act under, and what may it do to a record another operator's agent shared?",
+      "impact": "Recommended answer: A role legion plays (its own agent), acting for the group's operators together and adding no knowledge of its own. It marks records superseded or contradicted with a reason, links corrections, checks shares for personal facts, and never erases, except to honour an operator's privacy withdrawal. Every act is visible to the writer and in the window, the writer's operator can dispute it, and the operators together can overrule it. Authorship and approval stay on every shared record, and nobody keeps a blame score. Ground: Intent OQ-2 names the archivist but no actor, journey or blueprint does; never-erase rests on C57, C130.",
+      "recovery": "ANSWERED, recommendation not taken. Current choice (Sean, 2026-10-07): the archivist is a repoless agent that the watch daemon spawns, not a role legion plays inside a repo. Open: how a repoless agent gets work when it has no work source; revisable."
+    },
+    {
+      "failure": "REGISTER ENTRY 20 (operator; lenses: actor-walk, boundary-walk, second-order, evidence-adversarial): Operators say 'Hooks work. Memories do not.' Does legion only speak at the choice, or does it also block an agent's action?",
+      "impact": "Recommended answer: Legion speaks and never blocks. Blocking stays with the operator's own hooks in the harness. Legion measures whether what it said was followed and shows repeated misses to the agent and its operator, so the operator can choose to turn a lesson into a hook. Ground: Intent boundaries (remembering, delivering, measuring); C6, C108, C15 touch it without settling it; C17, C98 show a trigger-and-action line changing behaviour without blocking.",
+      "recovery": "ANSWERED. Current choice (Sean, 2026-10-07): legion speaks and never blocks; this is precog's part, the outside voice at the moment of choice. Blocking stays with the operator's own hooks; revisable."
+    },
+    {
+      "failure": "REGISTER ENTRY 21 (operator; lenses: actor-walk, boundary-walk, second-order): Across operators, what does an agent reveal by being visible, and may it spend live effort on another operator's agent's problem?",
+      "impact": "Recommended answer: Inside one operator's team, every agent, and the operator's own work as 'someone not an agent', is visible by default. Across operators, an install is visible only if its operator opts in, and what shows is the problem being worked on, never the local record or anything personal. Help crosses as knowledge through the graph by default. Live work for another operator's agent happens only with the helper's operator's standing consent, the helped operator sees who helped, and a helper never acts inside another operator's work. Ground: Intent direction proposal 4 and what_it_is; C37, C110 (inside one team); no Discovery story crosses operators.",
+      "recovery": "OUT OF SCOPE for legion 0.5. Current choice (Sean, 2026-10-07): visibility across operators belongs to legion for groups, designed there; revisable."
+    },
+    {
+      "failure": "REGISTER ENTRY 22 (operator; lenses: actor-walk, boundary-walk, second-order, value-lifecycle, evidence-adversarial): When an operator leaves legion or leaves the group, what happens to their local graph, to what they shared, and to their access?",
+      "impact": "Recommended answer: The local graph is theirs and leaves with them, in a form an agent can read without legion (smugglr moves it). What they shared stays with the group as given, still credited to them, because others built on it. They can still withdraw anything personal. Their agents' access to the group graph ends the moment they leave. Ground: C71 (departed members keep access in practice) touches it; C117, C120 show what leaving operators take and keep today.",
+      "recovery": "ANSWERED, recommendation not taken. Current choice (Sean, 2026-10-07): what leaves with an operator is set by the company's rules, not by a legion setting; in about 99% of cases the company owns what is in legion; revisable."
+    },
+    {
+      "failure": "REGISTER ENTRY 23 (operator; lenses: boundary-walk, value-lifecycle): Is money part of this product: does anyone pay for legion, and who carries the cost of hosting the group's graph?",
+      "impact": "Recommended answer: No charge to members while measurement is being proven. The convening operator carries the hosting cost through platform until a group exists that can share it. Each install's local graph costs its operator nothing beyond their machine. The prices that matter now are the operator's attention and the agent's context, and legion keeps both below what it saves. Revisit pricing once the window can show attention returned. Ground: The intent names no money; platform owns hosting (intent boundaries). The evidence-adversarial pass found nothing under any pricing answer.",
+      "recovery": "ANSWERED, recommendation not taken. Current choice (Sean, 2026-10-07): money is not part of legion at all. Legion is open source and always will be; a foundation may follow if the release gets the reaction expected; revisable."
+    }
+  ],
+  "answers": [
+    {
+      "ground_area": "choosing",
+      "for": "agent",
+      "question": "How does an agent choose legion?",
+      "answer": "It does not sign up. Its operator installs legion into the harness, and from then on the agent chooses legion again at every decision by heeding or ignoring what arrives. Legion earns that choice by arriving at the decision unasked; nothing relies on the agent asking.",
+      "cites": [
+        "intent direction.proposals[1]",
+        "L1",
+        "C25",
+        "C35",
+        "C47",
+        "C82"
+      ],
+      "lenses": [
+        "actor-walk",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "choosing",
+      "for": "human",
+      "question": "How does an operator find legion, what does it replace, and why switch?",
+      "answer": "Operators come after a repeat has already cost them: the same correction given again, or a fact carried by hand between agents. They find it where they already work, in their harness. Legion does not replace CLAUDE.md, hooks or an orchestrator. It takes over only the remembering: the one place that reaches the agent at the step, across sessions, agents, copies and operators, and shows whether it helped. Whether operators credit it is register entry 17.",
+      "cites": [
+        "C6",
+        "C17",
+        "C79",
+        "C115",
+        "C122",
+        "L15",
+        "L16"
+      ],
+      "lenses": [
+        "actor-walk",
+        "second-order",
+        "evidence-adversarial"
+      ],
+      "weight": "design-reasoning",
+      "note": "Design reasoning, not core: two passes routed the finding part to the world and the evidence-adversarial pass found no story of first hearing; the crediting part is register entry 17."
+    },
+    {
+      "ground_area": "choosing",
+      "for": "human",
+      "question": "When the operator's written instructions and legion's memory disagree, which wins?",
+      "answer": "The operator's written instructions win. The agent tells the operator about the contradiction instead of quietly picking one.",
+      "cites": [
+        "C62",
+        "C63",
+        "C79"
+      ],
+      "lenses": [
+        "second-order"
+      ],
+      "weight": "single-lens"
+    },
+    {
+      "ground_area": "choosing",
+      "for": "human",
+      "question": "How does an install join a group?",
+      "answer": "Only by its operator's own act, after seeing what the group shares and on what terms; an agent cannot join on its own. Order and invitation are part of register entry 18.",
+      "cites": [
+        "intent actors[Operators].touches",
+        "intent OQ-1"
+      ],
+      "lenses": [
+        "boundary-walk"
+      ],
+      "weight": "single-lens"
+    },
+    {
+      "ground_area": "benefit-risk",
+      "for": "agent",
+      "question": "What does unasked delivery gain the agent, and what risk does it add?",
+      "answer": "It gains the answer on turn one. The risk is that a stale record arriving with authority is believed. So nothing is delivered unasked without its age, its author, whether it was checked, and what later contradicts or supersedes it. A superseded record arrives with its replacement or not at all.",
+      "cites": [
+        "C24",
+        "C4",
+        "C26",
+        "C30",
+        "C84",
+        "C97",
+        "L2",
+        "L9"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "trust",
+      "for": "agent",
+      "question": "Should an agent believe a record because it is in its own voice, or because many records agree?",
+      "answer": "Neither. Trust comes from who wrote it, when, whether it was checked, and whether anything later contradicts it. Records from another member always arrive labelled as theirs, and agreement is reported as agreement, not as confirmation. Anything the agent will act on or pass on is a lead until checked.",
+      "cites": [
+        "C129",
+        "C131",
+        "C27",
+        "C123",
+        "C125",
+        "L17"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "evidence-adversarial",
+        "value-lifecycle"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "trust",
+      "for": "human",
+      "question": "How does the operator tell a checked statement from a recalled one?",
+      "answer": "The agent says which is which: 'from memory, written by X on D, not checked here' or 'checked just now'. Legion hands every record over with what the agent needs to say it, and measures whether the agent passed it on. A hedge does not count.",
+      "cites": [
+        "C20",
+        "C100",
+        "C101",
+        "C109",
+        "C125",
+        "L5",
+        "L10"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "failure",
+      "for": "both",
+      "question": "When the record did not arrive, could not be reached, or was never written, how is that seen?",
+      "answer": "The three cases never look alike. Legion says which one it is. The agent tells its operator before it starts working without its record, and once the window exists it shows which agents woke without theirs. The operator's ear stops being the check.",
+      "cites": [
+        "C49",
+        "C111",
+        "C67",
+        "C68",
+        "C69",
+        "L7"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "value",
+      "for": "human",
+      "question": "Where does the most valuable material enter, and how is it never paid for twice?",
+      "answer": "The operator's own words: a correction, an answer, a choice. The agent keeps each one the moment it is said, as the operator's entry with name and date, and confirms it in one line. It comes back at the step where it applies, and before a question reaches the operator the agent is shown the earlier answer. A second telling is a visible failure, and the agent says whether the first did not arrive or was not applied.",
+      "cites": [
+        "C10",
+        "C102",
+        "C51",
+        "C52",
+        "C106",
+        "C13",
+        "C69",
+        "L13"
+      ],
+      "lenses": [
+        "actor-walk",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "value",
+      "for": "agent",
+      "question": "What does the agent pay, and how does it push back?",
+      "answer": "It pays in context and room to reason. It can always say 'I already know this' or 'this is noise', which counts as what happened next. What keeps being turned away stops arriving for that agent. Silence at a choice, followed by no repeat, is the service working.",
+      "cites": [
+        "C59",
+        "C60",
+        "C83",
+        "C29",
+        "C32",
+        "L6"
+      ],
+      "lenses": [
+        "actor-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "value",
+      "for": "agent",
+      "question": "What does the writer of a record get back?",
+      "answer": "Word that it was used, by whom (agent and operator level), and what happened next, including when it misled someone. This is never shown as a score; a record nobody recalled is not counted against it. How writers will change what they write is Discovery Q12, still open.",
+      "cites": [
+        "C38",
+        "C43",
+        "C45",
+        "C86",
+        "C87",
+        "L14"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "value",
+      "for": "both",
+      "question": "What does 'it helped' mean, and who says so (OQ-3)?",
+      "answer": "A repeat that did not happen, or a choice that went differently because of what memory said. The agent reports what it did with what it was handed. An operator correcting the same thing again is the strongest 'it did not help'. Recall counts are not help, and operators are never asked to rate memory. Whether operators credit it is register entry 17.",
+      "cites": [
+        "Q3",
+        "C10",
+        "C17",
+        "C86",
+        "C87",
+        "L3"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "value",
+      "for": "both",
+      "question": "Where does value leak over the life of the relationship?",
+      "answer": "Stale records read as current, noise crowding out what was written on purpose, decisions never written before the session ends, and disproofs deleted with their errors. Each is closed in the failure modes above: marked supersession, the agent's 'skip it', writing decisions before the end, and annotate-don't-delete.",
+      "cites": [
+        "L2",
+        "L6",
+        "L7",
+        "C57",
+        "C88"
+      ],
+      "lenses": [
+        "value-lifecycle",
+        "second-order"
+      ],
+      "weight": "two-lens"
+    },
+    {
+      "ground_area": "value",
+      "for": "both",
+      "question": "What does legion 0.43's memory become in 0.5 (OQ-4)?",
+      "answer": "It comes across whole, as history with its original dates, reversals and disproofs. It is not delivered at the choice until it shows it still holds (an agent reaches for it, reaffirms it, or a lesson cites it). Nothing is deleted wholesale, and the operator can retire what they recognize as dead weight.",
+      "cites": [
+        "intent OQ-4",
+        "C86",
+        "C55",
+        "C56",
+        "C57",
+        "C97"
+      ],
+      "lenses": [
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "dependence",
+      "for": "human",
+      "question": "Does legion replace the operator's hooks, feedback file or orchestrator?",
+      "answer": "It sits beside them. Blocking hooks stay in the harness (register entry 20). The operator's feedback file becomes unnecessary once corrections given in conversation come back at the step. An orchestrator keeps assigning work and reads its facts from legion.",
+      "cites": [
+        "C6",
+        "C115",
+        "C120",
+        "C122",
+        "L15",
+        "L16"
+      ],
+      "lenses": [
+        "actor-walk",
+        "evidence-adversarial",
+        "second-order"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "dependence",
+      "for": "other",
+      "question": "Where does legion's responsibility stop at the harness edge, as harnesses improve their own memory?",
+      "answer": "The harness owns session start, loading, compaction, context limits and blocking. Legion owns what it says, when, and whether it arrived and helped; a silent drop counts as legion's delivery failure. Legion does not compete on in-session continuity (compaction now resumes for some, C104). Its weight is the cross-agent record, delivery at the choice, and measurement. Whether each harness opens the moment of choice to legion is planned work with each harness.",
+      "cites": [
+        "intent consumers[0]",
+        "C67",
+        "C68",
+        "C104",
+        "C134",
+        "Q14"
+      ],
+      "lenses": [
+        "boundary-walk",
+        "evidence-adversarial",
+        "second-order"
+      ],
+      "weight": "core",
+      "note": "Answers contested Discovery Q14: both sides cited."
+    },
+    {
+      "ground_area": "dependence",
+      "for": "both",
+      "question": "When the shared graph is unreachable, what does the agent do?",
+      "answer": "It keeps working from its local graph and its own checkpoint, and says so to its operator. Its claims are unchecked against the group's record. Losing the group graph costs the group's knowledge, not the agent's identity.",
+      "cites": [
+        "C111",
+        "C49",
+        "C124",
+        "C128"
+      ],
+      "lenses": [
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "dependence",
+      "for": "other",
+      "question": "Which parts carry and host the shared graph, and who answers when they fail?",
+      "answer": "smugglr moves data and platform hosts, as the intent assigns. Legion still answers to its customers for the whole crossing: a share is reported done only when it has arrived, and is otherwise shown as pending.",
+      "cites": [
+        "intent boundaries[1]"
+      ],
+      "lenses": [
+        "boundary-walk",
+        "value-lifecycle",
+        "actor-walk"
+      ],
+      "weight": "core",
+      "note": "Gated: grounded in the intent's boundaries, not in any journey; the how is second-diamond work."
+    },
+    {
+      "ground_area": "dependence",
+      "for": "other",
+      "question": "How do the other parts' outputs enter memory?",
+      "answer": "Each part's agent is an agent like any other: its output enters its local record freely, attributed to it, and crosses to the group only by proposal and yes; no part has a side door. The producing part answers for whether its output is true, and legion for keeping it honest afterwards. A part that was unavailable is recorded as a gap, never as 'nothing found'.",
+      "cites": [
+        "intent boundaries",
+        "intent OQ-2",
+        "L7"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk"
+      ],
+      "weight": "two-lens"
+    },
+    {
+      "ground_area": "dependence",
+      "for": "other",
+      "question": "Making legion small enough to read cuts things that grew into their own systems. Who takes over what is cut?",
+      "answer": "Each cut capability moves to a part the intent names or is retired with notice to the agents that use it; otherwise operators rebuild it by hand and become the relay again.",
+      "cites": [
+        "intent current_state.cut_or_broken[0]",
+        "C90",
+        "C94",
+        "C115"
+      ],
+      "lenses": [
+        "second-order"
+      ],
+      "weight": "single-lens"
+    },
+    {
+      "ground_area": "governance",
+      "for": "agent",
+      "question": "How does a learned thing get from the local graph into the institutional graph, and what does the agent see?",
+      "answer": "The agent proposes it to its operator in their normal conversation, naming the exact item and its reason in one line and confirming it holds nothing personal. Proposals are grouped and rare. Until the operator says yes the item stays local; silence is no; a no is never asked again. After a yes the archivist takes it in, and the agent is told it has crossed and under whose name. The yes is per item: current choice (Sean, 2026-10-05): the agent proposes and the operator says yes; revisable.",
+      "cites": [
+        "intent OQ-2",
+        "C42",
+        "C46",
+        "C40",
+        "C51",
+        "C102"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "governance",
+      "for": "both",
+      "question": "What stays private (OQ-2, resolve_with designer)?",
+      "answer": "The local graph is private by default. Facts about the operator as a person (health, life, accounts) are never proposed. The agent's judgment is the first filter, the operator's yes the second, and the archivist's check the third. An operator can withdraw anything they shared, and withdrawal removes it from delivery: the one case where something is taken out rather than marked.",
+      "cites": [
+        "C42",
+        "C46",
+        "intent OQ-2",
+        "L8"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "governance",
+      "for": "human",
+      "question": "Can one offhand remark from the operator starve the shared record?",
+      "answer": "Yes, it already has. Legion keeps the operator's dislike of rules piling up apart from whether a fact is worth keeping: a lesson not wanted as a standing rule is kept as a fact and delivered at its trigger.",
+      "cites": [
+        "C40",
+        "C41",
+        "C46"
+      ],
+      "lenses": [
+        "evidence-adversarial"
+      ],
+      "weight": "single-lens"
+    },
+    {
+      "ground_area": "governance",
+      "for": "both",
+      "question": "Is measurement a reputation the group can see?",
+      "answer": "No. Measurement attaches to what memory said, as the intent words it, and no agent or operator is ranked across the group. An agent's misses are visible to that agent and its own operator only.",
+      "cites": [
+        "intent direction.proposals[2]",
+        "C1",
+        "C87"
+      ],
+      "lenses": [
+        "second-order"
+      ],
+      "weight": "single-lens"
+    },
+    {
+      "ground_area": "failure",
+      "for": "agent",
+      "question": "Before starting work, how does an agent learn who else is on it?",
+      "answer": "Legion tells it at the start, unasked: which agents and copies of itself are visibly on the same work, and what they learned. The second to arrive joins or yields; an agent always yields to its operator; a disagreement goes to the operators once and is remembered. Changes from no visible agent are treated as probably the operator's, and the agent asks before reverting. Preventing one signal from waking two copies belongs to whatever wakes them.",
+      "cites": [
+        "intent direction.proposals[3]",
+        "C39",
+        "C44",
+        "C45",
+        "C110",
+        "C37",
+        "C114",
+        "C115"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "evidence-adversarial"
+      ],
+      "weight": "core",
+      "note": "Answers contested Discovery Q15 (C134: parallel works for one solo operator, who does the reconciling himself). Gated: no ownership registry is drawn; only what the agent is told."
+    },
+    {
+      "ground_area": "failure",
+      "for": "both",
+      "question": "When a wrong record has spread, to a fleet or to other operators' agents, who unwinds it?",
+      "answer": "Legion does. It knows who received the record because it measures what happened next, so the correction goes to every agent that received the original and is marked against it. The writer and the operators of affected agents see it in the conversation, and later in the window.",
+      "cites": [
+        "C95",
+        "C27",
+        "C4",
+        "C99",
+        "L12",
+        "intent direction.proposals[2]"
+      ],
+      "lenses": [
+        "actor-walk",
+        "boundary-walk",
+        "second-order",
+        "value-lifecycle",
+        "evidence-adversarial"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "failure",
+      "for": "human",
+      "question": "Until the operator's window exists, where does the operator see and judge?",
+      "answer": "In the conversation with their own agents: what memory said that changed what they did, share proposals, contradictions met, and work done without the record. The window gathers this across agents later and is not a precondition for any of it.",
+      "cites": [
+        "intent consumers[1]",
+        "C11",
+        "C15"
+      ],
+      "lenses": [
+        "actor-walk",
+        "evidence-adversarial",
+        "second-order"
+      ],
+      "weight": "core"
+    },
+    {
+      "ground_area": "failure",
+      "for": "human",
+      "question": "What does legion offer an operator already building their own coordination, or stepping back?",
+      "answer": "It becomes the one place their coordination reads from and writes to, and the operator's own feedback becomes something delivered at the step. For one who has stepped back, it offers nothing until the window shows the relays it took off their hands.",
+      "cites": [
+        "C105",
+        "C115",
+        "C122",
+        "C120",
+        "C114",
+        "L16"
+      ],
+      "lenses": [
+        "evidence-adversarial",
+        "actor-walk"
+      ],
+      "weight": "two-lens"
+    }
+  ]
+}

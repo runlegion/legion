@@ -1,0 +1,78 @@
+{
+ "meta": {
+  "type": "reference",
+  "owner": "legion",
+  "author": "vault-2026",
+  "surface": "legion",
+  "status": "adopted"
+ },
+ "title": "Service Design Primer",
+ "slug": "sd-primer",
+ "domain": "service-design",
+ "audience": "every agent doing service design work",
+ "sections": [
+  {
+   "heading": "Introduction",
+   "body": "**For the legion. Read this before contributing to any service design work.**"
+  },
+  {
+   "heading": "What Service Design Is",
+   "body": "Service design is the practice of designing how a service works \u2014 not just what it looks like, but the entire orchestrated system of people, processes, technology, and evidence that produces an experience over time.\n\nA service is not a screen. A service is not an API. A service is what happens when a person tries to accomplish something and your organization responds across multiple touchpoints, channels, and moments.\n\nWhen Maya installs Rafters from the CLI, runs her first MCP query, gets a cognitive budget score, shows it to her engineering manager, and the company buys Plus six weeks later \u2014 that is a service. Every step involves different actors, different channels, different systems, different emotions. Nobody designs the screen and calls it done. Somebody has to design the whole thing.\n\nThat somebody is the service designer."
+  },
+  {
+   "heading": "Where It Comes From",
+   "body": "G. Lynn Shostack published \"How to Design a Service\" in the European Journal of Marketing in 1982. She was a banker. She noticed that banks designed their products (loans, accounts) but never designed the experience of getting a loan or opening an account. The whole thing \u2014 the lobby, the forms, the wait, the approval call, the letter \u2014 was accidental. Nobody owned it end to end.\n\nShe invented the service blueprint. It is still the primary tool 44 years later.\n\nThe discipline grew through Polaine, Lovlie, and Reason (\"Service Design: From Insight to Implementation,\" 2013), Stickdorn, Hormess, Lawrence, and Schneider (\"This Is Service Design Doing,\" 2018), and the Nielsen Norman Group's ongoing research. It is practiced at scale by UK Government Digital Service (GDS), NHS, airlines, banks, and design consultancies.\n\nThe tooling has not grown with it. Service designers use Miro boards, Post-it notes, spreadsheets, and PowerPoint. There is no purpose-built software. That is the gap we are filling."
+  },
+  {
+   "heading": "The Core Artifacts",
+   "body": "Service design produces structured artifacts, not wireframes. Learn these:\n\n### Service Blueprint\n\nThe most important artifact. A blueprint maps a service across horizontal phases and vertical layers.\n\n**Phases** (columns, left to right): The stages of the experience. Discovery, Try, Buy, Use, Support \u2014 or whatever the actual stages are for your service.\n\n**Layers** (rows, top to bottom):\n\n| Layer | What it contains | Example (Rafters) |\n|-------|-----------------|-------------------|\n| **Physical Evidence** | What the customer can see and touch | Terminal output, website, MCP response, documentation |\n| **Customer Actions** | What the customer does | Installs CLI, runs query, reads response, shares with team |\n| --- | **Line of Interaction** | --- |\n| **Frontstage Actions** | What the organization does that the customer sees | CLI progress messages, MCP response format, site rendering |\n| --- | **Line of Visibility** | --- |\n| **Backstage Actions** | What the organization does that the customer does not see | Token dependency resolution, color API processing, cognitive scoring |\n| --- | **Line of Internal Interaction** | --- |\n| **Support Processes** | Infrastructure that enables everything above | Cloudflare Workers, D1, R2, Vectorize, npm registry |\n\nThe three lines matter:\n- **Line of Interaction**: Where customer and organization meet. The CLI prompt. The website. The MCP response.\n- **Line of Visibility**: What the customer knows exists but cannot see inside. They know the API processes their color. They don't see the Vectorize embedding lookup.\n- **Line of Internal Interaction**: Infrastructure the customer has no awareness of. D1 databases. R2 buckets. Workers AI.\n\nA blueprint is read left to right (through time) and top to bottom (through layers of visibility). Every column is a phase. Every row is a layer. The intersections are where work happens.\n\n### Journey Map\n\nA journey map tracks one persona through one scenario over time. Unlike a blueprint, which shows the whole system, a journey map shows one person's experience.\n\nStructure:\n- **Lens**: Who is this person? What are they trying to do?\n- **Phases**: The stages they go through\n- **Actions**: What they do at each phase\n- **Thoughts**: What they are thinking\n- **Emotions**: How they feel (plotted as a curve from negative to positive)\n- **Touchpoints**: What channels and artifacts they interact with\n- **Pain points**: Where the experience breaks\n- **Opportunities**: Where we can make it better\n\nThe emotional curve is the signature element. It shows the peaks and valleys of the experience. The moment Maya sees her first cognitive budget score is a peak. The moment the MCP server fails to start is a valley.\n\n### Persona\n\nNot a marketing persona. A service design persona is grounded in evidence and behavior, not demographics.\n\nA service design persona includes:\n- **Goals**: What they are trying to accomplish\n- **Frustrations**: What blocks them today\n- **Behaviors**: How they actually act (not how we wish they acted)\n- **The moment that changes everything**: The specific experience that converts them\n- **Relationship to the service**: How they move through adoption stages\n- **What would make them leave**: The failure modes that matter to this person\n\nDemographics matter only when they affect behavior. Maya being in Portland doesn't matter. Maya using Cursor daily matters.\n\n### Ecosystem Map\n\nShows all the actors in the service and their relationships. Who gives value to whom. Who depends on whom. What flows between them (money, data, trust, attention).\n\nThe ecosystem map is the zoom-out view. Blueprints zoom in on specific journeys. Personas zoom in on specific people. The ecosystem map shows the whole system.\n\n### Moments of Truth\n\nThe critical moments that disproportionately shape how someone perceives the service. Not every touchpoint matters equally. The first MCP query matters more than the 50th. The comparison table matters more than the footer.\n\nA moment of truth has:\n- **What happens**: The specific interaction\n- **Success state**: What it looks like when it works\n- **Failure state**: What it looks like when it breaks\n- **Why it matters disproportionately**: Why this moment, not others\n\nJan Carlzon (SAS Airlines CEO, 1980s) coined the term. He said every interaction between a customer and the organization is a moment of truth, but some moments carry the whole relationship."
+  },
+  {
+   "heading": "What Service Design Is NOT",
+   "body": "**It is not UX design.** UX design focuses on interfaces \u2014 screens, interactions, usability. Service design focuses on the system that delivers the experience. A UX designer makes the screen work. A service designer asks why the user is on that screen in the first place and what happens before and after.\n\n**It is not customer journey mapping alone.** Journey maps are one artifact. People who think journey mapping IS service design are missing the blueprint, the ecosystem, the backstage, the support processes, and the failure modes. A journey map without a blueprint is a story without a stage.\n\n**It is not process mapping.** Process maps show how work flows inside an organization. Service design shows how the organization delivers value to a person. Process maps are internal. Service design bridges internal and external.\n\n**It is not design thinking.** Design thinking is a problem-solving methodology (empathize, define, ideate, prototype, test). Service design is a discipline with specific artifacts, methods, and a 44-year body of knowledge. You can use design thinking within service design. They are not the same thing.\n\n**It is not sticky notes on a wall.** This is how it is practiced today because there are no tools. The sticky notes are a workaround, not the discipline. The discipline is about structured data \u2014 typed relationships, dependency graphs, layered visibility, scored moments. Sound familiar? It should. It is what Rafters already does for design systems."
+  },
+  {
+   "heading": "Why It Matters For Us",
+   "body": "Rafters' infrastructure \u2014 dependency graphs, typed relationships, intelligence metadata, cognitive load scoring, composition rules \u2014 maps directly to service design data structures.\n\n| Rafters concept | Service design equivalent |\n|----------------|--------------------------|\n| Token dependency graph | Service dependency map |\n| Cognitive load scoring | Moment of truth impact scoring |\n| Frontstage/backstage | Line of visibility |\n| Do/never rules | Service policy constraints |\n| Composition budget | Experience load budget |\n| Component intelligence | Touchpoint intelligence |\n| Override tracking | Service adaptation tracking |\n\nThis is not a metaphor. The data model is the same. A service blueprint is a dependency graph with typed nodes, layered visibility, and scored moments. Rafters already models this for design systems. We are extending it to model services."
+  },
+  {
+   "heading": "How To Read the Service Design in the Vault",
+   "body": "The vault has service design artifacts at `service-design/`. They are organized by product:\n\n- `service-design/rafters/` \u2014 the service design of Rafters itself\n- `service-design/ezmode/` \u2014 9 blueprints for the EZMode/CTD service\n- `service-design/eavesdrop/` \u2014 blueprints, journeys, personas for the eavesdrop service\n\nEach product folder follows the same structure:\n- `00-ecosystem.md` \u2014 the ecosystem map (start here)\n- `personas/` \u2014 one file per persona\n- `blueprints/` \u2014 one file per service blueprint\n- `journeys/` \u2014 one file per journey map\n- `reference/` \u2014 supporting material (identity, infrastructure, revenue model)\n\n**Read the ecosystem map first.** It shows you who the actors are, what channels exist, and where value flows. Then read the personas to understand the people. Then read the blueprints to see how the service delivers value through layers."
+  },
+  {
+   "heading": "How To Contribute",
+   "body": "When you are writing service design artifacts:\n\n1. **Be specific, not aspirational.** \"Maya installs Rafters\" is better than \"the user discovers the product.\" Name the person. Name the action. Name the channel.\n\n2. **Include failure modes.** Every blueprint step should have pain points. Every moment of truth should have a failure state. The failures are more useful than the successes \u2014 they tell us what to design against.\n\n3. **Separate what exists from what we plan.** If the MCP server works today, it goes in the blueprint as a real touchpoint. If the service design tool doesn't exist yet, it goes in the ecosystem map as a future actor. No vaporware.\n\n4. **The backstage matters as much as the frontstage.** Don't just describe what the user sees. Describe what happens behind the line of visibility. The Cloudflare Worker that processes the color query. The Vectorize embedding lookup. The D1 write. The backstage is where most failures happen.\n\n5. **Emotions are data.** The emotional curve in a journey map is not decoration. It shows where the experience peaks and where it crashes. Design for the peaks. Protect against the valleys.\n\n6. **Reference the NN/g format.** Nielsen Norman Group publishes the canonical format for service blueprints, journey maps, and personas. When in doubt, follow their structure. When our tools render these artifacts visually, they will follow NN/g visual conventions (swimlane layers, progressive darkening, three line types)."
+  },
+  {
+   "heading": "Reading List",
+   "body": "If you want to go deeper:\n\n- **Shostack, G. Lynn.** \"How to Design a Service.\" European Journal of Marketing, 1982. The origin paper.\n- **Polaine, Lovlie, Reason.** \"Service Design: From Insight to Implementation.\" 2013. The practical handbook.\n- **Stickdorn, Hormess, Lawrence, Schneider.** \"This Is Service Design Doing.\" 2018. The methods book.\n- **Nielsen Norman Group.** Service design topic area at nngroup.com. The ongoing research.\n- **Carlzon, Jan.** \"Moments of Truth.\" 1987. Where the term comes from."
+  },
+  {
+   "heading": "The Bottom Line",
+   "body": "We are building the first purpose-built software for service design. If you don't understand what service design IS, you will build the wrong thing. Read this primer. Read the ecosystem map. Read one blueprint end to end. Then contribute.\n\nThe sticky notes are a workaround. We are building the tool."
+  }
+ ],
+ "sources": [
+  {
+   "citation": "Shostack, G. Lynn. How to Design a Service. European Journal of Marketing, 1982.",
+   "url": "https://doi.org/10.1108/EUM0000000004799"
+  },
+  {
+   "citation": "Polaine, Lovlie, Reason. Service Design: From Insight to Implementation. 2013.",
+   "url": "https://rosenfeldmedia.com/books/service-design-from-insight-to-implementation/"
+  },
+  {
+   "citation": "Stickdorn, Hormess, Lawrence, Schneider. This Is Service Design Doing. 2018.",
+   "url": "https://www.thisisservicedesigndoing.com/"
+  },
+  {
+   "citation": "Nielsen Norman Group, service design topic.",
+   "url": "https://www.nngroup.com/topic/service-design/"
+  },
+  {
+   "citation": "Carlzon, Jan. Moments of Truth. 1987.",
+   "url": "https://en.wikipedia.org/wiki/Jan_Carlzon"
+  }
+ ],
+ "exemplars": []
+}

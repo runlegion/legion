@@ -1,0 +1,147 @@
+{
+  "meta": {
+    "title": "Legion 0.5",
+    "surface": "legion",
+    "status": "draft",
+    "owner": "legion",
+    "date": "2026-10-05",
+    "purpose": "The statement the 0.5 rebuild grows from. Every direction item is the operator's bet: Discovery informs how each is designed, never whether it is needed. The primary customer is the agent; operators act through their agents. Details belong to design and specs.",
+    "sources": [
+      {
+        "ref": "01a0f8b2",
+        "kind": "reflection",
+        "note": "The design-conversation minutes, #1-140; the toys and their numbers live there"
+      }
+    ]
+  },
+  "what_it_is": "Legion is how teams of agents remember. What one of them learns, every one of them can use, at the moment it matters, and the team can tell whether it helped. A team can be one operator and their agents, or hundreds of operators whose agents help each other.",
+  "current_state": {
+    "real": [
+      {
+        "text": "Remembering across sessions changes how agents work."
+      },
+      {
+        "text": "Agents can ask exact questions of the code they work on."
+      }
+    ],
+    "cut_or_broken": [
+      {
+        "text": "It grew too big to read.",
+        "why": "Every need became its own system."
+      },
+      {
+        "text": "Memory is split into separate kinds that don't know each other.",
+        "why": "Each was added on its own."
+      },
+      {
+        "text": "Memory waits to be asked, and agents rarely ask.",
+        "why": "It is delivered at the start, not at the moment of choice."
+      }
+    ],
+    "known_gaps": [
+      {
+        "text": "Nobody can tell whether what memory said actually helped.",
+        "when_it_matters": "Always: without it, memory can't learn what to say."
+      },
+      {
+        "text": "It serves one person's agents, not a group of people and their agents.",
+        "when_it_matters": "When a team shares what it knows."
+      }
+    ]
+  },
+  "direction": {
+    "becoming": "Two memories that work as one: a local graph each install keeps for itself, and an institutional graph the whole group shares. Delivered when it matters, measured by what happened next, and small enough that an agent can read all of it.",
+    "proposals": [
+      {
+        "text": "One memory, not many kinds.",
+        "status": "settled",
+        "needs_pressure_test": false
+      },
+      {
+        "text": "Delivery, not storage: memory speaks at the moment of choice.",
+        "status": "settled",
+        "needs_pressure_test": false
+      },
+      {
+        "text": "Everything memory says is measured by what happened next.",
+        "status": "settled",
+        "needs_pressure_test": false
+      },
+      {
+        "text": "Agents that are visible find each other when they are solving the same problem, and help.",
+        "status": "settled",
+        "needs_pressure_test": false
+      }
+    ]
+  },
+  "boundaries": [
+    {
+      "owner": "legion",
+      "owns": "Remembering, delivering, measuring, and keeping the record honest."
+    },
+    {
+      "owner": "the other parts (eavesdrop, beacon, crucible, smugglr, rafters, platform, the service-design owner)",
+      "owns": "Listening, research, testing, moving data, design, hosting, and service design. Legion remembers what they produce."
+    }
+  ],
+  "actors": [
+    {
+      "name": "Operators",
+      "type": "human",
+      "touches": "Direction and judgment, for their own agents and, together, for the shared graph.",
+      "stakes": "Their attention is the scarcest thing."
+    },
+    {
+      "name": "Agents",
+      "type": "machine",
+      "touches": "The work.",
+      "stakes": "Continuing instead of starting over. Memory is what makes an agent better; agents are communal when allowed to be."
+    }
+  ],
+  "consumers": [
+    {
+      "name": "Agent harnesses (Claude Code, Codex)",
+      "relationship": "Where memory is delivered",
+      "status": "planned"
+    },
+    {
+      "name": "The operator's window",
+      "relationship": "Where people see and judge",
+      "status": "not-built"
+    }
+  ],
+  "evidence": {
+    "lenses": [
+      "agent-memory",
+      "coding-agents"
+    ],
+    "needs_crawl": true,
+    "crawl_topic": "how teams of agents and people remember, and how memory reaches the moment of choice"
+  },
+  "open_questions": [
+    {
+      "id": "OQ-1",
+      "question": "Who is legion for first: one operator and their agents, or a group of people sharing what they know?",
+      "resolve_with": "operator",
+      "resolution": "Sean, 2026-10-05: it could be hundreds of operators, whose agents assist other agents and share an institutional knowledge graph alongside each install's local graph."
+    },
+    {
+      "id": "OQ-2",
+      "question": "What moves from a local graph into the institutional graph, who decides, and what stays private to an agent or a person?",
+      "resolve_with": "designer",
+      "resolution": "Sean, 2026-10-05 (partial): an agent proposes it ('this really is something everyone in the group should know, share it, Sean?') and its operator says yes; the archivist then keeps it honest. What stays private remains open for design."
+    },
+    {
+      "id": "OQ-3",
+      "question": "What does 'it helped' mean, and who says so?",
+      "resolve_with": "research",
+      "resolution": null
+    },
+    {
+      "id": "OQ-4",
+      "question": "What does legion 0.43's memory become in 0.5?",
+      "resolve_with": "designer",
+      "resolution": null
+    }
+  ]
+}
