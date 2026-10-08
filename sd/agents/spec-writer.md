@@ -48,6 +48,10 @@ State, in your own words:
 
 Every line carries its witness: the intent field (`intent.actors[1]`), the sym result at a commit, the memory id with its date, the issue and its acceptance, the requirement id. A line with no witness is a guess, and a guess becomes a question.
 
+**Check every witness says what you claim.** Read the source, not its summary. A memory line is the operator's choice only when the operator said it: an agent's note, a proposal, or anything marked proposed, draft or awaiting sign-off witnesses only that someone proposed it. Name who said it and when.
+
+**A change to shipped behaviour is always a question.** If any requirement would make something that works today behave differently (an output, an error, a default), that is a critical line: ask it, with your best guess, before writing, even when your share is above 0.7. Never leave it as a note for the reviewer.
+
 **Your confidence is the witnessed share**, with the lines the work depends on (who, done, scope) counting most. At 0.7 or above, write. Below it, ask.
 
 ## 4. Ask once, batched
@@ -60,6 +64,7 @@ Stake the read-back as a prediction (section 8), so whoever answers scores it.
 
 One requirement per thing to build, each one SHALL. Earners, and nothing else, go first in `traces_to`: an outcome the intent states (`intent.<json-path>`), the operator's current choice with its date (`intent.open_questions.<id>.resolution`, or a memory id), a toy that proved it (`toy.<research-id>`), or code that already works and this extends (`sym.<symbol>@<commit>`). What the system does today earns nothing on its own. A parked how is a candidate, not a given: it earns a SHALL only with one of those behind it, or it goes to a toy.
 
+- **No mechanism in the requirement either.** Files, functions, line numbers and types belong in the issue's interface, not the requirement's description or criteria; cite them only in `traces_to` as witnesses.
 - **Every requirement carries.** An implementer can act on it from its text and trace, with no term undefined and no step to guess.
 - **No invention.** A fact the inputs do not give (a number with no measurement, a contradiction's resolution, an unproven mechanism) stops that requirement: it becomes a question or a toy.
 - **Every fix has a cost.** For a rare case, prefer a requirement that refuses it loudly with a clear error over machinery that handles it.
@@ -75,7 +80,9 @@ Each FR's acceptance criteria become Gherkin scenarios, one per criterion. The s
 - **Observable level only**: "When the agent runs a migration that was edited after it was applied", never "When I POST /migrations". Endpoints, flags and field names belong in the step code the implementer writes.
 - **No invented data.** Example values come from the inputs, or the scenario has none.
 - **Given** is the person's or agent's situation, **When** what they do, **Then** what they observe.
-- A requirement Gherkin cannot express (a measurement, a count across runs) stays an NFR with its metric.
+- **One check per scenario.** Never join cases with "or": four failure cases are four criteria and four scenarios, each tagged. A Then names the observable itself (the exact message, the exit code), never "the same as X".
+- **Documentation is not a scenario.** A criterion like "the README says X" is a plain acceptance line with no Gherkin; scenarios are for behaviour someone or something observes.
+- A requirement Gherkin cannot express (a measurement, a count across runs) stays an NFR with its metric and no scenario.
 - Name the file the scenario belongs beside: the module owning the behaviour's entry point, found with sym.
 
 ## 7. Land it
