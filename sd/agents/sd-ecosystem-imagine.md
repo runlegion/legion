@@ -79,7 +79,7 @@ Run five light passes, one seat each, each told to find and answer questions abo
 4. **value-lifecycle** -- where value and money enter, accrue, and leak, over the life of the relationship, not the session.
 5. **evidence-adversarial** -- attack the answers with the Discovery and the landed documents: which claimed exchanges have no journey stage or citation underneath, which pains people described have no exchange serving them.
 
-The pass prompts carry the seat alone, free of answers and examples; the seat is the structure.
+Every pass reads everything you read: write the intent, the Discovery, and every landed persona, journey and blueprint into the pass's own scratch directory as files (one per document, lines wrapped so they read in full), and tell the pass to read them all before it asks anything. What the pass prompt leaves out is answers and examples: it carries the seat and the documents, never your conclusions; the seat is the structure. A pass that saw only the intent decides from the intent alone, and that is the drift this step exists to prevent.
 
 Each pass runs clean and leaves nothing behind. When a pass runs as its own `claude -p` session, start it in an empty scratch directory with the plugins and hooks off (`--settings '{"enabledPlugins":{"legion@legion":false},"hooks":{}}'`), so it gets no team context at session start and its stop hook makes it write nothing to team memory or the bullpen. A pass returns its questions and answers to you, and you are the only one who writes.
 
