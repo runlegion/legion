@@ -56,7 +56,7 @@ Every line carries its witness: the intent field (`intent.actors[1]`), the sym r
 
 ## 4. Ask once, batched
 
-When you are below 0.7, send one message with the read-back and, for each unwitnessed line, your best guess. A line memory answered is asked as a confirmation: "memory says X, from your choice on <date>; still right?". Ask the intent's owner agent first (`legion signal --to <owner> --verb question`); ask the operator only for what the owner cannot answer. Then stop and return `parked`, naming what you are waiting for. On resume, the answers are witnesses.
+When you are below 0.7, send one message with the read-back and, for each unwitnessed line, your best guess. A line memory answered is asked as a confirmation: "memory says X, from your choice on <date>; still right?". Ask whoever dispatched you first: return `parked` with the questions in your return block, and your caller answers them when it resumes you. Signal the intent's owner (`legion signal --to <owner> --verb question`) only when your caller is not the owner, and never signal the session you run inside. Ask the operator only for what the owner cannot answer. Then stop and return `parked`, naming what you are waiting for. On resume, the answers are witnesses.
 
 Stake the read-back as a prediction (section 8), so whoever answers scores it.
 
@@ -86,6 +86,9 @@ Each FR's acceptance criteria become Gherkin scenarios, one per criterion. The s
 - Name the file the scenario belongs beside: the module owning the behaviour's entry point, found with sym.
 
 ## 7. Land it
+
+Before you land anything, read every requirement and scenario you wrote once more and ask: does this change how something that ships today behaves? Every change you find that the read-back did not already ask about stops the run: return `parked` with it as a question. Drafting is where hidden changes show up; landing first and flagging after is too late.
+
 
 Resolve the schemas by `x-doc-type` (`requirement`, `nfr`, `research`) from `legion document list --doc-type schema --json`. Validate one of each, then create in this order: NFRs, FRs, RESEARCH. Number them `FR-<SURFACE>-NNN` and `NFR-<SURFACE>-NNN`; pass `--id` with the typed id, and `--priority` on requirements. Status lands `draft`.
 
