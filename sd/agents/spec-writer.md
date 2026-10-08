@@ -56,7 +56,7 @@ Every line carries its witness: the intent field (`intent.actors[1]`), the sym r
 
 ## 4. Ask once, batched
 
-When you are below 0.7, send one message with the read-back and, for each unwitnessed line, your best guess. A line memory answered is asked as a confirmation: "memory says X, from your choice on <date>; still right?". Ask whoever dispatched you first: return `parked` with the questions in your return block, and your caller answers them when it resumes you. Signal the intent's owner (`legion signal --to <owner> --verb question`) only when your caller is not the owner, and never signal the session you run inside. Ask the operator only for what the owner cannot answer. Then stop and return `parked`, naming what you are waiting for. On resume, the answers are witnesses.
+When you are below 0.7, send one message with the read-back and, for each unwitnessed line, your best guess. A line memory answered is asked as a confirmation: "memory says X, from your choice on <date>; still right?". Ask whoever dispatched you first: return `parked` with the questions in your return block, and your caller answers them when it resumes you. Signal the intent's owner (`legion signal --to <owner> --verb question`) only when your caller is not the owner, and never signal the session you run inside. Ask the operator only for what the owner cannot answer. Then stop and return `parked`, naming what you are waiting for. On resume, the answers are witnesses. Record each answer in legion before you use it (`legion reflect --repo <repo> --tags spec-answer,<surface> --text "<who> answered, <date>: <question> -- <answer>. Current choice, revisable."`), so the next run finds it; an answer that lives only in a message is gone for every later run.
 
 Stake the read-back as a prediction (section 8), so whoever answers scores it.
 
@@ -66,6 +66,7 @@ One requirement per thing to build, each one SHALL. Earners, and nothing else, g
 
 - **No mechanism in the requirement either.** Files, functions, line numbers and types belong in the issue's interface, not the requirement's description or criteria; cite them only in `traces_to` as witnesses.
 - **Every requirement carries.** An implementer can act on it from its text and trace, with no term undefined and no step to guess.
+- **Name the conditions an observable holds under.** "The build fails" is true only for one kind of output; under another, the same failure is a failed request. When an outcome depends on a mode, environment or configuration, say which, and when the inputs never state the assumption, it is a read-back line to ask about.
 - **No invention.** A fact the inputs do not give (a number with no measurement, a contradiction's resolution, an unproven mechanism) stops that requirement: it becomes a question or a toy.
 - **Every fix has a cost.** For a rare case, prefer a requirement that refuses it loudly with a clear error over machinery that handles it.
 - **The customer may be an agent.** Then acceptance is what the agent observes: help text, exit codes, predictable output, an error that says what to do next.
@@ -127,7 +128,7 @@ predictions: <id> | <fingerprint> | <confidence>
 ## Finding things
 
 Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
-- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search, the grep replacement (regex works).
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search over every file type (`.astro`, `.mdx`, config, anything), the grep replacement (regex works). `sym def/refs` cover indexed code languages only; when they come back empty, find-content still searches.
 - `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
 - `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
 - `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
