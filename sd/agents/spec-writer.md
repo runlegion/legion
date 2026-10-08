@@ -84,8 +84,14 @@ Give each criterion in `verification.criteria` exactly one `evidence` kind:
 - **scenario** -- proven by one Gherkin scenario (below);
 - **event** -- proven by something that really happens and cannot honestly be simulated (a brand adopting a fix by version alone, a release reaching a user). Fill `event` with the event and who records it. Never write a scenario that fakes it;
 - **research** -- unknown until a toy runs. Set `research` to the RESEARCH document id; the criterion is held until the toy reports.
+- **artifact** -- a change to a file's text, not behaviour (the README no longer says X, the CHANGELOG names Y). Fill `artifact` with the file and the text it must contain or no longer contain; verify checks it at the PR head. Never a Gherkin scenario about a reader.
 
-Then lint your own set before landing: every criterion has a kind; every scenario criterion has exactly one scenario tagged with its id; no Scenario Outline unless the inputs supply its data; no step names an endpoint, field, status code or table. And ask of each scenario: could someone actually check this observable?
+Placement rules (BDD RFC, closed 2026-10-08):
+- **Contracts may be named.** When the requirement cites a wire contract or a generated artifact (an http-sql version, a form descriptor, a schema), a step may name what that contract exposes to its user: a status code, a media type, a field it defines. Everywhere else, steps still name no endpoints, fields, status codes or tables.
+- **Unrepeatable observables run against fixtures.** A live, external, credentialed or licensed observable runs against a recorded fixture, captured once, with its capture date (and any version that invalidates it) in the feature header; the live check is its own `@network`, `@credentialed` or `@local` scenario, and a skipped scenario counts as not run, never as a pass. Where no fixture can stand in, the criterion is event.
+- **Judgement is an event.** Prose quality on a document, or a visual match checked only by eye, is event: "the operator accepts it", recorded by Sean or a named cold reader. Shape criteria (schema-valid, every statement cited) and visuals with a nameable observable (an element, a class, a computed style, a pixel golden) are scenarios. A visual nobody can check yet is research.
+
+Then lint your own set before landing: every criterion has a kind; every scenario criterion has exactly one scenario tagged with its id; no Scenario Outline unless the inputs supply its data; no step names an endpoint, field, status code or table unless a cited contract exposes it. And ask of each scenario: could someone actually check this observable?
 
 ### Scenarios
 
