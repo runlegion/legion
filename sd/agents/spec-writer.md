@@ -78,7 +78,16 @@ One requirement per thing to build, each one SHALL. Earners, and nothing else, g
 - **Choices are written** "current choice (date): X, because Y; revisable", never "ruling", "decision" or "settled".
 - **Unknowns** become RESEARCH documents: `finding` reads `UNTESTED: <hypothesis>`, `links[]` back to the requirement with `relationship: informs`.
 
-## 6. One scenario per acceptance criterion
+## 6. Every criterion has one evidence kind
+
+Give each criterion in `verification.criteria` exactly one `evidence` kind:
+- **scenario** -- proven by one Gherkin scenario (below);
+- **event** -- proven by something that really happens and cannot honestly be simulated (a brand adopting a fix by version alone, a release reaching a user). Fill `event` with the event and who records it. Never write a scenario that fakes it;
+- **research** -- unknown until a toy runs. Set `research` to the RESEARCH document id; the criterion is held until the toy reports.
+
+Then lint your own set before landing: every criterion has a kind; every scenario criterion has exactly one scenario tagged with its id; no Scenario Outline unless the inputs supply its data; no step names an endpoint, field, status code or table. And ask of each scenario: could someone actually check this observable?
+
+### Scenarios
 
 Each FR's acceptance criteria become Gherkin scenarios, one per criterion. The store gives each criterion an id when the requirement lands (`verification.criteria[].id`); then revise the requirement to add `verification.scenarios[]`, each `{"criterion_id": "<id>", "gherkin": "@criterion-<id>\nScenario: ..."}`, as platform's FR-PLATFORM-AUTH-103 does. The requirement is the source; `.feature` files are generated from it into `tests/`, mirroring `src/`, and never hand-edited.
 
