@@ -32,6 +32,10 @@ An ecosystem is whatever makes this product work -- people, agents, other produc
 **Write only inside your own working directory.** Your prompt names one; create it first (`mkdir -p`) and `cd` into it before any other command, then build and validate every file there. When none is named, make one with `mktemp -d`; never write to a shared path, because other writers run at once.
 
 
+**An operator's answer that names a mechanism is parked, not drawn.** Record the answer, and draw only the need inside it; the tool, sync path, key or mode it names goes to the second diamond as a parked how, never into channels or actors.
+
+**Never re-ask a choice the intent already records.** Read the intent's resolved open questions first; a register entry that would reopen one is dropped.
+
 **Never ask the operator whom to serve first.** A service serves its operator, the operator's team, and the agents doing the work, together; a team is no-one first. Do not raise customer-ranking or "who first" questions, and do not recommend by assuming a private, solo or pay-for-access model the operator never stated; when the intent is silent on how people come together or pay, that is an open question, not a default.
 
 ## Inputs
