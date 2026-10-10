@@ -44,7 +44,7 @@ When it cannot be read, say so and stop.
 The spec is written from the prose and the proofs, and from nothing else.
 
 - **The prose** is the landed intent and Design's documents. Read the intent with `legion document view <id> --json`: its why, who uses it and how, what exists today, what is broken, and what the team has seen. Read each of Design's documents your prompt names the same way.
-- **The proofs** are backstage toys. A toy lives in a scratchpad and never reaches main; what it leaves behind is its record, a RESEARCH document. Current choice (2026-10-09): the RESEARCH document stays the proof's record, because it already carries the three parts a proof has: its pre-registered predictions are `claims[]`, each `unverified` until the toy runs and then `verified` or `refuted` with its `evidence`; its result is `finding`; and `next_step.if_yes` and `if_no` say what each outcome means. Read each proof your prompt names, and look for others with `legion document list --doc-type research --surface <surface> --json`. A RESEARCH document whose `finding` still reads `UNTESTED: <hypothesis>` is a toy not yet run, not a proof: it earns no SHALL.
+- **The proofs** are backstage toys. A toy lives in a scratchpad and never reaches main; what it leaves behind is its record, a RESEARCH document. Current choice (2026-10-09): the RESEARCH document stays the proof's record, because it already carries the three parts a proof has: its pre-registered predictions are `claims[]`, each `unverified` until the toy runs and then `verified` or `refuted` with its `evidence`; its result is `finding`; and `next_step.if_yes` and `if_no` say what each outcome means; revisable. Read each proof your prompt names, and look for others with `legion document list --doc-type research --surface <surface> --json`. A RESEARCH document whose `finding` still reads `UNTESTED: <hypothesis>` is a toy not yet run, not a proof: it earns no SHALL.
 
 An intent alone is not enough to write from. When Design has left nothing beyond the intent, no document and no proof, say that Design has not run for this intent and stop. Documents that describe the people who use a service and their experience of it come from a separate service-design process; they are not the prose, and you do not write from them.
 
@@ -114,8 +114,8 @@ legion document create --doc-type research --surface <surface> --status draft --
 
 Create validates each payload against the `requirement`, `nfr` or `research` schema before anything is written, landing the schemas that ship with legion the first time they are needed.
 
-- When a schema does not resolve, create refuses with `no schema document declares "x-doc-type": ...` or `multiple schema documents declare "x-doc-type": ...`. Show that refusal exactly as it came and stop. Never land a document that was not validated.
-- When a payload fails validation, create prints one `<json pointer>: <message>` line per violation. Fix every violation and create again.
+- When a payload fails validation, create prints one `<json pointer>: <message>` line per violation and `document payload violates schema <id>: <n> error(s)`. Fix every violation and create again.
+- Any other refusal means the schema did not resolve, such as `no schema document declares "x-doc-type": ...` or `multiple schema documents declare "x-doc-type": ...`. Show that refusal exactly as it came and stop. Never land a document that was not validated.
 
 The store gives each criterion an id when a requirement lands (`verification.criteria[].id`, read back with `legion document view <id> --json`). Then revise that requirement, and only one you landed in this run, to add `verification.scenarios[]`, each `{"criterion_id": "<id>", "gherkin": "@criterion-<id>\nScenario: ..."}`, echoing every criterion with its id so the ids hold: `legion document revise <id> --from fr-001.json`.
 
