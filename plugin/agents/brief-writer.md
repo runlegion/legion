@@ -25,7 +25,7 @@ The brief exists because the prototypes live on canvases, and the people and age
 
 ## What you work from
 
-Your prompt gives you the intent's id and its prototype pointers, each a canvas link and the part of the interface it explores.
+Your prompt gives you the intent's id, and it may also give prototype pointers, each a canvas link and the part of the interface it explores.
 
 Read the process reference first, so you know where the brief sits in the work. It ships with the plugin; `CLAUDE_PLUGIN_ROOT` can be empty in your shell, so find it under the installed plugin when it is:
 
@@ -36,6 +36,17 @@ cat "$ref"
 ```
 
 Read the intent with `legion document view <id> --json`. It tells you what the service is for and who uses it, which is what the brief's summary carries.
+
+Find the intent's prototype pointers yourself. Each prototype made in Design is recorded as a `prototype` document naming the intent it was made for; list them:
+
+```bash
+legion document list --doc-type prototype --json \
+  | jq --arg intent "<intent id>" \
+      '[.[] | (.payload | fromjson) as $p | select($p.meta.intent == $intent)
+        | {id, canvas: $p.canvas, explores: $p.explores}]'
+```
+
+Work from those together with any pointers your prompt gives you, counting a canvas link that appears in both only once.
 
 Then open every canvas with the Artifact tool (`action: "read"`) and look at what the prototype actually shows: what each part of the interface holds, what can be done there, how it responds, and what states it passes through. The pointer's description tells you which part a canvas explores; the canvas tells you what that part is.
 
