@@ -84,7 +84,7 @@ Show the team, in plain prose:
 - each proposal: the statement as it was said, not-hotdog's reading of it, its logic for questioning it, and the change it proposes, as a question. Make only the changes the team agrees to; a statement the team keeps stays as it was said;
 - each `missing` item as a question. A missing answer about how the service is used is asked like any other, never parked.
 
-Ask what is wrong or missing. Append every correction and answer to the words file, verbatim, and draft again. Repeat until the team accepts the intent as written.
+Ask what is wrong or missing. Append every correction and answer to the words file, verbatim, and draft again. Repeat until the team says to land it.
 
 ## Land it
 

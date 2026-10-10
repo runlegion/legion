@@ -40,7 +40,7 @@ for path in paths:
             continue
         msgs.append((ts, text))
 
-msgs.sort()
+msgs.sort(key=lambda m: m[0])
 with open(out, "w") as f:
     for n, (ts, text) in enumerate(msgs):
         f.write(f"[{n}] {ts[:16]} {text}\n\n")
