@@ -173,6 +173,11 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
             } else {
                 None
             };
+            // First use (#1390): land or refresh the schemas shipped with
+            // the plugin before a document of one of their types is written.
+            if documents::is_shipped_schema_type(&doc_type) {
+                database.ensure_shipped_schemas()?;
+            }
             let meta = documents::DocumentMeta {
                 id: id.as_deref(),
                 doc_type: &doc_type,

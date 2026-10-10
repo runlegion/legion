@@ -812,24 +812,7 @@ impl Database {
     /// order, which is not a decision this call makes on the caller's
     /// behalf.
     pub fn schema_for_type(&self, doc_type: &str) -> Result<TypeSchema> {
-        let schema_docs = self.list_documents(&DocumentFilter {
-            doc_type: Some("schema"),
-            ..Default::default()
-        })?;
-        let matches: Vec<&Document> = schema_docs
-            .iter()
-            .filter(|doc| {
-                serde_json::from_str::<serde_json::Value>(&doc.payload)
-                    .ok()
-                    .and_then(|v| {
-                        v.get(DOC_TYPE_KEYWORD)
-                            .and_then(|k| k.as_str())
-                            .map(str::to_string)
-                    })
-                    .as_deref()
-                    == Some(doc_type)
-            })
-            .collect();
+        let matches: Vec<Document> = self.schema_docs_declaring(doc_type)?;
 
         match matches.as_slice() {
             [] => Err(LegionError::WorkSource(format!(
@@ -854,14 +837,7 @@ impl Database {
                     validator,
                 })
             }
-            many => {
-                let ids: Vec<&str> = many.iter().map(|d| d.id.as_str()).collect();
-                Err(LegionError::WorkSource(format!(
-                    "multiple schema documents declare \"{DOC_TYPE_KEYWORD}\": \"{doc_type}\": {} \
-                     -- exactly one must govern a type",
-                    ids.join(", ")
-                )))
-            }
+            many => Err(multiple_schemas_error(doc_type, many)),
         }
     }
 
@@ -899,6 +875,136 @@ impl Database {
                 errors,
             })
         }
+    }
+}
+
+/// The five document types whose schemas ship with the plugin (#1390),
+/// each embedded at build time from `plugin/schemas/`. The name is the
+/// shipped file, kept so a refusal can name it.
+const SHIPPED_SCHEMAS: [(&str, &str, &str); 5] = [
+    (
+        "intent",
+        "plugin/schemas/intent.schema.json",
+        include_str!("../plugin/schemas/intent.schema.json"),
+    ),
+    (
+        "brief",
+        "plugin/schemas/brief.schema.json",
+        include_str!("../plugin/schemas/brief.schema.json"),
+    ),
+    (
+        "requirement",
+        "plugin/schemas/requirement.schema.json",
+        include_str!("../plugin/schemas/requirement.schema.json"),
+    ),
+    (
+        "nfr",
+        "plugin/schemas/nfr.schema.json",
+        include_str!("../plugin/schemas/nfr.schema.json"),
+    ),
+    (
+        "research",
+        "plugin/schemas/research.schema.json",
+        include_str!("../plugin/schemas/research.schema.json"),
+    ),
+];
+
+/// Whether `doc_type` is one of the five types whose schema ships with the
+/// plugin, so a caller knows when first use applies.
+pub(crate) fn is_shipped_schema_type(doc_type: &str) -> bool {
+    SHIPPED_SCHEMAS.iter().any(|(t, _, _)| *t == doc_type)
+}
+
+/// The refusal for a type declared by more than one hot schema, naming
+/// every candidate id. Shared by `schema_for_type` and first use so both
+/// report the same message.
+fn multiple_schemas_error(doc_type: &str, candidates: &[Document]) -> LegionError {
+    let ids: Vec<&str> = candidates.iter().map(|d| d.id.as_str()).collect();
+    LegionError::WorkSource(format!(
+        "multiple schema documents declare \"{DOC_TYPE_KEYWORD}\": \"{doc_type}\": {} \
+         -- exactly one must govern a type",
+        ids.join(", ")
+    ))
+}
+
+impl Database {
+    /// Every hot schema document whose payload declares `doc_type`.
+    fn schema_docs_declaring(&self, doc_type: &str) -> Result<Vec<Document>> {
+        let schema_docs = self.list_documents(&DocumentFilter {
+            doc_type: Some("schema"),
+            ..Default::default()
+        })?;
+        Ok(schema_docs
+            .into_iter()
+            .filter(|doc| {
+                serde_json::from_str::<serde_json::Value>(&doc.payload)
+                    .ok()
+                    .and_then(|v| {
+                        v.get(DOC_TYPE_KEYWORD)
+                            .and_then(|k| k.as_str())
+                            .map(str::to_string)
+                    })
+                    .as_deref()
+                    == Some(doc_type)
+            })
+            .collect())
+    }
+
+    /// First use (#1390): make sure the store holds exactly the shipped
+    /// schema for each of intent, brief, requirement, nfr and research.
+    ///
+    /// A type with no schema gets the shipped one landed. A type with one
+    /// schema whose content differs gets it revised in place, so the store
+    /// never holds a second hot schema for a type. A type already at the
+    /// shipped content is left alone, which is what makes this cheap to run
+    /// before every create of those types. Every shipped file is checked
+    /// with the schema gate, and every type is checked for more than one
+    /// existing schema, before anything is written, so a refusal never
+    /// leaves the store half landed.
+    pub fn ensure_shipped_schemas(&self) -> Result<()> {
+        enum Step {
+            Land,
+            Revise(String),
+        }
+        let mut steps: Vec<(&str, &str, Step)> = Vec::new();
+        for (doc_type, file, text) in SHIPPED_SCHEMAS {
+            validate_schema_payload(text)
+                .map_err(|e| LegionError::WorkSource(format!("shipped schema file {file}: {e}")))?;
+            let shipped: serde_json::Value = serde_json::from_str(text).map_err(|e| {
+                LegionError::WorkSource(format!("shipped schema file {file}: not valid JSON: {e}"))
+            })?;
+            let existing: Vec<Document> = self.schema_docs_declaring(doc_type)?;
+            match existing.as_slice() {
+                [] => steps.push((doc_type, text, Step::Land)),
+                [only] => {
+                    let current: Option<serde_json::Value> =
+                        serde_json::from_str(&only.payload).ok();
+                    if current.as_ref() != Some(&shipped) {
+                        steps.push((doc_type, text, Step::Revise(only.id.clone())));
+                    }
+                }
+                many => return Err(multiple_schemas_error(doc_type, many)),
+            }
+        }
+        for (_, text, step) in steps {
+            match step {
+                Step::Land => {
+                    let meta = DocumentMeta {
+                        id: None,
+                        doc_type: "schema",
+                        surface: None,
+                        status: None,
+                        priority: None,
+                        owner: "legion",
+                    };
+                    self.insert_document(&meta, text)?;
+                }
+                Step::Revise(id) => {
+                    self.revise_document(&id, text)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1995,6 +2101,93 @@ mod tests {
         let err = db.schema_for_type("persona").unwrap_err();
         assert!(err.to_string().contains(&id_a), "got: {err}");
         assert!(err.to_string().contains(&id_b), "got: {err}");
+    }
+
+    // -- first use: shipped schemas (#1390) ----------------------------------
+
+    const SHIPPED_TYPES: [&str; 5] = ["intent", "brief", "requirement", "nfr", "research"];
+
+    #[test]
+    fn first_use_lands_five_schemas_in_empty_store() {
+        let db = test_db();
+        db.ensure_shipped_schemas().expect("first use");
+        for doc_type in SHIPPED_TYPES {
+            assert!(
+                db.schema_for_type(doc_type).is_ok(),
+                "no schema resolved for {doc_type}"
+            );
+        }
+        // Running it again changes nothing.
+        db.ensure_shipped_schemas().expect("second run");
+        for doc_type in SHIPPED_TYPES {
+            assert_eq!(db.schema_docs_declaring(doc_type).expect("list").len(), 1);
+        }
+    }
+
+    #[test]
+    fn first_use_keeps_one_schema_per_type_in_existing_store() {
+        let db = test_db();
+        let mut old = object_schema(serde_json::json!({"name": {"type": "string"}}), &[]);
+        old["x-doc-type"] = serde_json::json!("intent");
+        let old_id = land_schema(&db, old);
+
+        db.ensure_shipped_schemas().expect("first use");
+
+        let resolved = db.schema_for_type("intent").expect("resolves");
+        assert_eq!(resolved.schema_id, old_id, "revised in place, not added");
+        let hot: Vec<Document> = db.schema_docs_declaring("intent").expect("list");
+        assert_eq!(hot.len(), 1);
+        let shipped: serde_json::Value =
+            serde_json::from_str(include_str!("../plugin/schemas/intent.schema.json"))
+                .expect("shipped intent is json");
+        let stored: serde_json::Value = serde_json::from_str(&hot[0].payload).expect("json");
+        assert_eq!(stored, shipped);
+    }
+
+    #[test]
+    fn first_use_refuses_a_type_with_two_existing_schemas() {
+        let db = test_db();
+        let mut a = object_schema(serde_json::json!({"a": {"type": "string"}}), &[]);
+        a["x-doc-type"] = serde_json::json!("nfr");
+        let mut b = object_schema(serde_json::json!({"b": {"type": "string"}}), &[]);
+        b["x-doc-type"] = serde_json::json!("nfr");
+        let id_a = land_schema(&db, a);
+        let id_b = land_schema(&db, b);
+
+        let err = db.ensure_shipped_schemas().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("multiple schema documents declare"), "{msg}");
+        assert!(msg.contains(&id_a) && msg.contains(&id_b), "{msg}");
+        // Nothing was landed for the other types.
+        assert!(db.schema_for_type("intent").is_err());
+    }
+
+    #[test]
+    fn shipped_intent_schema_accepts_interface_answers_without_evidence() {
+        let db = test_db();
+        db.ensure_shipped_schemas().expect("first use");
+        let payload = serde_json::json!({
+            "meta": {
+                "title": "Widget", "surface": "widget", "status": "draft",
+                "owner": "legion", "date": "2026-10-09", "purpose": "test",
+                "sources": []
+            },
+            "what_it_is": "A widget.",
+            "current_state": {"real": [], "cut_or_broken": [], "known_gaps": []},
+            "direction": {"becoming": "A better widget.", "proposals": []},
+            "boundaries": [],
+            "actors": [],
+            "consumers": [],
+            "open_questions": [],
+            "interface": {
+                "users": ["agent", "human"],
+                "agent_access": ["cli", "mcp"],
+                "human_access": ["ui"],
+                "ui_kind": "web"
+            }
+        });
+        db.validate_document_payload("intent", &payload)
+            .expect("intent without evidence validates");
     }
 
     /// `doc_type == "schema"` is exempt from the generic per-type check

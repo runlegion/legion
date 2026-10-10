@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "nfr",
+  "title": "NFR",
+  "description": "AI-first non-functional requirement: a measurable quality constraint, separate from functional requirements per the IEEE 830 load-bearing-separation finding and referenced by requirement.nfr_refs by id. An NFR binds a metric to a target with a defined measurement, traces to a system-foundations node (or other service-design provenance), and carries its own verification acceptance so it is checkable, not prose. Part of the definition layer (legion #526); shape validated against live NFRs (mail, gitpress).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Typed id, e.g. NFR-MAIL-001"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "nfr"
+          ]
+        },
+        "surface": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "specified",
+            "accepted",
+            "implemented",
+            "verified",
+            "cancelled"
+          ]
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "SHALL",
+            "SHOULD",
+            "MAY"
+          ],
+          "description": "RFC 2119 / IEEE 830 conformance level"
+        },
+        "phase": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "owner": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "surface",
+        "status",
+        "priority",
+        "owner",
+        "date",
+        "author"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "performance",
+        "scalability",
+        "reliability",
+        "availability",
+        "security",
+        "privacy",
+        "observability",
+        "maintainability",
+        "compatibility",
+        "usability",
+        "compliance"
+      ],
+      "description": "Quality-attribute class (ISO/IEC 25010-aligned). compliance covers protocol/RFC conformance."
+    },
+    "metric": {
+      "type": "string",
+      "description": "The measurable quantity this NFR constrains, e.g. 'IMAP IDLE re-issue interval' or 'DKIM signing latency p99'"
+    },
+    "target": {
+      "type": "string",
+      "description": "Human-readable threshold, e.g. '< 29 minutes' or '< 200ms p99'"
+    },
+    "bound": {
+      "type": "object",
+      "description": "Machine-checkable form of target. Optional but preferred -- lets the verify gate assert numerically.",
+      "properties": {
+        "comparator": {
+          "type": "string",
+          "enum": [
+            "lt",
+            "lte",
+            "gt",
+            "gte",
+            "eq",
+            "range"
+          ]
+        },
+        "value": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number",
+          "description": "Upper bound when comparator is range"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "comparator"
+      ]
+    },
+    "measurement": {
+      "type": "string",
+      "description": "How the metric is observed/verified, e.g. 'integration test asserts IDLE re-issued before 29:00' or 'prometheus histogram dkim_sign_seconds'"
+    },
+    "traces_to": {
+      "type": "string",
+      "description": "Provenance: a system-foundations blueprint node (e.g. blueprint.system-foundations.protocol-compliance.rfc-3501), moment_of_truth.<id>, journey phase, or pain theme. Required -- no orphan constraints."
+    },
+    "applies_to": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Requirement ids or surface names this NFR constrains (the inverse of requirement.nfr_refs)"
+    },
+    "verification": {
+      "type": "object",
+      "description": "How this NFR is verified. acceptance is the checkable-criteria source the verify gate (#520) reads when the NFR is bound; tests pins test names or file:line once implementation exists.",
+      "properties": {
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "acceptance"
+      ]
+    }
+  },
+  "required": [
+    "meta",
+    "title",
+    "description",
+    "category",
+    "metric",
+    "target",
+    "measurement",
+    "traces_to",
+    "verification"
+  ]
+}
