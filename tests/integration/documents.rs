@@ -8,10 +8,11 @@ fn document_create_view_list_archive_roundtrip() {
     // round-trips through insert -> view -> list -> archive, with
     // archived rows excluded from default list and included with --archived.
     let dir = tempfile::tempdir().unwrap();
-    seed_doc_type_schema(dir.path(), "requirement");
 
     // Create a typed-id requirement document with full meta + JSON payload.
-    let payload = r#"{"meta":{"id":"FR-TEST-001","type":"requirement"},"title":"Integration test target","description":"Round-trip through the documents table CLI."}"#;
+    // First use lands the shipped requirement schema (#1390), so the payload
+    // conforms to it.
+    let payload = requirement_payload(serde_json::json!({}));
     let create_out = run_with_stdin(
         legion_cmd(dir.path()).args([
             "document",
@@ -206,13 +207,13 @@ fn document_create_prints_violation_lines_then_summary() {
 #[test]
 fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
     let dir = tempfile::tempdir().unwrap();
-    seed_doc_type_schema(dir.path(), "requirement");
 
-    // An entry with an id but no text: insert-time normalization only
-    // assigns MISSING ids, so this survives creation and trips
-    // resolve_spec_criteria's malformed-entry refusal at view time.
-    let payload = r#"{"meta":{},"verification":{"criteria":[{"id":"has-id-no-text"}]}}"#;
-    run_with_stdin(
+    // An entry with an id but no text trips resolve_spec_criteria's
+    // malformed-entry refusal at view time. The shipped requirement schema
+    // (#1390) refuses such an entry at create, so the document is created
+    // valid and the stored payload is then corrupted directly.
+    let payload = requirement_payload(serde_json::json!({"criteria": [{"text": "placeholder"}]}));
+    let created = run_with_stdin(
         legion_cmd(dir.path()).args([
             "document",
             "create",
@@ -225,6 +226,20 @@ fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
         ]),
         payload.as_bytes(),
     );
+    assert!(
+        created.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let corrupt: String =
+        requirement_payload(serde_json::json!({"criteria": [{"id": "has-id-no-text"}]}));
+    rusqlite::Connection::open(dir.path().join("legion.db"))
+        .expect("open the store")
+        .execute(
+            "UPDATE documents SET payload = ?1 WHERE id = 'FR-VIEW-MALFORMED-1'",
+            [&corrupt],
+        )
+        .expect("corrupt the stored payload");
 
     let out =
         run_ok_output(legion_cmd(dir.path()).args(["document", "view", "FR-VIEW-MALFORMED-1"]));
@@ -254,9 +269,10 @@ fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
 #[test]
 fn document_view_reports_criteria_served_by_a_clean_verdict() {
     let dir = tempfile::tempdir().unwrap();
-    seed_doc_type_schema(dir.path(), "requirement");
 
-    let payload = r#"{"meta":{},"verification":{"criteria":[{"text":"first thing"},{"text":"second thing"}]}}"#;
+    let payload = requirement_payload(
+        serde_json::json!({"criteria": [{"text": "first thing"}, {"text": "second thing"}]}),
+    );
     run_with_stdin(
         legion_cmd(dir.path()).args([
             "document",

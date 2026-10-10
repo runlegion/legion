@@ -1573,16 +1573,11 @@ fn create_requirement_doc(
     // across multiple `create_requirement_doc` calls would try to land a
     // second schema and hit the "multiple schemas declare this type"
     // refusal -- there is no such reuse in this file today.
-    seed_doc_type_schema(data_dir, "requirement");
     let criteria: Vec<serde_json::Value> = criteria_texts
         .iter()
         .map(|t| serde_json::json!({"text": t}))
         .collect();
-    let payload = serde_json::json!({
-        "meta": {},
-        "verification": {"criteria": criteria}
-    })
-    .to_string();
+    let payload: String = requirement_payload(serde_json::json!({"criteria": criteria}));
     let mut args = vec![
         "document".to_string(),
         "create".to_string(),
@@ -3909,10 +3904,9 @@ esac
 fn verify_issue_traced_requirement_resolves_spec_criteria_and_proceeds() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
-    seed_doc_type_schema(data_dir.path(), "requirement");
 
-    let doc_payload =
-        r#"{"meta":{},"verification":{"criteria":[{"text":"ships the retry path"}]}}"#;
+    let doc_payload: String =
+        requirement_payload(serde_json::json!({"criteria": [{"text": "ships the retry path"}]}));
     let doc_out = run_with_stdin(
         legion_cmd(data_dir.path()).args([
             "document",
@@ -4025,10 +4019,9 @@ fn verify_issue_traced_requirement_refuses_nonexistent_document() {
 fn verify_issue_traced_requirement_refuses_cancelled_requirement() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
-    seed_doc_type_schema(data_dir.path(), "requirement");
 
-    let doc_payload =
-        r#"{"meta":{},"verification":{"criteria":[{"text":"ships the retry path"}]}}"#;
+    let doc_payload: String =
+        requirement_payload(serde_json::json!({"criteria": [{"text": "ships the retry path"}]}));
     let doc_out = run_with_stdin(
         legion_cmd(data_dir.path()).args([
             "document",
@@ -4113,9 +4106,9 @@ fn issue_create_refuses_trace_to_nonexistent_document() {
 fn issue_create_succeeds_with_valid_trace() {
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
-    seed_doc_type_schema(data_dir.path(), "requirement");
 
-    let doc_payload = r#"{"meta":{},"verification":{"criteria":[{"text":"ships it"}]}}"#;
+    let doc_payload: String =
+        requirement_payload(serde_json::json!({"criteria": [{"text": "ships it"}]}));
     let doc_out = run_with_stdin(
         legion_cmd(data_dir.path()).args([
             "document",
