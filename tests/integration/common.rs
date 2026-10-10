@@ -608,6 +608,35 @@ pub fn index_via_fake_scip_rust(data_dir: &Path, name: &str, blob: &[u8]) {
     );
 }
 
+/// A payload that conforms to the shipped `requirement` schema (#1390),
+/// carrying `verification` as given. Tests that create `requirement`
+/// documents go through first use, which replaces any stub schema with the
+/// shipped one, so their payloads must satisfy it. `acceptance` is added
+/// when `verification` lacks it, since the schema requires it.
+pub fn requirement_payload(verification: serde_json::Value) -> String {
+    let mut verification: serde_json::Value = verification;
+    if verification.get("acceptance").is_none() {
+        verification["acceptance"] = serde_json::json!(["stub acceptance"]);
+    }
+    serde_json::json!({
+        "meta": {
+            "id": "FR-TEST-000",
+            "type": "requirement",
+            "surface": "test",
+            "status": "draft",
+            "priority": "SHALL",
+            "owner": "legion",
+            "date": "2026-10-09",
+            "author": "legion"
+        },
+        "title": "Integration test requirement",
+        "description": "A requirement made by an integration test.",
+        "traces_to": "test",
+        "verification": verification
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod config_guard_tests {
     use super::*;

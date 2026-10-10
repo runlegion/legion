@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-doc-type": "intent",
+  "title": "Intent",
+  "description": "What a surface intends to be: the grounding statement written before a brief or a spec. It says what exists today, what is broken, what the team has seen, where the surface is heading, who and what touches it, and how it is used (by agents, by humans, and through which interface). Input to the brief and the spec, never output.",
+  "type": "object",
+  "required": [
+    "meta",
+    "what_it_is",
+    "current_state",
+    "direction",
+    "boundaries",
+    "actors",
+    "consumers",
+    "open_questions",
+    "interface"
+  ],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": [
+        "title",
+        "surface",
+        "status",
+        "owner",
+        "date",
+        "purpose",
+        "sources"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "surface": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "review",
+            "final"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "ref",
+              "kind"
+            ],
+            "properties": {
+              "ref": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "audit",
+                  "reflection",
+                  "pr",
+                  "issue",
+                  "doc"
+                ]
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "what_it_is": {
+      "type": "string"
+    },
+    "current_state": {
+      "type": "object",
+      "required": [
+        "real",
+        "cut_or_broken",
+        "known_gaps"
+      ],
+      "properties": {
+        "real": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "cut_or_broken": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "text",
+              "why"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "why": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "known_gaps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "text",
+              "when_it_matters"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "when_it_matters": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "direction": {
+      "type": "object",
+      "required": [
+        "becoming",
+        "proposals"
+      ],
+      "properties": {
+        "becoming": {
+          "type": "string"
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "text",
+              "status",
+              "needs_pressure_test"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "proposed",
+                  "settled"
+                ]
+              },
+              "needs_pressure_test": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "boundaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "owner",
+          "owns"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "owns": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "actors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "touches",
+          "stakes"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "human",
+              "machine",
+              "end-user"
+            ]
+          },
+          "touches": {
+            "type": "string"
+          },
+          "stakes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "consumers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "relationship",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "relationship": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "built",
+              "planned",
+              "not-built"
+            ]
+          }
+        }
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "question",
+          "resolve_with",
+          "resolution"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "resolve_with": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "research",
+              "designer"
+            ]
+          },
+          "resolution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "team_observations": {
+      "type": "array",
+      "description": "What the team has seen first-hand about the surface in use: things observed, not hypotheses.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "interface": {
+      "type": "object",
+      "description": "How the surface is used and through what.",
+      "required": [
+        "users"
+      ],
+      "properties": {
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Who uses it.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "human"
+            ]
+          }
+        },
+        "agent_access": {
+          "type": "array",
+          "description": "How agents reach it. Applies when users includes agent.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "cli",
+              "json",
+              "mcp"
+            ]
+          }
+        },
+        "human_access": {
+          "type": "array",
+          "description": "How humans reach it. Applies when users includes human.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "cli",
+              "ui"
+            ]
+          }
+        },
+        "ui_kind": {
+          "type": "string",
+          "enum": [
+            "web",
+            "native"
+          ],
+          "description": "The kind of UI. Applies when human_access includes ui."
+        }
+      }
+    }
+  }
+}
