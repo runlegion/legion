@@ -878,10 +878,10 @@ impl Database {
     }
 }
 
-/// The five document types whose schemas ship with the plugin (#1390),
+/// The six document types whose schemas ship with the plugin (#1390, #1387),
 /// each embedded at build time from `plugin/schemas/`. The name is the
 /// shipped file, kept so a refusal can name it.
-const SHIPPED_SCHEMAS: [(&str, &str, &str); 5] = [
+const SHIPPED_SCHEMAS: [(&str, &str, &str); 6] = [
     (
         "intent",
         "plugin/schemas/intent.schema.json",
@@ -907,9 +907,14 @@ const SHIPPED_SCHEMAS: [(&str, &str, &str); 5] = [
         "plugin/schemas/research.schema.json",
         include_str!("../plugin/schemas/research.schema.json"),
     ),
+    (
+        "prototype",
+        "plugin/schemas/prototype.schema.json",
+        include_str!("../plugin/schemas/prototype.schema.json"),
+    ),
 ];
 
-/// Whether `doc_type` is one of the five types whose schema ships with the
+/// Whether `doc_type` is one of the six types whose schema ships with the
 /// plugin, so a caller knows when first use applies.
 pub(crate) fn is_shipped_schema_type(doc_type: &str) -> bool {
     SHIPPED_SCHEMAS.iter().any(|(t, _, _)| *t == doc_type)
@@ -951,7 +956,8 @@ impl Database {
     }
 
     /// First use (#1390): make sure the store holds exactly the shipped
-    /// schema for each of intent, brief, requirement, nfr and research.
+    /// schema for each of intent, brief, requirement, nfr, research and
+    /// prototype.
     ///
     /// A type with no schema gets the shipped one landed. A type with one
     /// schema whose content differs gets it revised in place, so the store
@@ -2105,10 +2111,17 @@ mod tests {
 
     // -- first use: shipped schemas (#1390) ----------------------------------
 
-    const SHIPPED_TYPES: [&str; 5] = ["intent", "brief", "requirement", "nfr", "research"];
+    const SHIPPED_TYPES: [&str; 6] = [
+        "intent",
+        "brief",
+        "requirement",
+        "nfr",
+        "research",
+        "prototype",
+    ];
 
     #[test]
-    fn first_use_lands_five_schemas_in_empty_store() {
+    fn first_use_lands_six_schemas_in_empty_store() {
         let db = test_db();
         db.ensure_shipped_schemas().expect("first use");
         for doc_type in SHIPPED_TYPES {
@@ -2188,6 +2201,30 @@ mod tests {
         });
         db.validate_document_payload("intent", &payload)
             .expect("intent without evidence validates");
+    }
+
+    #[test]
+    fn shipped_prototype_schema_requires_canvas_and_explores() {
+        let db = test_db();
+        db.ensure_shipped_schemas().expect("first use");
+        let pointer = serde_json::json!({
+            "meta": {"intent": "01a0ac64", "date": "2026-10-09", "author": "legion"},
+            "canvas": "https://claude.ai/code/artifact/3dd1dff7",
+            "explores": "the intent screen"
+        });
+        db.validate_document_payload("prototype", &pointer)
+            .expect("pointer with canvas and explores validates");
+        let no_canvas = serde_json::json!({
+            "meta": {"intent": "01a0ac64", "date": "2026-10-09", "author": "legion"},
+            "explores": "the intent screen"
+        });
+        match db.validate_document_payload("prototype", &no_canvas) {
+            Err(LegionError::SchemaViolation { errors, .. }) => assert!(
+                errors.iter().any(|e| e.contains("canvas")),
+                "got: {errors:?}"
+            ),
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
     }
 
     /// `doc_type == "schema"` is exempt from the generic per-type check
