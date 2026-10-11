@@ -235,7 +235,11 @@ async fn run_sync_loop(data_dir: &Path, broadcast: &BroadcastConfig, stop_rx: &m
             handled = gossip.recv_and_handle(&mut buf, &local, &config) => {
                 match handled {
                     Ok(event) => after_event(&db, &event),
-                    Err(e) => eprintln!("[legion sync] datagram handling failed: {e}"),
+                    Err(e) => {
+                        eprintln!("[legion sync] datagram handling failed: {e}");
+                        // Back off so a persistent socket error cannot hot-spin.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
             }
         }

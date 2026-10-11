@@ -54,7 +54,7 @@ pub fn acquire_index_lock(data_dir: &Path, repo: &str) -> Result<PidLock> {
 }
 
 /// Whether a process with the given PID is alive: smugglr-core's probe
-/// (`kill(pid, 0)` on Unix, always `false` elsewhere). This is the single
+/// (`kill(pid, 0)` on Unix, `tasklist` on Windows). This is the single
 /// liveness probe for the whole binary -- watch locks and the daemon
 /// pidfile machinery share it so they can never disagree about whether a
 /// pidfile holder is alive (#611).
