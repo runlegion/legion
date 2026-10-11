@@ -39,6 +39,10 @@ cat "$ref"
 
 When it cannot be read, say so and stop.
 
+## Which versions get a spec
+
+A spec belongs to a version. A major or minor version requires its own intent and its own spec, written from that intent. A patch requires neither; a spec for a patch is optional, written only when someone asks for one. When you are dispatched for a major or minor version that has no intent yet, stop and say the intent comes first. A version that is already built is closed: its intent and spec are not revised; new capability opens the next minor or major version.
+
 ## What you write from
 
 The spec is written from the prose and the proofs, and from nothing else.

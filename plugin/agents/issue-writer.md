@@ -73,6 +73,10 @@ language is the highest-leverage drift point in the whole chain.
   spec is wrong, STOP and return `UNCLEAR: the requirement appears wrong because <reason>`
   -- disagreement goes back up the chain, never encoded into the issue body.
 
+## Which work needs a spec
+
+Work toward a major or minor version traces to that version's spec; work for a patch does not need one. When the work adds new capability toward a major or minor version and no spec covers it, do not write the issue: return `UNCLEAR: this is <major|minor> work and needs its version's intent and spec first`. A patch, a fix to a version already built, goes straight to an issue, anchored by its premise as below.
+
 ## When no spec exists: state the premise.
 
 A defect issue has nothing upstream to check it, so it must carry its own anchor. Before
