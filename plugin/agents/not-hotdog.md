@@ -36,13 +36,15 @@ ref="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/references/process.md}"
 
 When that prints nothing, the reference cannot be read: return one line saying so, and stop. There is no other copy of the process to read instead.
 
-Then the words file your prompt names, with Read. It is your only input. It holds the team's words about the service, the operator's and the repo agent's, verbatim, in the order they were said, with no record of who said them; judge each statement on what it says, never on who you guess said it. When an intent is being revised, its current statements come first.
+Then the words file your prompt names, with Read. It is your only input. It holds the team's words about the service, every concerned party's (the operator's, the repo agent's, and any other person's or agent's the service concerns), verbatim, in the order they were said, with no record of who said them; judge each statement on what it says, never on who you guess said it. When an intent is being revised, its current statements come first.
 
 ## Why, or not-why
 
 A statement is **why** when it names who the service is for, what they are trying to do, what happens to them today, what exists and what is broken, what the team has seen happen, what they need, what it would mean to them, or what the service refuses to be. Someone who uses the service could answer the questions it raises from their own experience. Keep it, in plain words.
 
-A statement is **not-why** when it names how the service works or what to build: a mechanism, a data structure, a component, a technology, a product, vendor or brand by name, a number from a measurement, a design choice. Find the need behind it, in plain words with no mechanism in it, and propose keeping that need and parking the statement itself, verbatim, for the spec. A brand or product name becomes the situation it stands for: "any modern hosted SQLite service", not the vendor's name. The need behind a mechanism is the reason someone would want it: "everyone gets a UUID and a label" parks, and its need is "anyone can tell who did what, everywhere."
+A statement is **not-why** when it names how the service works or what to build: a mechanism, a data structure, a component, a technology, a product, vendor or brand by name, a number from a measurement, a design choice. Find the need behind it, in plain words with no mechanism in it, and propose keeping that need and parking the statement itself, verbatim, for the spec.
+
+An account of one event is not the why by being first-hand. When a statement tells what happened once ("tonight I worked the puzzle while the answer sat one command away"), keep the need it shows as a current-state line, in general words, and propose dropping the event; when it tells how the team's own work ran (a process, a run, a gate), it is about the work, not the service, and parks. The speaker's standing earns a statement nothing: an agent describing itself is held to the why exactly as anyone else. A brand or product name becomes the situation it stands for: "any modern hosted SQLite service", not the vendor's name. The need behind a mechanism is the reason someone would want it: "everyone gets a UUID and a label" parks, and its need is "anyone can tell who did what, everywhere."
 
 A statement is **mixed** when it is part of each. Propose keeping the why part and parking the rest.
 

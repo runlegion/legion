@@ -5,16 +5,17 @@ description: |
   a service is, who it is for, what happens to them today, what exists or is broken, or how it is
   used, or when an intent is written or revised; the operator can also invoke /legion:intent <surface>.
   Gathers the team's own words from the conversation verbatim, has the not-hotdog agent classify and
-  compose them, reads the intent back, lands it, and hands off to Design once the operator and the
-  repo agent both accept it.
-version: 0.2.0
+  compose them, reads the intent back, lands it, and hands off to Design once every concerned party
+  accepts it: the operator and the repo agent at least, and any other person or agent the service
+  concerns.
+version: 0.3.0
 user-invocable: true
 allowed-tools: Bash, Read, Write, Edit, Agent, AskUserQuestion
 ---
 
 # /legion:intent
 
-The intent is what Discover produces: why this service exists, for whom, what happens to them today, and how it is used. Design grows from it and the spec is written from what Design learns, so an intent that already says how the service works has decided what Design was there to find out. Your goal is an intent the team accepts: the operator and the repo agent, both. It is done when both accept it, and then the work moves to Design.
+The intent is what Discover produces: why this service exists, for whom, what happens to them today, and how it is used. Design grows from it and the spec is written from what Design learns, so an intent that already says how the service works has decided what Design was there to find out. Your goal is an intent the team accepts. The team is every concerned party: everyone the service is theirs to say, human or agent. Today that is usually two, the operator and the repo agent; it can be many, several operators and their agents. Each is an author, none is a secretary, and every one's words are held to the why by the same rule. It is done when every one of them accepts it, and then the work moves to Design.
 
 You run the conversation. The not-hotdog agent does the judging, because it sees only the words and none of this session's picture of the build.
 
@@ -36,7 +37,7 @@ The surface is the argument (`/legion:intent bandz`); ask for it when it is miss
 
 The words file is `~/.claude/intent/<surface>-words.md`. Create it, or read it to resume. When revising, write the current intent's statements into it first, one per line.
 
-**The words file holds the words, verbatim, and no record of who said them.** The team is the operator and the repo agent, and both sets of words go in exactly as they were said: no `## Operator` heading or any other heading naming a speaker, no speaker label, no per-line attribution, no numbers or timestamps. not-hotdog judges each statement on what it says, and a record of who said it would only invite it to judge the speaker instead.
+**The words file holds the words, verbatim, and no record of who said them.** Every concerned party's words go in exactly as they were said, the repo agent's own included, in its own voice: no `## Operator` heading or any other heading naming a speaker, no speaker label, no per-line attribution, no numbers or timestamps. not-hotdog judges each statement on what it says, and a record of who said it would only invite it to judge the speaker instead.
 
 ## Gather
 
@@ -100,12 +101,11 @@ Land the intent as a draft on the team's word, and revise it as the read-back ch
 
 ## Accept it
 
-The intent is done when the operator and the repo agent both accept it. The repo agent is the agent that owns the surface, the intent's `meta.owner`. When that is you, read the intent against what you know of the repo and say whether you accept it, and why not if you do not. When it is another agent, put the intent to it with `legion signal --to <owner> --verb question` and wait for its answer. A refusal from either is a correction: append it to the words file and draft again.
+The intent is done when every concerned party accepts it. The operator and the repo agent are always among them; the repo agent is the agent that owns the surface, the intent's `meta.owner`. When a party is you, read the intent against what you know and say whether you accept it, and why not if you do not. When it is another agent, put the intent to it with `legion signal --to <agent> --verb question` and wait for its answer; when it is another person, ask them. A refusal from any party is a correction: append it to the words file and draft again.
 
-When both accept it, record each acceptance on the intent id, in the words it was given:
+When every party accepts it, record each acceptance on the intent id, in the words it was given, one reflection per party:
 
-- `legion reflect --repo <owner repo> --domain design --tags intent,accepted,<surface> --text "Intent <id> accepted by the operator: <their words, verbatim>"`
-- `legion reflect --repo <owner repo> --domain design --tags intent,accepted,<surface> --text "Intent <id> accepted by the repo agent <owner>: <its words, verbatim>"`
+- `legion reflect --repo <owner repo> --domain design --tags intent,accepted,<surface> --text "Intent <id> accepted by <party>: <their words, verbatim>"`
 
 Then revise the intent with `meta.status: final`.
 
