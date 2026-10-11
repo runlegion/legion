@@ -20,10 +20,8 @@ pub use config::{
     list_repos_in_config, load_config, remove_repo_from_config, rename_in_config,
 };
 pub use gates::{PersonaLeaseGate, QuotaPanicGate, poll_cycle};
-pub use locks::{
-    CooldownTracker, PidLockGuard, SessionLockTracker, acquire_index_lock, acquire_pid_lock,
-};
-pub(crate) use locks::{process_alive, terminate_process};
+pub use locks::{CooldownTracker, SessionLockTracker, acquire_index_lock, acquire_pid_lock};
+pub(crate) use locks::{process_alive, send_signal};
 #[allow(unused_imports)]
 pub use nudge::{DEFAULT_CLAUDE_BIN, LiveSession, NudgeCooldownTracker, SessionStatus};
 pub use signals::{
@@ -40,8 +38,6 @@ pub use tracker::AgentTracker;
 #[allow(unused_imports)]
 pub use config::{BroadcastTarget, Recipient};
 #[allow(unused_imports)]
-pub use locks::release_pid_lock;
-#[allow(unused_imports)]
 pub use signals::{is_wake_worthy, resolves_pending_ask};
 #[allow(unused_imports)]
 pub use spawn::{SpawnedChild, spawn_agent};
@@ -56,12 +52,6 @@ use crate::error::Result;
 use crate::health::HealthSampler;
 
 // -- Main Loop ---------------------------------------------------------------
-
-/// Resolve this host's identity for persona wake lease ownership. Falls back
-/// to `"unknown"` when the system hostname is not available.
-pub fn resolve_host_id() -> String {
-    sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_owned())
-}
 
 /// How many health ticks between heartbeat INFO log lines.
 ///
@@ -247,12 +237,11 @@ impl WatchLoop {
                 spawn_mode.as_str(),
             );
 
-            acquire_pid_lock(&lock_path)?;
+            let guard = acquire_pid_lock(&lock_path)?;
             eprintln!("{log_prefix} acquired lock (pid {})", std::process::id());
-            let guard = PidLockGuard(lock_path);
 
             let db = Database::open(&db_path)?;
-            let host = resolve_host_id();
+            let host = crate::host::hostname();
 
             // #900: a daemon that has just started owns no live sessions, so any
             // persona lease still attributed to this host is a leftover from a
@@ -328,6 +317,13 @@ impl WatchLoop {
             Ok(sample) => {
                 if let Err(e) = self.db.insert_health_sample(&sample) {
                     eprintln!("{} health persist error: {e}", self.log_prefix);
+                }
+                // The synced one-row-per-host view the mesh ranks from. Written
+                // here, not by the statusline, so a host with no Claude session
+                // still appears to its peers.
+                let status = crate::health::HostStatus::from_sample(&sample);
+                if let Err(e) = self.db.upsert_host_status(&status) {
+                    eprintln!("{} host status persist error: {e}", self.log_prefix);
                 }
             }
             Err(e) => {
@@ -862,7 +858,7 @@ pub struct WatchBootstrap {
     pub sync: Option<crate::sync_actor::SyncHandle>,
     /// The shared loop state plus the pid-lock guard, or the reason the
     /// watch loop cannot start. Sync (above) runs either way.
-    pub watch: Result<(WatchLoop, PidLockGuard)>,
+    pub watch: Result<(WatchLoop, smugglr_core::daemon::PidLock)>,
 }
 
 /// Run the watch daemon main loop.

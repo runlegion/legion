@@ -35,6 +35,36 @@ impl HealthSample {
     }
 }
 
+/// One host's latest load, as the synced `host_status` row the mesh ranks.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HostStatus {
+    pub hostname: String,
+    pub cpu_pct: f64,
+    pub mem_pct: f64,
+    pub load_1m: Option<f64>,
+    pub agents_active: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl HostStatus {
+    /// The `host_status` row a health sample implies.
+    ///
+    /// Both timestamps carry the sample time; on an existing row the upsert
+    /// keeps the stored `created_at`.
+    pub fn from_sample(sample: &HealthSample) -> Self {
+        Self {
+            hostname: sample.hostname.clone(),
+            cpu_pct: sample.cpu_usage_pct,
+            mem_pct: sample.mem_usage_pct,
+            load_1m: sample.load_avg_1,
+            agents_active: sample.agents_active,
+            created_at: sample.sampled_at.clone(),
+            updated_at: sample.sampled_at.clone(),
+        }
+    }
+}
+
 /// A single point-in-time system snapshot (not persisted directly).
 #[derive(Debug, Clone)]
 pub struct HealthSnapshot {
@@ -68,10 +98,7 @@ impl HealthSampler {
         let mut system = sysinfo::System::new();
         system.refresh_cpu_usage();
 
-        let hostname = sysinfo::System::host_name().unwrap_or_else(|| {
-            eprintln!("[legion] warning: could not determine hostname, using 'unknown'");
-            "unknown".to_string()
-        });
+        let hostname = crate::host::hostname();
 
         Self {
             system,

@@ -184,27 +184,6 @@ fn read_daemon_pid(pid_path: &Path) -> Option<u32> {
     contents.trim().parse::<u32>().ok()
 }
 
-/// Send a signal (e.g. "TERM", "KILL") to a process. Unix-only; returns false on
-/// other platforms. Uses `kill` to avoid a libc dependency, matching
-/// `watch::process_alive`.
-fn send_signal(pid: u32, signal: &str) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .args([format!("-{signal}"), pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (pid, signal);
-        false
-    }
-}
-
 /// Poll until the process exits or `timeout` elapses. Returns true if it exited.
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
@@ -235,7 +214,7 @@ pub fn stop_detached(data_dir: &Path) -> Result<bool> {
         return Ok(false);
     }
 
-    if !send_signal(pid, "TERM") {
+    if !watch::send_signal(pid, "TERM") {
         eprintln!("[legion] warning: failed to send SIGTERM to daemon {pid}");
     }
     let mut exited = wait_for_exit(pid, GRACEFUL_STOP_TIMEOUT);
@@ -244,7 +223,7 @@ pub fn stop_detached(data_dir: &Path) -> Result<bool> {
             "[legion] daemon {pid} did not exit within {}s; sending SIGKILL",
             GRACEFUL_STOP_TIMEOUT.as_secs()
         );
-        if !send_signal(pid, "KILL") {
+        if !watch::send_signal(pid, "KILL") {
             eprintln!("[legion] warning: failed to send SIGKILL to daemon {pid}");
         }
         // SIGKILL is uncatchable; a short wait lets the kernel reap it and free
@@ -415,18 +394,18 @@ fn kill_orphaned_daemon_on_port_with(
         }
 
         eprintln!("[legion] daemon-restart: killing orphaned daemon pid {pid} holding port {port}");
-        if send_signal(pid, "TERM") {
+        if watch::send_signal(pid, "TERM") {
             if !wait_for_exit(pid, GRACEFUL_STOP_TIMEOUT) {
                 eprintln!(
                     "[legion] daemon-restart: orphaned daemon {pid} did not exit after SIGTERM; \
                      escalating to SIGKILL"
                 );
-                send_signal(pid, "KILL");
+                watch::send_signal(pid, "KILL");
                 wait_for_exit(pid, SIGKILL_REAP_TIMEOUT);
             }
         } else {
             // TERM failed (EPERM or already exiting); try KILL.
-            send_signal(pid, "KILL");
+            watch::send_signal(pid, "KILL");
             wait_for_exit(pid, SIGKILL_REAP_TIMEOUT);
         }
 

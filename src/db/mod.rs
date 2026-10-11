@@ -80,7 +80,7 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// is below this value, so a new step without a bump never reaches it.
 /// `schema_fingerprint_is_pinned_to_schema_version` fails on a schema
 /// change until this is bumped and the fingerprint re-pinned.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
@@ -645,8 +645,8 @@ mod tests {
 
     /// SHA-256 of a fresh store's [`schema_snapshot`] at [`SCHEMA_VERSION`].
     const PINNED_SCHEMA_FINGERPRINT: (i32, &str) = (
-        2,
-        "ce6d1b974b3f04e8d1f262d4adc335a5cbe9c198c728a29a1f27cb2efe56f869",
+        3,
+        "7b015da094dd668951478fc54f529f75212fe2d911434cc78d586d8b3818b30a",
     );
 
     #[test]

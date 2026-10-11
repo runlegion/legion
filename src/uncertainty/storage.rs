@@ -422,8 +422,8 @@ impl Database {
     /// Idempotent replace, not append: existing live snapshot rows for a
     /// touched cohort are soft-deleted (`deleted_at = updated_at = now`)
     /// and fresh rows inserted in the same transaction, mirroring the
-    /// soft-delete + `updated_at`/`deleted_at` LWW convention the sync
-    /// deltas already read (`db::sync::get_uncertainty_calibration_snapshot_deltas_since`).
+    /// soft-delete + `updated_at`/`deleted_at` LWW convention synced tables
+    /// follow.
     /// Re-running with unchanged inputs produces a new live row set with
     /// identical content (new ids, same bucket math) -- callers should
     /// compare by `(cohort_key, bucket_lower)`, not by id.

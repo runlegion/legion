@@ -1,50 +1,62 @@
-//! Sync actor for multi-node delta replication (#536).
+//! Cluster sync on smugglr-core's masterless multicast gossip (#1397).
 //!
-//! Runs in a background thread with its own tokio runtime, handling:
-//! - Peer discovery via UDP broadcast (smugglr-core `PeerDiscovery`)
-//! - Delta serialization, encryption, and unicast transmission to peers
-//! - Receiving and applying deltas with LWW merge
+//! Runs in a background thread with its own tokio runtime. One loop
+//! multicasts a `primary_key -> content_hash` digest of every synced table
+//! every `interval_secs`, and handles every datagram that arrives in between:
+//! a node that hears a digest covering rows it lacks asks for them, and
+//! whoever holds them answers. Late joiners and partition rejoins converge
+//! through that same path. Membership is possession of the cluster secret;
+//! every datagram is XChaCha20-Poly1305 sealed by smugglr.
 //!
-//! Transport convention: discovery announcements broadcast on the configured
-//! `port`; delta data flows over a second UDP socket on `port + 1`
-//! ([`DATA_PORT_OFFSET`]). Every node in a cluster shares one `cluster.toml`
-//! shape (same port, same secret), so the data port is derivable without
-//! carrying it in the announcement. All delta traffic is sealed with
-//! XChaCha20-Poly1305 via smugglr-core's `maybe_encrypt`/`maybe_decrypt`.
-//!
-//! `last_sync` advances and persists to `cluster.toml` only after a cycle in
-//! which every computed packet was handed to the socket without error, so
-//! `legion cluster status` reflects reality and a failed cycle retries the
-//! same window.
+//! Wire change: nodes on 0.43.x (legion's own delta transport) and this
+//! build do not talk to each other. Every host upgrades together.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use smugglr_core::broadcast::{
-    BroadcastConfig, DeltaPacket, PeerDiscovery, ReplayGuard, hash_db_path, maybe_decrypt,
-    maybe_encrypt, split_delta,
-};
-use tokio::net::UdpSocket;
+use smugglr_core::broadcast::BroadcastConfig;
+use smugglr_core::config::{Config, ConflictResolution, SyncConfig};
+use smugglr_core::multicast::{DEFAULT_GROUP, Gossip, GossipEvent, RECV_BUF};
+use smugglr_core::{LocalDb, daemon};
 use tokio::runtime::Runtime;
 
 use crate::cluster::ClusterConfig;
 use crate::db::Database;
-use crate::error::Result;
-use crate::sync::{PersonaWakeLeaseDelta, ReflectionDelta, ScheduleDelta};
+use crate::error::{LegionError, Result};
 
-/// Delta data flows on `discovery port + DATA_PORT_OFFSET`.
-const DATA_PORT_OFFSET: u16 = 1;
+/// The tables gossip replicates. Every other table stays local.
+const SYNCED_TABLES: [&str; 4] = [
+    "reflections",
+    "schedules",
+    "persona_wake_leases",
+    "host_status",
+];
 
-/// Wire-envelope headroom passed to `split_delta`: XChaCha20-Poly1305 adds a
-/// 24-byte nonce and 16-byte tag; the rest is margin for base overhead.
-const SEAL_RESERVE: usize = 64;
+/// Columns left out of the content hash, so a difference in them alone
+/// never makes a peer ask for the row:
+///
+/// - `embedding`: derived from `text` by the local model; a BLOB that
+///   smugglr would otherwise compare byte for byte.
+/// - `recall_count`, `last_recalled_at`: per-node usage counters, bumped on
+///   every local recall.
+/// - `expires_at`, `evergreen`: bullpen TTL, recomputed by a local backfill
+///   (`db::board`) that does not bump `updated_at`.
+///
+/// smugglr 0.5 still ships these columns when it serves a row, so a pulled
+/// row carries the sender's values; see [`restore_gossiped_embeddings`].
+const EXCLUDED_COLUMNS: [&str; 5] = [
+    "embedding",
+    "recall_count",
+    "last_recalled_at",
+    "expires_at",
+    "evergreen",
+];
 
-/// Table names on the wire. The receive path matches on these exactly.
-const TABLE_REFLECTIONS: &str = "reflections";
-const TABLE_SCHEDULES: &str = "schedules";
-const TABLE_LEASES: &str = "persona_wake_leases";
+/// The `newer_wins` ordering key: `max(created_at, updated_at, deleted_at)`,
+/// so a tombstone that stamps only `deleted_at` still wins over a live row.
+const ORDERING_COLUMNS: [&str; 3] = ["created_at", "updated_at", "deleted_at"];
 
 /// Handle for communicating with the sync actor.
 pub struct SyncHandle {
@@ -56,17 +68,16 @@ pub struct SyncHandle {
 
 /// Load `cluster.toml` and spawn the sync actor when sync is enabled and a
 /// secret is configured. The single spawn gate shared by `legion watch` and
-/// the daemon's watch task (#536 defect 1: the daemon previously had no spawn
-/// at all). Sync is optional and never fatal: config errors and spawn
-/// failures log under `log_prefix` and return None so the caller's loop runs
-/// regardless.
+/// the daemon's watch task. Sync is optional and never fatal: config errors
+/// and spawn failures log under `log_prefix` and return None so the caller's
+/// loop runs regardless.
 pub fn spawn_sync_if_enabled(data_dir: &Path, log_prefix: &str) -> Option<SyncHandle> {
     match ClusterConfig::load(data_dir) {
         Ok(cc) if cc.enabled && cc.secret.is_some() => {
             eprintln!(
                 "{log_prefix} cluster sync enabled on port {} (instance: {})",
                 cc.port,
-                cc.resolve_instance_id()
+                crate::host::hostname()
             );
             match SyncHandle::spawn(data_dir, cc) {
                 Ok(handle) => Some(handle),
@@ -86,18 +97,20 @@ pub fn spawn_sync_if_enabled(data_dir: &Path, log_prefix: &str) -> Option<SyncHa
 
 impl SyncHandle {
     /// Spawn the sync actor in a background thread.
+    ///
+    /// Refuses a config without a secret: smugglr's `Gossip` only warns on
+    /// a keyless bind, and a keyless node applies rows from any host on the
+    /// subnet.
     pub fn spawn(data_dir: &Path, config: ClusterConfig) -> Result<Self> {
-        let db_path = data_dir.join("legion.db");
-        let db_path_str = db_path.to_string_lossy().to_string();
-        let db_path_hash = hash_db_path(&db_path_str);
-
-        let secret = config.secret.clone();
-        let broadcast_config = BroadcastConfig {
-            port: config.port,
-            interval_secs: 30,
-            instance_id: Some(config.resolve_instance_id()),
-            secret,
-        };
+        let broadcast = broadcast_config(&config);
+        broadcast
+            .encryption_key()
+            .map_err(|e| LegionError::Config(format!("sync actor key decode failed: {e}")))?
+            .ok_or_else(|| {
+                LegionError::Config(
+                    "sync requires a cluster secret; refusing to run unencrypted".into(),
+                )
+            })?;
 
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let data_dir = data_dir.to_path_buf();
@@ -110,13 +123,7 @@ impl SyncHandle {
                     return;
                 }
             };
-            rt.block_on(async {
-                if let Err(e) =
-                    run_sync_loop(&data_dir, broadcast_config, db_path_hash, stop_rx).await
-                {
-                    eprintln!("[legion sync] actor error: {}", e);
-                }
-            });
+            rt.block_on(run_sync_loop(&data_dir, &broadcast, &stop_rx));
         });
 
         Ok(Self {
@@ -126,587 +133,511 @@ impl SyncHandle {
     }
 }
 
-/// Main sync loop running in tokio.
-async fn run_sync_loop(
-    data_dir: &Path,
-    config: BroadcastConfig,
-    db_path_hash: String,
-    stop_rx: mpsc::Receiver<()>,
-) -> Result<()> {
-    let discovery = match PeerDiscovery::new(config.clone(), db_path_hash.clone()).await {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(crate::error::LegionError::Config(format!(
-                "sync actor failed to initialize: {}",
-                e
-            )));
+/// The gossip node's identity, key, and apply policy.
+fn broadcast_config(cc: &ClusterConfig) -> BroadcastConfig {
+    BroadcastConfig {
+        port: cc.port,
+        interval_secs: cc.interval_secs,
+        instance_id: Some(crate::host::hostname()),
+        secret: cc.secret.clone(),
+        conflict_resolution: ConflictResolution::NewerWins,
+        ordering_columns: ORDERING_COLUMNS.iter().map(|c| (*c).to_string()).collect(),
+    }
+}
+
+/// The smugglr config gossip reads: which tables sync and which columns
+/// stay out of the content hash.
+fn gossip_config(db_path: &Path) -> Config {
+    Config {
+        cloudflare_account_id: None,
+        cloudflare_api_token: None,
+        database_id: None,
+        local_db: Some(db_path.to_string_lossy().to_string()),
+        sync: SyncConfig {
+            tables: SYNCED_TABLES.iter().map(|t| (*t).to_string()).collect(),
+            exclude_columns: EXCLUDED_COLUMNS.iter().map(|c| (*c).to_string()).collect(),
+            ..SyncConfig::default()
+        },
+        stash: None,
+        target: None,
+        broadcast: None,
+    }
+}
+
+/// Turn every embedding a peer delivered as hex TEXT back into its BLOB.
+///
+/// smugglr 0.5 serves a requested row with every column and encodes a BLOB
+/// as lowercase hex, which the apply binds as TEXT. Every node runs the same
+/// embedding model, so the decoded vector is valid here. `unhex` yields NULL
+/// for a value that is not hex, and the embedding backfill
+/// (`embedding IS NULL`) recomputes those.
+fn restore_gossiped_embeddings(db: &Database) -> Result<usize> {
+    Ok(db.conn.execute(
+        "UPDATE reflections SET embedding = unhex(embedding) WHERE typeof(embedding) = 'text'",
+        [],
+    )?)
+}
+
+/// What the loop does after one handled datagram, beyond smugglr's own
+/// apply: restore embeddings when reflections changed.
+fn after_event(db: &Database, event: &GossipEvent) {
+    if let GossipEvent::Applied { table, rows, .. } = event
+        && table == "reflections"
+        && *rows > 0
+        && let Err(e) = restore_gossiped_embeddings(db)
+    {
+        eprintln!("[legion sync] embedding restore failed: {e}");
+    }
+}
+
+/// Main sync loop. Never returns an error: every failure logs with
+/// `[legion sync]` and the loop retries on the next interval, so sync can
+/// never take the daemon down.
+async fn run_sync_loop(data_dir: &Path, broadcast: &BroadcastConfig, stop_rx: &mpsc::Receiver<()>) {
+    let db_path = data_dir.join("legion.db");
+    let config = gossip_config(&db_path);
+    let interval = Duration::from_secs(broadcast.interval_secs.max(1));
+
+    // Bind and open retry each interval rather than giving up, so a port
+    // that is briefly busy at boot does not leave the node unsynced.
+    let (gossip, local, db) = loop {
+        if stop_requested(stop_rx) {
+            return;
+        }
+        match open_node(&db_path, broadcast).await {
+            Ok(node) => break node,
+            Err(e) => {
+                eprintln!("[legion sync] {e}; retrying in {}s", interval.as_secs());
+                tokio::time::sleep(interval).await;
+            }
         }
     };
-
-    // Hard requirement, not Option: without a key, maybe_decrypt would pass
-    // unauthenticated plaintext from 0.0.0.0 straight into the DB. The spawn
-    // gate already filters secretless configs; this is the defense in depth
-    // for any future caller of SyncHandle::spawn.
-    let key = config
-        .encryption_key()
-        .map_err(|e| {
-            crate::error::LegionError::Config(format!("sync actor key derivation failed: {e}"))
-        })?
-        .ok_or_else(|| {
-            crate::error::LegionError::Config(
-                "sync requires a cluster secret; refusing to run unencrypted".into(),
-            )
-        })?;
-    let key = Some(key);
-
-    let data_port = config.port.checked_add(DATA_PORT_OFFSET).ok_or_else(|| {
-        crate::error::LegionError::Config(format!(
-            "cluster port {} leaves no room for the data port (port + {DATA_PORT_OFFSET} overflows); pick a lower port",
-            config.port
-        ))
-    })?;
-    let data_socket = UdpSocket::bind(("0.0.0.0", data_port)).await.map_err(|e| {
-        crate::error::LegionError::Config(format!("sync actor bind data port {data_port}: {e}"))
-    })?;
-    let data_socket = std::sync::Arc::new(data_socket);
-
     eprintln!(
-        "[legion sync] actor started (instance: {}, discovery port: {}, data port: {})",
-        discovery.instance_id(),
-        config.port,
-        data_port
+        "[legion sync] gossip started (instance: {}, port: {}, heartbeat: {}s)",
+        crate::host::hostname(),
+        broadcast.port,
+        interval.as_secs()
     );
 
-    // Receive side: own task, shared socket. Applies sealed DeltaPackets to
-    // the local DB with replay protection. Never crashes the actor: every
-    // failure logs and the loop continues.
-    let recv_db_path = data_dir.join("legion.db");
-    let recv_socket = data_socket.clone();
-    let recv_key = key;
-    let recv_self_id = discovery.instance_id().to_string();
-    tokio::spawn(async move {
-        receive_loop(recv_socket, recv_key, recv_self_id, recv_db_path).await;
-    });
-
-    let db_path = data_dir.join("legion.db");
-    let mut last_sync = ClusterConfig::load(data_dir)
-        .ok()
-        .and_then(|cc| cc.last_sync)
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    let sync_interval = Duration::from_secs(config.interval_secs);
-    let source_id = discovery.instance_id().to_string();
-    // Seed seq above any value peers may remember for this instance_id:
-    // their ReplayGuards live as long as their receive loops, so a restart
-    // that re-started from 0 would be rejected as replay until it caught up
-    // (silently losing every cycle in between). Epoch-millis is monotonic
-    // across restarts at any realistic cycle rate.
-    let mut seq: u64 = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
-
+    let mut heartbeat = tokio::time::interval(interval);
+    let mut buf = vec![0u8; RECV_BUF];
     loop {
-        // Check for stop signal (non-blocking)
-        // Break on Ok (explicit stop) or Disconnected (sender dropped)
-        match stop_rx.try_recv() {
-            Ok(()) => {
-                eprintln!("[legion sync] stopping (signal received)");
-                break;
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                eprintln!("[legion sync] stopping (handle dropped)");
-                break;
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                // No signal yet, continue loop
-            }
+        if stop_requested(stop_rx) {
+            return;
         }
-
-        // Discover peers
-        let peers = match discovery.discover_once(Duration::from_secs(5)).await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[legion sync] discovery error: {}", e);
-                Vec::new()
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                match gossip.broadcast_digests(&local, &config).await {
+                    Ok(_) => persist_last_sync(data_dir, &chrono::Utc::now().to_rfc3339()),
+                    Err(e) => eprintln!("[legion sync] digest send failed: {e}"),
+                }
             }
-        };
-
-        if !peers.is_empty() {
-            eprintln!("[legion sync] {} peer(s) online", peers.len());
-
-            let cycle_start = chrono::Utc::now().to_rfc3339();
-            match Database::open(&db_path) {
-                Err(e) => eprintln!("[legion sync] db open for send cycle failed: {e}"),
-                Ok(db) => {
-                    let packets = match build_delta_packets(&db, &last_sync, &source_id, &mut seq) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("[legion sync] delta build failed: {e}");
-                            Vec::new()
-                        }
-                    };
-
-                    if !packets.is_empty() {
-                        let upsert_total: usize = packets.iter().map(|p| p.upserts.len()).sum();
-                        eprintln!(
-                            "[legion sync] broadcasting {} delta row(s) in {} packet(s) to {} peer(s)",
-                            upsert_total,
-                            packets.len(),
-                            peers.len()
-                        );
-
-                        let mut all_sent = true;
-                        for packet in &packets {
-                            let bytes =
-                                match packet.to_bytes().and_then(|b| maybe_encrypt(&b, &key)) {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        eprintln!("[legion sync] packet seal failed: {e}");
-                                        all_sent = false;
-                                        continue;
-                                    }
-                                };
-                            for peer in &peers {
-                                let target = std::net::SocketAddr::new(peer.addr.ip(), data_port);
-                                if let Err(e) = data_socket.send_to(&bytes, target).await {
-                                    eprintln!(
-                                        "[legion sync] send to {} ({}) failed: {e}",
-                                        peer.instance_id, target
-                                    );
-                                    all_sent = false;
-                                }
-                            }
-                        }
-
-                        // Advance and persist last_sync only after a fully
-                        // successful cycle (#536 defects 2+3); a failed peer
-                        // retries the same window next cycle.
-                        if all_sent {
-                            last_sync = cycle_start;
-                            persist_last_sync(data_dir, &last_sync);
-                        }
-                    }
+            handled = gossip.recv_and_handle(&mut buf, &local, &config) => {
+                match handled {
+                    Ok(event) => after_event(&db, &event),
+                    Err(e) => eprintln!("[legion sync] datagram handling failed: {e}"),
                 }
             }
         }
-
-        // Sleep until next cycle
-        tokio::time::sleep(sync_interval).await;
     }
-
-    Ok(())
 }
 
-/// Compute per-table deltas since `last_sync` and pack them into
-/// datagram-sized `DeltaPacket`s. Rows travel as their serde maps; tombstones
-/// ride in `upserts` with `deleted_at` set (the LWW apply handles them), so
-/// `deletes` stays empty.
-fn build_delta_packets(
-    db: &Database,
-    last_sync: &str,
-    source_id: &str,
-    seq: &mut u64,
-) -> Result<Vec<DeltaPacket>> {
-    let mut packets = Vec::new();
-
-    let reflections = db.get_reflection_deltas_since(last_sync)?;
-    pack_table(
-        &mut packets,
-        source_id,
-        seq,
-        TABLE_REFLECTIONS,
-        &reflections,
-    )?;
-    let schedules = db.get_schedule_deltas_since(last_sync)?;
-    pack_table(&mut packets, source_id, seq, TABLE_SCHEDULES, &schedules)?;
-    let leases = db.get_persona_wake_lease_deltas_since(last_sync)?;
-    pack_table(&mut packets, source_id, seq, TABLE_LEASES, &leases)?;
-
-    Ok(packets)
+/// Bind the gossip socket and open both connections to the store.
+///
+/// legion's `Database` opens first so the schema (including `host_status`)
+/// exists before smugglr reads it.
+async fn open_node(
+    db_path: &Path,
+    broadcast: &BroadcastConfig,
+) -> Result<(Gossip, LocalDb, Database)> {
+    let db = Database::open(db_path)?;
+    let local = LocalDb::open(db_path)
+        .map_err(|e| LegionError::Config(format!("sync store open failed: {e}")))?;
+    let gossip = Gossip::bind(broadcast, DEFAULT_GROUP)
+        .await
+        .map_err(|e| LegionError::Config(format!("gossip bind failed: {e}")))?;
+    Ok((gossip, local, db))
 }
 
-/// Serialize one table's delta rows into MTU-sized packets, advancing `seq`
-/// per packet so the receiver's `ReplayGuard` sees a strictly increasing
-/// sequence per source.
-fn pack_table<T: serde::Serialize>(
-    packets: &mut Vec<DeltaPacket>,
-    source_id: &str,
-    seq: &mut u64,
-    table: &str,
-    rows: &[T],
-) -> Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let upserts = rows
-        .iter()
-        .map(|r| {
-            serde_json::to_value(r)
-                .map_err(|e| {
-                    crate::error::LegionError::Config(format!("delta serialize ({table}): {e}"))
-                })
-                .and_then(|v| match v {
-                    serde_json::Value::Object(m) => Ok(m.into_iter().collect()),
-                    other => Err(crate::error::LegionError::Config(format!(
-                        "delta row for {table} is not an object: {other}"
-                    ))),
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut split = split_delta(source_id, *seq, table, upserts, Vec::new(), SEAL_RESERVE)
-        .map_err(|e| crate::error::LegionError::Config(format!("delta split ({table}): {e}")))?;
-    // split_delta stamps every part with the seq it was given, but the
-    // receiver's ReplayGuard drops repeated seqs as duplicates -- so re-stamp
-    // each part as an independent single-part packet with its own seq (the
-    // same scheme smugglr-core's own multicast engine uses). Each part
-    // carries complete rows, so independent application is sound.
-    for p in &mut split {
-        p.seq = *seq;
-        *seq += 1;
-        p.part = 0;
-        p.total_parts = 1;
-    }
-    packets.extend(split);
-    Ok(())
-}
-
-/// Receive sealed DeltaPackets and apply them to the local DB. Runs for the
-/// actor's lifetime; every failure path logs and continues.
-async fn receive_loop(
-    socket: std::sync::Arc<UdpSocket>,
-    key: Option<[u8; 32]>,
-    self_id: String,
-    db_path: PathBuf,
-) {
-    let mut guard = ReplayGuard::new();
-    let mut buf = vec![0u8; 65_536];
-    // One connection for the loop's lifetime, lazily (re)opened on failure --
-    // not per packet. busy_timeout keeps concurrent watch-loop writes from
-    // surfacing as immediate SQLITE_BUSY row drops.
-    let mut db: Option<Database> = None;
-    loop {
-        let (len, from) = match socket.recv_from(&mut buf).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[legion sync] recv error: {e}");
-                // Backoff so a persistent socket error cannot hot-spin.
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-        let plaintext = match maybe_decrypt(&buf[..len], &key) {
-            Ok(Some(p)) => p,
-            Ok(None) => continue, // not for us / not decryptable with our key
-            Err(e) => {
-                eprintln!("[legion sync] decrypt error from {from}: {e}");
-                continue;
-            }
-        };
-        let packet = match DeltaPacket::from_bytes(&plaintext) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[legion sync] bad packet from {from}: {e}");
-                continue;
-            }
-        };
-        if packet.source_id == self_id {
-            continue; // our own broadcast reflected back
+/// True once the handle has asked the actor to stop or been dropped.
+fn stop_requested(stop_rx: &mpsc::Receiver<()>) -> bool {
+    match stop_rx.try_recv() {
+        Ok(()) => {
+            eprintln!("[legion sync] stopping (signal received)");
+            true
         }
-        if !guard.check(&packet.source_id, packet.seq) {
-            continue; // replay or out-of-order duplicate
+        Err(mpsc::TryRecvError::Disconnected) => {
+            eprintln!("[legion sync] stopping (handle dropped)");
+            true
         }
-        if db.is_none() {
-            match Database::open(&db_path) {
-                Ok(opened) => {
-                    if let Err(e) = opened.conn.busy_timeout(Duration::from_secs(2)) {
-                        eprintln!("[legion sync] busy_timeout not set: {e}");
-                    }
-                    db = Some(opened);
-                }
-                Err(e) => {
-                    eprintln!("[legion sync] db open for apply failed: {e}");
-                    continue;
-                }
-            }
-        }
-        let Some(ref open_db) = db else { continue };
-        let applied = apply_packet(open_db, &packet);
-        eprintln!(
-            "[legion sync] applied {applied}/{} row(s) from {} (table: {})",
-            packet.upserts.len(),
-            packet.source_id,
-            packet.table
-        );
+        Err(mpsc::TryRecvError::Empty) => false,
     }
 }
 
-/// Apply one packet's rows to the local DB via the per-table LWW apply
-/// methods. Returns the number of rows applied without error; per-row
-/// failures log and do not abort the packet.
-fn apply_packet(db: &Database, packet: &DeltaPacket) -> usize {
-    let mut applied = 0;
-    for row in &packet.upserts {
-        let value = serde_json::Value::Object(row.clone().into_iter().collect());
-        let result = match packet.table.as_str() {
-            TABLE_REFLECTIONS => serde_json::from_value::<ReflectionDelta>(value)
-                .map_err(|e| e.to_string())
-                .and_then(|d| db.apply_reflection_delta(&d).map_err(|e| e.to_string())),
-            TABLE_SCHEDULES => serde_json::from_value::<ScheduleDelta>(value)
-                .map_err(|e| e.to_string())
-                .and_then(|d| db.apply_schedule_delta(&d).map_err(|e| e.to_string())),
-            TABLE_LEASES => serde_json::from_value::<PersonaWakeLeaseDelta>(value)
-                .map_err(|e| e.to_string())
-                .and_then(|d| {
-                    db.apply_persona_wake_lease_delta(&d)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }),
-            other => Err(format!("unknown table '{other}'")),
-        };
-        match result {
-            Ok(()) => applied += 1,
-            Err(e) => eprintln!("[legion sync] apply failed (table: {}): {e}", packet.table),
-        }
-    }
-    applied
-}
-
-/// Persist `last_sync` to cluster.toml so `legion cluster status` reflects
-/// reality (#536 defect 3). Best-effort: a write failure logs and the
-/// in-memory cursor still advances.
+/// Persist `last_sync` to cluster.toml after a digest round that sent
+/// without error. Best-effort: a write failure logs.
+///
+/// smugglr's `update_last_sync` rewrites an existing `last_sync` line in
+/// place. When there is none yet it would add a `[sync]` table, which
+/// `ClusterConfig` does not read, so the first write goes through
+/// `ClusterConfig::save` to create the top-level line.
 fn persist_last_sync(data_dir: &Path, ts: &str) {
-    match ClusterConfig::load(data_dir) {
+    let result = match ClusterConfig::load(data_dir) {
+        Ok(cc) if cc.last_sync.is_some() => {
+            daemon::update_last_sync(&data_dir.join("cluster.toml"), ts)
+                .map_err(|e| LegionError::Config(e.to_string()))
+        }
         Ok(mut cc) => {
             cc.last_sync = Some(ts.to_string());
-            if let Err(e) = cc.save(data_dir) {
-                eprintln!("[legion sync] failed to persist last_sync: {e}");
-            }
+            cc.save(data_dir)
         }
-        Err(e) => eprintln!("[legion sync] failed to reload cluster.toml: {e}"),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = result {
+        eprintln!("[legion sync] failed to persist last_sync: {e}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::net::Ipv4Addr;
+
+    use smugglr_core::broadcast::{DeltaPacket, maybe_encrypt};
+    use smugglr_core::multicast::{Body, IgnoreReason, Msg};
+
     use crate::db::ReflectionMeta;
 
-    fn temp_data_dir() -> PathBuf {
+    /// Never the product port or group, so a running daemon cannot interfere.
+    const TEST_PORT: u16 = 39_413;
+    const TEST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 141, 3);
+
+    /// One gossip node over a legion-schema temp store.
+    struct Node {
+        gossip: Gossip,
+        local: LocalDb,
+        db: Database,
+        config: Config,
+        key: Option<[u8; 32]>,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn node(instance: &str, secret: &str) -> Node {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().to_path_buf();
-        std::mem::forget(dir);
-        path
+        let db_path = dir.path().join("legion.db");
+        let db = Database::open(&db_path).expect("open legion db");
+        let local = LocalDb::open(&db_path).expect("open smugglr db");
+        let cc = ClusterConfig {
+            enabled: true,
+            secret: Some(secret.to_string()),
+            port: TEST_PORT,
+            ..Default::default()
+        };
+        let mut broadcast = broadcast_config(&cc);
+        broadcast.instance_id = Some(instance.to_string());
+        let key = broadcast.encryption_key().expect("key decodes");
+        let gossip = Gossip::bind(&broadcast, TEST_GROUP).await.expect("bind");
+        Node {
+            gossip,
+            local,
+            db,
+            config: gossip_config(&db_path),
+            key,
+            _dir: dir,
+        }
+    }
+
+    /// Seal `body` the way `sender` puts it on the wire. smugglr keeps its
+    /// own `seal` private, so this builds the same `Msg` envelope and seals
+    /// it with the public AEAD helper.
+    fn seal(sender: &Node, body: Body) -> Vec<u8> {
+        let version = DeltaPacket::new(String::new(), 0, String::new()).version;
+        let plain = Msg { version, body }.to_bytes().expect("serialize");
+        maybe_encrypt(&plain, &sender.key).expect("seal")
+    }
+
+    /// Deliver one body from `from` to `to`, run legion's post-apply step,
+    /// and return the event and any response bodies.
+    async fn route(from: &Node, body: Body, to: &Node) -> (GossipEvent, Vec<Body>) {
+        let datagram = seal(from, body);
+        let (event, out) = to
+            .gossip
+            .handle(&datagram, &to.local, &to.config)
+            .await
+            .expect("handle");
+        after_event(&to.db, &event);
+        (event, out)
+    }
+
+    /// Run one full heartbeat from `from` to `to`: every digest, the Wants
+    /// it provokes, and the Deltas that answer them. Returns the Wants sent.
+    async fn converge(from: &Node, to: &Node) -> usize {
+        let digests = from
+            .gossip
+            .digest_bodies(&from.local, &from.config)
+            .await
+            .expect("digests");
+        let mut wants = 0;
+        for digest in digests {
+            let (_ev, out) = route(from, digest, to).await;
+            for want in out {
+                wants += 1;
+                let (_ev, deltas) = route(to, want, from).await;
+                for delta in deltas {
+                    route(from, delta, to).await;
+                }
+            }
+        }
+        wants
+    }
+
+    fn key(byte: &str) -> String {
+        byte.repeat(32)
+    }
+
+    fn text_of(db: &Database, id: &str) -> Option<String> {
+        db.conn
+            .query_row("SELECT text FROM reflections WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
+    #[tokio::test]
+    async fn two_nodes_converge_on_reflection_schedule_and_host_status() {
+        let a = node("node-a", &key("ab")).await;
+        let b = node("node-b", &key("ab")).await;
+
+        let r = a
+            .db
+            .insert_reflection_with_meta("legion", "gossiped", "self", &ReflectionMeta::default())
+            .expect("reflection");
+        let sched =
+            a.db.insert_schedule("nightly", "*/5m", "echo hi", "legion", None, None)
+                .expect("schedule");
+        a.db.upsert_host_status(&crate::health::HostStatus {
+            hostname: "node-a".into(),
+            cpu_pct: 12.5,
+            mem_pct: 40.0,
+            load_1m: Some(0.5),
+            agents_active: 1,
+            created_at: "2026-10-10T10:00:00+00:00".into(),
+            updated_at: "2026-10-10T10:00:00+00:00".into(),
+        })
+        .expect("host status");
+
+        assert!(converge(&a, &b).await > 0, "B must ask for A's rows");
+
+        assert_eq!(text_of(&b.db, &r.id).as_deref(), Some("gossiped"));
+        let sched_name: String =
+            b.db.conn
+                .query_row("SELECT name FROM schedules WHERE id = ?1", [&sched], |r| {
+                    r.get(0)
+                })
+                .expect("schedule arrived");
+        assert_eq!(sched_name, "nightly");
+        let hosts = b.db.list_host_status().expect("hosts");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].hostname, "node-a");
+
+        assert_eq!(converge(&a, &b).await, 0, "converged nodes send no Want");
+    }
+
+    #[tokio::test]
+    async fn foreign_key_datagram_is_ignored_and_changes_nothing() {
+        let a = node("node-a", &key("ab")).await;
+        let b = node("node-b", &key("cd")).await;
+        a.db.insert_reflection("legion", "secret", "self")
+            .expect("reflection");
+
+        let digests = a
+            .gossip
+            .digest_bodies(&a.local, &a.config)
+            .await
+            .expect("digests");
+        for digest in digests {
+            let (event, out) = route(&a, digest, &b).await;
+            assert_eq!(event, GossipEvent::Ignored(IgnoreReason::Undecryptable));
+            assert!(out.is_empty());
+        }
+        let count: i64 =
+            b.db.conn
+                .query_row("SELECT COUNT(*) FROM reflections", [], |r| r.get(0))
+                .expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn excluded_column_differences_produce_matching_digests() {
+        let a = node("node-a", &key("ab")).await;
+        let b = node("node-b", &key("ab")).await;
+        let r =
+            a.db.insert_reflection("legion", "same row", "self")
+                .expect("reflection");
+        converge(&a, &b).await;
+
+        // Diverge only in excluded columns.
+        a.db.conn
+            .execute(
+                "UPDATE reflections SET embedding = x'0102', recall_count = 7 WHERE id = ?1",
+                [&r.id],
+            )
+            .expect("diverge a");
+        b.db.conn
+            .execute(
+                "UPDATE reflections SET embedding = x'0304', recall_count = 2 WHERE id = ?1",
+                [&r.id],
+            )
+            .expect("diverge b");
+
+        let a_bodies = a
+            .gossip
+            .digest_bodies(&a.local, &a.config)
+            .await
+            .expect("a digests");
+        let b_bodies = b
+            .gossip
+            .digest_bodies(&b.local, &b.config)
+            .await
+            .expect("b digests");
+        assert_eq!(reflection_hashes(a_bodies), reflection_hashes(b_bodies));
+        assert_eq!(converge(&a, &b).await, 0, "no Want for excluded columns");
+    }
+
+    #[tokio::test]
+    async fn pulled_embedding_arrives_as_the_senders_blob() {
+        let a = node("node-a", &key("ab")).await;
+        let b = node("node-b", &key("ab")).await;
+        let r =
+            a.db.insert_reflection("legion", "embedded", "self")
+                .expect("reflection");
+        let vector: Vec<u8> = (0u8..=255).collect();
+        a.db.store_embedding(&r.id, &vector).expect("embed");
+        let bad =
+            a.db.insert_reflection("legion", "garbled", "self")
+                .expect("reflection");
+
+        converge(&a, &b).await;
+
+        assert_eq!(
+            b.db.get_embedding(&r.id).expect("read embedding"),
+            Some(vector),
+            "receiver holds the sender's vector as a BLOB"
+        );
+        let embeddings = b.db.get_embeddings(None).expect("every row reads");
+        assert_eq!(embeddings.len(), 1);
+
+        // A TEXT embedding that is not hex decodes to NULL, which the
+        // embedding backfill picks up.
+        b.db.conn
+            .execute(
+                "UPDATE reflections SET embedding = 'not-hex' WHERE id = ?1",
+                [&bad.id],
+            )
+            .expect("garble");
+        restore_gossiped_embeddings(&b.db).expect("restore");
+        let missing = b.db.get_ids_without_embeddings().expect("missing");
+        assert!(missing.iter().any(|(id, _)| id == &bad.id));
+        b.db.get_embeddings(None).expect("every row still reads");
+    }
+
+    #[tokio::test]
+    async fn newer_tombstone_wins_over_older_live_row() {
+        let a = node("node-a", &key("ab")).await;
+        let b = node("node-b", &key("ab")).await;
+        let r =
+            a.db.insert_reflection("legion", "to delete", "self")
+                .expect("reflection");
+        converge(&a, &b).await;
+
+        a.db.soft_delete_reflection(&r.id).expect("tombstone");
+        converge(&a, &b).await;
+
+        let deleted_at: Option<String> =
+            b.db.conn
+                .query_row(
+                    "SELECT deleted_at FROM reflections WHERE id = ?1",
+                    [&r.id],
+                    |row| row.get(0),
+                )
+                .expect("row");
+        assert!(deleted_at.is_some(), "the tombstone replaced the live row");
+
+        // The older live copy does not resurrect it in the other direction.
+        b.db.conn
+            .execute("UPDATE reflections SET deleted_at = NULL, updated_at = '2020-01-01T00:00:00+00:00' WHERE id = ?1", [&r.id])
+            .expect("stale live copy");
+        converge(&b, &a).await;
+        let a_deleted: Option<String> =
+            a.db.conn
+                .query_row(
+                    "SELECT deleted_at FROM reflections WHERE id = ?1",
+                    [&r.id],
+                    |row| row.get(0),
+                )
+                .expect("row");
+        assert!(a_deleted.is_some(), "an older live row must not win");
     }
 
     #[test]
     fn spawn_gate_none_when_disabled_or_secretless() {
-        let dir = temp_data_dir();
-        // No cluster.toml at all -> default config -> disabled -> None.
-        assert!(spawn_sync_if_enabled(&dir, "[test]").is_none());
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(spawn_sync_if_enabled(dir.path(), "[test]").is_none());
 
-        // Enabled but no secret -> None.
         let cc = ClusterConfig {
             enabled: true,
             secret: None,
             ..Default::default()
         };
-        cc.save(&dir).expect("save");
-        assert!(spawn_sync_if_enabled(&dir, "[test]").is_none());
+        cc.save(dir.path()).expect("save");
+        assert!(spawn_sync_if_enabled(dir.path(), "[test]").is_none());
     }
 
     #[test]
-    fn packet_seal_unseal_round_trip() {
-        let key = Some([7u8; 32]);
-        let mut seq = 0;
-        let mut packets = Vec::new();
-        let rows = vec![ReflectionDelta {
-            id: "r-1".into(),
-            repo: "legion".into(),
-            text: "hello".into(),
-            created_at: "2026-06-10T00:00:00Z".into(),
-            updated_at: Some("2026-06-10T01:00:00Z".into()),
-            deleted_at: None,
-            audience: "self".into(),
-            domain: None,
-            tags: None,
-            recall_count: 0,
-            last_recalled_at: None,
-            parent_id: None,
-        }];
-        pack_table(&mut packets, "node-a", &mut seq, TABLE_REFLECTIONS, &rows).expect("pack");
-        assert_eq!(packets.len(), 1);
-        assert_eq!(seq, 1);
-
-        let sealed = maybe_encrypt(&packets[0].to_bytes().expect("bytes"), &key).expect("seal");
-        let opened = maybe_decrypt(&sealed, &key).expect("unseal").expect("some");
-        let packet = DeltaPacket::from_bytes(&opened).expect("parse");
-        assert_eq!(packet.table, TABLE_REFLECTIONS);
-        assert_eq!(packet.upserts.len(), 1);
-        assert_eq!(
-            packet.upserts[0].get("id").and_then(|v| v.as_str()),
-            Some("r-1")
-        );
+    fn spawn_refuses_without_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = SyncHandle::spawn(dir.path(), ClusterConfig::default())
+            .err()
+            .expect("secretless spawn must fail");
+        assert!(matches!(err, LegionError::Config(m) if m.contains("secret")));
     }
 
     #[test]
-    fn apply_packet_round_trips_reflection_into_db() {
-        let dir = temp_data_dir();
-        let db = Database::open(&dir.join("legion.db")).expect("open");
-
-        let rows = vec![ReflectionDelta {
-            id: "0190a000-0000-7000-8000-000000000001".into(),
-            repo: "legion".into(),
-            text: "synced from peer".into(),
-            created_at: "2026-06-10T00:00:00Z".into(),
-            updated_at: Some("2026-06-10T01:00:00Z".into()),
-            deleted_at: None,
-            audience: "self".into(),
-            domain: Some("test".into()),
-            tags: None,
-            recall_count: 0,
-            last_recalled_at: None,
-            parent_id: None,
-        }];
-        let mut seq = 0;
-        let mut packets = Vec::new();
-        pack_table(&mut packets, "node-b", &mut seq, TABLE_REFLECTIONS, &rows).expect("pack");
-
-        let applied = apply_packet(&db, &packets[0]);
-        assert_eq!(applied, 1);
-
-        // Read back via a direct row query (get_reflections_by_ids carries a
-        // known column-shift bug being fixed separately under #606).
-        let text: String = db
-            .conn
-            .query_row(
-                "SELECT text FROM reflections WHERE id = ?1",
-                ["0190a000-0000-7000-8000-000000000001"],
-                |r| r.get(0),
-            )
-            .expect("read back");
-        assert_eq!(text, "synced from peer");
-    }
-
-    #[test]
-    fn multipart_batches_pass_a_fresh_replay_guard() {
-        // Regression for the review-caught data-loss bug: split_delta stamps
-        // all parts of a batch with one seq, and ReplayGuard drops repeated
-        // seqs -- so pack_table must re-stamp each part with its own seq.
-        let big_text = "x".repeat(900);
-        let rows: Vec<ReflectionDelta> = (0..8)
-            .map(|i| ReflectionDelta {
-                id: format!("r-big-{i}"),
-                repo: "legion".into(),
-                text: big_text.clone(),
-                created_at: "2026-06-10T00:00:00Z".into(),
-                updated_at: Some("2026-06-10T01:00:00Z".into()),
-                deleted_at: None,
-                audience: "self".into(),
-                domain: None,
-                tags: None,
-                recall_count: 0,
-                last_recalled_at: None,
-                parent_id: None,
-            })
-            .collect();
-
-        let mut seq = 1_000;
-        let mut packets = Vec::new();
-        pack_table(&mut packets, "node-mp", &mut seq, TABLE_REFLECTIONS, &rows).expect("pack");
-        assert!(
-            packets.len() > 1,
-            "test must force a multi-part split, got {} packet(s)",
-            packets.len()
-        );
-
-        // Every packet must clear a fresh ReplayGuard exactly as receive_loop
-        // checks them -- and carry every row exactly once.
-        let mut guard = ReplayGuard::new();
-        let mut total_rows = 0;
-        for p in &packets {
-            assert!(
-                guard.check(&p.source_id, p.seq),
-                "packet seq {} rejected as replay -- parts share a seq",
-                p.seq
-            );
-            total_rows += p.upserts.len();
-        }
-        assert_eq!(total_rows, rows.len());
-        assert_eq!(seq, 1_000 + packets.len() as u64);
-    }
-
-    #[test]
-    fn apply_packet_unknown_table_applies_zero() {
-        let dir = temp_data_dir();
-        let db = Database::open(&dir.join("legion.db")).expect("open");
-        let mut packet = DeltaPacket::new("node-c".into(), 0, "no_such_table".into());
-        packet.upserts.push(std::collections::HashMap::from([(
-            "id".to_string(),
-            serde_json::Value::String("x".into()),
-        )]));
-        assert_eq!(apply_packet(&db, &packet), 0);
-    }
-
-    #[test]
-    fn persist_last_sync_survives_reload() {
-        let dir = temp_data_dir();
+    fn persist_last_sync_writes_then_rewrites_top_level_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
         let cc = ClusterConfig {
             enabled: true,
-            secret: Some("ab".repeat(32)),
+            secret: Some(key("ab")),
             ..Default::default()
         };
-        cc.save(&dir).expect("save");
+        cc.save(dir.path()).expect("save");
 
-        persist_last_sync(&dir, "2026-06-10T12:00:00Z");
-        let reloaded = ClusterConfig::load(&dir).expect("reload");
-        assert_eq!(reloaded.last_sync.as_deref(), Some("2026-06-10T12:00:00Z"));
-        // Other fields survive the round-trip.
-        assert!(reloaded.enabled);
-        assert_eq!(reloaded.secret.as_deref(), Some("ab".repeat(32).as_str()));
+        persist_last_sync(dir.path(), "2026-10-10T12:00:00+00:00");
+        let first = ClusterConfig::load(dir.path()).expect("reload");
+        assert_eq!(
+            first.last_sync.as_deref(),
+            Some("2026-10-10T12:00:00+00:00")
+        );
+
+        persist_last_sync(dir.path(), "2026-10-10T12:01:00+00:00");
+        let second = ClusterConfig::load(dir.path()).expect("reload");
+        assert_eq!(
+            second.last_sync.as_deref(),
+            Some("2026-10-10T12:01:00+00:00")
+        );
+        assert!(second.enabled);
+        assert_eq!(second.secret, Some(key("ab")));
     }
 
-    // ReflectionMeta imported for the receive-side test below.
-    #[test]
-    fn apply_packet_lww_does_not_clobber_newer_local() {
-        let dir = temp_data_dir();
-        let db = Database::open(&dir.join("legion.db")).expect("open");
-
-        // Local row written now (fresh updated_at).
-        let local = db
-            .insert_reflection_with_meta(
-                "legion",
-                "local newer text",
-                "self",
-                &ReflectionMeta::default(),
-            )
-            .expect("insert");
-
-        // Peer delta carrying an OLDER updated_at must not overwrite.
-        let rows = vec![ReflectionDelta {
-            id: local.id.clone(),
-            repo: "legion".into(),
-            text: "stale peer text".into(),
-            created_at: "2020-01-01T00:00:00Z".into(),
-            updated_at: Some("2020-01-01T00:00:00Z".into()),
-            deleted_at: None,
-            audience: "self".into(),
-            domain: None,
-            tags: None,
-            recall_count: 0,
-            last_recalled_at: None,
-            parent_id: None,
-        }];
-        let mut seq = 0;
-        let mut packets = Vec::new();
-        pack_table(&mut packets, "node-d", &mut seq, TABLE_REFLECTIONS, &rows).expect("pack");
-        apply_packet(&db, &packets[0]);
-
-        let text: String = db
-            .conn
-            .query_row(
-                "SELECT text FROM reflections WHERE id = ?1",
-                [local.id.as_str()],
-                |r| r.get(0),
-            )
-            .expect("read back");
-        assert_eq!(text, "local newer text");
+    fn reflection_hashes(bodies: Vec<Body>) -> HashMap<String, String> {
+        bodies
+            .into_iter()
+            .filter_map(|body| match body {
+                Body::Digest(d) if d.table == "reflections" => Some(d.hashes),
+                _ => None,
+            })
+            .flatten()
+            .collect()
     }
 }

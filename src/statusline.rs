@@ -150,7 +150,7 @@ pub fn run(json: bool) {
         return;
     }
 
-    let hostname = resolve_hostname();
+    let hostname = crate::host::hostname();
     let sampled_at = Utc::now().to_rfc3339();
 
     let tail: TranscriptTail = parsed
@@ -576,10 +576,6 @@ fn write_cache(path: &Path, content: &str) {
 // ---------------------------------------------------------------------------
 // Misc helpers
 // ---------------------------------------------------------------------------
-
-pub fn resolve_hostname() -> String {
-    sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_owned())
-}
 
 fn log_error(msg: String) {
     let line = format!(

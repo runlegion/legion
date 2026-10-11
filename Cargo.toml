@@ -63,13 +63,12 @@ sha2 = "0.10"
 scip = "0.7"
 protobuf = "3"
 
-# Multi-node sync via LAN broadcast. Published crate (not the git source):
-# 0.4.0 carries the masterless multicast Gossip API + protocol v2. The old
-# unpinned git dep was frozen at 0.2.1 (TCP-era) by the lockfile.
-smugglr-core = { version = "0.4.0", default-features = false, features = ["native"] }
+# Multi-node sync: smugglr-core 0.5's masterless multicast Gossip (#1397).
+# legion keeps no transport of its own; digest heartbeat, Want/Delta,
+# AEAD sealing, and newer-wins apply are all smugglr's.
+smugglr-core = { version = "0.5.0", default-features = false, features = ["native"] }
 rand = "0.9"
 hex = "0.4"
-hostname = "0.4"
 
 # PTY spawning for watch auto-wake (#486+). Subscription billing requires
 # an interactive TTY -- portable-pty wraps native PTY on unix and ConPTY

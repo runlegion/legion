@@ -314,7 +314,7 @@ impl Database {
     fn live_identity_root_id(&self, repo: &str) -> Result<Option<String>> {
         // ORDER BY pins which id surfaces in the IdentityRootExists error
         // message when more than one live root already exists (reachable
-        // only via a guard-bypassing path like sync's apply_reflection_delta
+        // only via a guard-bypassing path like a row applied by cluster gossip
         // -- see get_identity_roots_excludes_chain_children's raw-INSERT
         // fixture for the same scenario). Newest first, matching
         // get_domain_roots's ordering, so the id in the error is
@@ -1083,7 +1083,7 @@ mod tests {
 
     /// Insert an orphan `domain='identity'` row via raw SQL, bypassing the
     /// #785 guard entirely. Simulates the legacy/pre-guard state (or a
-    /// synced-in row from `apply_reflection_delta`, which also bypasses the
+    /// row applied by cluster gossip, which also bypasses the
     /// guard) that `get_identity_roots` and `swap_identity_root` must both
     /// still handle correctly even though `insert_reflection_with_meta`
     /// itself now refuses to create a second one. Returns the new row's id.

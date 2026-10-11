@@ -351,12 +351,12 @@ impl Database {
     /// loss or SIGKILL never runs one.
     ///
     /// Soft-delete rather than DELETE so the cleanup PROPAGATES: the tombstone
-    /// is itself a delta, and [`Database::apply_persona_wake_lease_delta`]
-    /// (src/db/sync.rs:387) resolves a tombstone by plain LWW on `updated_at`,
-    /// so a peer holding a revived copy takes the delete and cannot hand the
-    /// row back. Note the guarantee is OURS, not the transport's -- smugglr's
-    /// remote_wins is last-received-wins and does not read `updated_at`, so
-    /// deleting that LWW arm would silently make this host-local again.
+    /// is itself a synced row change, and cluster gossip applies under
+    /// `newer_wins` ordered by `max(created_at, updated_at, deleted_at)`
+    /// (`sync_actor`), so a peer holding a revived copy takes the delete and
+    /// cannot hand the row back. Switching gossip to smugglr's default
+    /// `remote_wins` (last-received-wins, reads no timestamp) would silently
+    /// make this host-local again.
     ///
     /// That propagation matters because the heartbeat bug this cleanup answers
     /// rebound `expires_at` to a fresh value every tick, which moved each row's

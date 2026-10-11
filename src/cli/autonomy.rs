@@ -3,7 +3,7 @@
 use clap::Subcommand;
 
 use crate::cli::util::open_db;
-use crate::{autonomy, db, error, statusline};
+use crate::{autonomy, db, error, host};
 
 /// The kind of self-directed work a gate spend covers.
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -60,7 +60,7 @@ pub(crate) enum AutonomyAction {
 /// this host. `None` makes the autonomy ceiling fall back to a conservative
 /// default rather than running unbounded while blind to its own quota.
 fn local_weekly_headroom(db: &db::Database) -> Option<f64> {
-    let host = statusline::resolve_hostname();
+    let host = host::hostname();
     let sample = db.latest_rate_limit_sample_for_host(&host).ok()??;
     sample
         .seven_day_pct
@@ -91,7 +91,7 @@ pub(crate) fn handle(action: AutonomyAction) -> error::Result<()> {
 
             // Fetch the latest rate-limit sample for the burn-rate status line.
             // Fail-open: a DB error here is not fatal to the status display.
-            let host = statusline::resolve_hostname();
+            let host = host::hostname();
             let rate_sample: Option<crate::statusline::RateLimitSample> = database
                 .latest_rate_limit_sample_for_host(&host)
                 .unwrap_or(None);
@@ -160,7 +160,7 @@ pub(crate) fn handle(action: AutonomyAction) -> error::Result<()> {
         } => {
             // Burn-rate check runs first, before the work-unit budget.
             // Fail-open on DB error: log to stderr, proceed to work-unit gate.
-            let host = statusline::resolve_hostname();
+            let host = host::hostname();
             let rate_sample: Option<crate::statusline::RateLimitSample> = database
                 .latest_rate_limit_sample_for_host(&host)
                 .map_err(|e| {

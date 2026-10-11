@@ -436,7 +436,9 @@ fn preempt_watch_worker(locks: &watch::SessionLockTracker, repo: &str, self_pid:
         "[legion watch] session-start: interactive session on {} preempting watch-spawned worker (pid {}) -- two agents must not share a repo",
         repo, worker_pid
     );
-    if !watch::terminate_process(worker_pid) {
+    // TERM rather than KILL so the worker runs its own Stop hook, which
+    // releases its locks and finalizes its wake-attempt row.
+    if !watch::send_signal(worker_pid, "TERM") {
         eprintln!(
             "[legion watch] session-start: could not signal pid {} -- it may have already exited",
             worker_pid

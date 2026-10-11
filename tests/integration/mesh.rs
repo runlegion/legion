@@ -1,4 +1,4 @@
-//! Integration tests: mesh headroom / pick across rate-limit samples.
+//! Integration tests: mesh headroom / pick ranked from `host_status` rows.
 
 use crate::common::*;
 
@@ -35,28 +35,40 @@ fn mesh_pick_on_empty_store_exits_nonzero() {
     );
 }
 
+/// Create the store, then write one `host_status` row stamped `age_secs`
+/// ago -- the row a daemon (or gossip from a peer) would have written.
+fn seed_host(data_dir: &std::path::Path, host: &str, cpu: f64, mem: f64, age_secs: i64) {
+    // Any command opens the store and runs the schema chain.
+    run_ok(legion_cmd(data_dir).args(["mesh", "headroom", "--json"]));
+    let at = (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
+    let conn = rusqlite::Connection::open(data_dir.join("legion.db")).expect("open store");
+    conn.execute(
+        "INSERT OR REPLACE INTO host_status \
+         (hostname, cpu_pct, mem_pct, load_1m, agents_active, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, NULL, 1, ?4, ?4)",
+        rusqlite::params![host, cpu, mem, at],
+    )
+    .expect("seed host_status");
+}
+
 #[test]
 fn mesh_headroom_json_shape_pins_field_names() {
     let dir = tempfile::tempdir().unwrap();
-    seed_rate_limit_sample(dir.path(), 40.0, 55.0);
+    seed_host(dir.path(), "puck", 40.0, 55.0, 5);
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["mesh", "headroom", "--json"]));
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     let rows = parsed.as_array().expect("expected array");
-    assert!(
-        !rows.is_empty(),
-        "seed should produce at least one host row"
-    );
+    assert_eq!(rows.len(), 1);
     let row = &rows[0];
     // Contract: downstream schedulers / hooks will key on these names.
-    // A typo or camelCase flip is a silent breakage otherwise.
     for field in [
         "hostname",
         "score",
-        "fiveHourPct",
-        "sevenDayPct",
-        "lastEffectiveTokens",
-        "sampledAt",
+        "cpuPct",
+        "memPct",
+        "agentsActive",
+        "updatedAt",
         "ageSecs",
         "stale",
     ] {
@@ -65,12 +77,62 @@ fn mesh_headroom_json_shape_pins_field_names() {
             "missing field '{field}' in headroom JSON: {row}"
         );
     }
+    assert_eq!(
+        row["score"].as_f64(),
+        Some(45.0),
+        "score = 100 - max(cpu, mem)"
+    );
+}
+
+#[test]
+fn mesh_headroom_table_prints_load_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_host(dir.path(), "puck", 40.0, 55.0, 5);
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["mesh", "headroom"]));
+    for col in ["host", "score", "cpu%", "mem%", "agents", "age", "status"] {
+        assert!(stdout.contains(col), "missing column '{col}': {stdout}");
+    }
+    assert!(
+        stdout.contains("puck") && stdout.contains("fresh"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn mesh_pick_returns_host_with_lowest_max_load() {
+    let dir = tempfile::tempdir().unwrap();
+    // max(cpu, mem): laptop 80, puck 50, kestrel 60 -- puck has the most room
+    // even though laptop has the lowest CPU.
+    seed_host(dir.path(), "laptop", 10.0, 80.0, 5);
+    seed_host(dir.path(), "puck", 50.0, 30.0, 5);
+    seed_host(dir.path(), "kestrel", 60.0, 20.0, 5);
+    // A stale host with no load never wins.
+    seed_host(dir.path(), "forgotten", 0.0, 0.0, 3600);
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["mesh", "pick"]));
+    assert_eq!(stdout.trim(), "puck");
+}
+
+#[test]
+fn mesh_pick_exits_1_when_all_hosts_are_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_host(dir.path(), "puck", 10.0, 10.0, 3600);
+    seed_host(dir.path(), "laptop", 20.0, 20.0, 7200);
+
+    let out = legion_cmd(dir.path())
+        .args(["mesh", "pick"])
+        .output()
+        .expect("run legion");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no fresh host"), "got: {stderr}");
 }
 
 #[test]
 fn mesh_pick_json_shape_pins_field_names() {
     let dir = tempfile::tempdir().unwrap();
-    seed_rate_limit_sample(dir.path(), 40.0, 55.0);
+    seed_host(dir.path(), "puck", 40.0, 55.0, 5);
 
     let stdout =
         run_ok(legion_cmd(dir.path()).args(["mesh", "pick", "--json", "--for-task", "card-xyz"]));
@@ -81,47 +143,28 @@ fn mesh_pick_json_shape_pins_field_names() {
             "missing field '{field}' in pick JSON: {parsed}"
         );
     }
-    assert_eq!(
-        parsed["forTask"].as_str(),
-        Some("card-xyz"),
-        "--for-task must round-trip into the JSON payload"
-    );
+    assert_eq!(parsed["forTask"].as_str(), Some("card-xyz"));
 }
 
 #[test]
 fn mesh_pick_exclude_removes_named_host() {
     let dir = tempfile::tempdir().unwrap();
-    seed_rate_limit_sample(dir.path(), 10.0, 10.0);
-    // Figure out the host's name from headroom output.
-    let head = run_ok(legion_cmd(dir.path()).args(["mesh", "headroom", "--json"]));
-    let parsed: serde_json::Value = serde_json::from_str(&head).unwrap();
-    let host = parsed[0]["hostname"].as_str().unwrap().to_string();
+    seed_host(dir.path(), "puck", 10.0, 10.0, 5);
 
-    // Excluding the only fresh host must exit 1 with "no fresh host".
     let (_stdout, stderr) =
-        run_fail(legion_cmd(dir.path()).args(["mesh", "pick", "--exclude", &host]));
-    assert!(
-        stderr.contains("no fresh host"),
-        "error must name condition, got: {stderr}"
-    );
+        run_fail(legion_cmd(dir.path()).args(["mesh", "pick", "--exclude", "puck"]));
+    assert!(stderr.contains("no fresh host"), "got: {stderr}");
 }
 
 #[test]
 fn mesh_stale_cutoff_env_override_is_respected() {
-    // Default cutoff is 600s. Seed a sample, sleep so the sample is
-    // definitely older than 3 seconds, then run pick with a 3-second
-    // cutoff. Sample must register as stale; pick must fail.
     let dir = tempfile::tempdir().unwrap();
-    seed_rate_limit_sample(dir.path(), 40.0, 55.0);
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    seed_host(dir.path(), "puck", 40.0, 55.0, 30);
 
     let (_stdout, stderr) = run_fail(
         legion_cmd(dir.path())
             .env("LEGION_MESH_STALE_SECS", "3")
             .args(["mesh", "pick"]),
     );
-    assert!(
-        stderr.contains("no fresh host"),
-        "stale env-override path must surface the same no-fresh-host error, got: {stderr}"
-    );
+    assert!(stderr.contains("no fresh host"), "got: {stderr}");
 }

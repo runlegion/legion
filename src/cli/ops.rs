@@ -324,7 +324,7 @@ pub(crate) enum ClusterAction {
 
 #[derive(Subcommand)]
 pub(crate) enum MeshAction {
-    /// Print per-host ranked table with headroom, burn, and staleness
+    /// Print per-host ranked table: score, cpu, memory, agents, and staleness
     Headroom {
         /// Emit raw JSON instead of the human-formatted table
         #[arg(long)]
@@ -349,9 +349,9 @@ pub(crate) enum MeshAction {
     },
 }
 
-/// Mesh stale-threshold. Statusline writes on every assistant turn, so
-/// minutes of silence usually means "no session live on that host". Let
-/// operators override via env -- useful when running a flaky network
+/// Mesh stale-threshold. Every running daemon rewrites its `host_status`
+/// row each health tick, so minutes of silence means the host is not
+/// reporting. Let operators override via env -- useful when running a flaky network
 /// where 5min is too tight, or when diagnosing a specific host.
 fn resolve_stale_cutoff() -> std::time::Duration {
     let secs = std::env::var("LEGION_MESH_STALE_SECS")
@@ -364,21 +364,6 @@ fn resolve_stale_cutoff() -> std::time::Duration {
 fn round_f64(v: f64, digits: i32) -> f64 {
     let factor = 10f64.powi(digits);
     (v * factor).round() / factor
-}
-
-fn fmt_pct(v: Option<f64>) -> String {
-    match v {
-        Some(p) => format!("{:.0}", p),
-        None => "-".into(),
-    }
-}
-
-fn fmt_i64(v: Option<i64>) -> String {
-    match v {
-        Some(n) if n >= 1000 => format!("{:.0}K", n as f64 / 1000.0),
-        Some(n) => n.to_string(),
-        None => "-".into(),
-    }
 }
 
 /// Validate `--issue` as `<owner>/<repo>#<digits>` (#1258).
@@ -896,7 +881,7 @@ fn parse_duration_minutes(s: &str) -> error::Result<i64> {
     }
 }
 
-fn print_health_live(sample: &health::HealthSample) {
+fn print_health_live(sample: &health::HealthSample, threshold_pct: f64) {
     println!(
         "[legion] health @ {} ({})\n",
         sample.hostname, sample.sampled_at
@@ -944,16 +929,18 @@ fn print_health_live(sample: &health::HealthSample) {
         println!("  Load:    {:.2} / {:.2} / {:.2}", l1, l5, l15);
     }
 
-    let status: &str = if sample.pressure < 60.0 {
+    // The watch spawn gate refuses at `threshold_pct`; ELEVATED starts at
+    // three quarters of it (60% under the default 80%).
+    let status: &str = if sample.pressure < threshold_pct * 0.75 {
         "OK"
-    } else if sample.pressure < 80.0 {
+    } else if sample.pressure < threshold_pct {
         "ELEVATED"
     } else {
         "HIGH"
     };
     println!(
-        "\n  Pressure: {:.1}%  -- {} (threshold: 80%)",
-        sample.pressure, status
+        "\n  Pressure: {:.1}%  -- {} (threshold: {:.0}%)",
+        sample.pressure, status, threshold_pct
     );
     println!("  Agents:   {} active", sample.agents_active);
 }
@@ -1037,12 +1024,11 @@ fn print_health_all_hosts(samples: &[health::HealthSample]) {
     for s in hosts {
         let age: String = match chrono::DateTime::parse_from_rfc3339(&s.sampled_at) {
             Ok(dt) => {
-                let secs: i64 = (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_seconds();
-                if secs < 60 {
-                    format!("{}s ago", secs)
-                } else {
-                    format!("{}m ago", secs / 60)
-                }
+                let elapsed: std::time::Duration = (chrono::Utc::now()
+                    - dt.with_timezone(&chrono::Utc))
+                .to_std()
+                .unwrap_or_default();
+                format!("{} ago", format_age(elapsed))
             }
             Err(_) => "?".to_string(),
         };
@@ -1232,10 +1218,10 @@ pub(crate) fn handle_mesh(action: MeshAction) -> error::Result<()> {
                         serde_json::json!({
                             "hostname": h.hostname,
                             "score": round_f64(h.score, 1),
-                            "fiveHourPct": h.five_hour_pct,
-                            "sevenDayPct": h.seven_day_pct,
-                            "lastEffectiveTokens": h.last_effective_tokens,
-                            "sampledAt": h.sampled_at,
+                            "cpuPct": round_f64(h.cpu_pct, 1),
+                            "memPct": round_f64(h.mem_pct, 1),
+                            "agentsActive": h.agents_active,
+                            "updatedAt": h.updated_at,
                             "ageSecs": h.age.map(|a| a.as_secs()),
                             "stale": h.stale,
                         })
@@ -1247,22 +1233,16 @@ pub(crate) fn handle_mesh(action: MeshAction) -> error::Result<()> {
                 );
             } else if ranked.is_empty() {
                 eprintln!(
-                    "[legion] no samples yet -- run `legion statusline` on at least one node first"
+                    "[legion] no samples yet -- start the legion daemon on at least one node first"
                 );
             } else {
-                println!("host                 score    5h%    7d%   last_turn       age  status");
+                println!("host                 score   cpu%   mem%  agents       age  status");
                 for h in &ranked {
                     let age = h.age.map(format_age).unwrap_or_else(|| "-".into());
                     let status = if h.stale { "stale" } else { "fresh" };
                     println!(
-                        "{:<20} {:>6.1}  {:>5}  {:>5}  {:>10}  {:>8}  {}",
-                        h.hostname,
-                        h.score,
-                        fmt_pct(h.five_hour_pct),
-                        fmt_pct(h.seven_day_pct),
-                        fmt_i64(h.last_effective_tokens),
-                        age,
-                        status,
+                        "{:<20} {:>6.1}  {:>5.0}  {:>5.0}  {:>6}  {:>8}  {}",
+                        h.hostname, h.score, h.cpu_pct, h.mem_pct, h.agents_active, age, status,
                     );
                 }
             }
@@ -1386,10 +1366,7 @@ pub(crate) fn handle_health(
         // History mode: read from DB only
         let minutes: i64 = parse_duration_minutes(&duration_str)?;
         let since = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
-        let hostname = sysinfo::System::host_name().unwrap_or_else(|| {
-            eprintln!("[legion] warning: could not determine hostname, using 'unknown'");
-            "unknown".to_string()
-        });
+        let hostname = crate::host::hostname();
 
         let samples = if all_hosts {
             database.get_health_all_hosts(&since)?
@@ -1435,7 +1412,10 @@ pub(crate) fn handle_health(
                 serde_json::to_string_pretty(&sample).map_err(error::LegionError::Json)?
             );
         } else {
-            print_health_live(&sample);
+            let threshold_pct: f64 = crate::watch::load_config(&data_dir()?.join("watch.toml"))
+                .map(|c| c.health_threshold_pct)
+                .unwrap_or_else(|_| crate::watch::WatchConfig::default().health_threshold_pct);
+            print_health_live(&sample, threshold_pct);
 
             // Try to show trend from DB
             let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();

@@ -7,131 +7,77 @@ use std::time::{Duration, Instant};
 
 use chrono::Timelike;
 
+use smugglr_core::daemon::PidLock;
+
 use crate::error::{LegionError, Result};
 
 // -- PID Lock ----------------------------------------------------------------
 
-/// Acquire a PID lock file. Returns an error if another watcher is running.
-pub fn acquire_pid_lock(lock_path: &Path) -> Result<()> {
-    if lock_path.exists() {
-        let contents = std::fs::read_to_string(lock_path).unwrap_or_default();
-        if let Ok(pid) = contents.trim().parse::<u32>() {
-            // Check if the process is actually running
-            if process_alive(pid) {
-                return Err(LegionError::WatchAlreadyRunning(pid));
-            }
-            // Stale lock file -- process is dead, remove it
-            eprintln!("[legion watch] removing stale lock (pid {})", pid);
+/// Acquire a pid lock with smugglr-core's `PidLock`, which reclaims a lock
+/// whose holder is dead and releases the file when dropped.
+///
+/// A live holder becomes `held(pid)` so the caller names its own condition
+/// in legion's words; any other failure (an unreadable or unwritable lock
+/// file) is returned as a config error.
+fn acquire_lock(lock_path: &Path, held: impl FnOnce(u32) -> LegionError) -> Result<PidLock> {
+    PidLock::acquire(lock_path).map_err(|e| {
+        let holder: Option<u32> = std::fs::read_to_string(lock_path)
+            .ok()
+            .and_then(|c| c.trim().parse::<u32>().ok())
+            .filter(|pid| process_alive(*pid));
+        match holder {
+            Some(pid) => held(pid),
+            None => LegionError::Config(format!("lock {}: {e}", lock_path.display())),
         }
-    }
-
-    let pid = std::process::id();
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(lock_path, pid.to_string())?;
-    Ok(())
+    })
 }
 
-/// Release the PID lock file.
-pub fn release_pid_lock(lock_path: &Path) {
-    let _ = std::fs::remove_file(lock_path);
+/// Acquire the watch pid lock. Errors when another watcher is running.
+pub fn acquire_pid_lock(lock_path: &Path) -> Result<PidLock> {
+    acquire_lock(lock_path, LegionError::WatchAlreadyRunning)
 }
 
 /// Acquire the per-repo index lock, serializing `legion index` runs so an
 /// older run's stale live-paths walk snapshot cannot prune inventory rows a
 /// newer overlapping run just inserted (#722, PR #718 review).
 ///
-/// Lock lives at `<data_dir>/locks/index-<repo>.lock` and holds the same
-/// idiom as [`acquire_pid_lock`]: a live holder errors loudly with its pid
-/// (`LegionError::IndexAlreadyRunning`); a dead holder (stale lock, process
-/// no longer alive) is reclaimed and overwritten. Returns a [`PidLockGuard`]
-/// that releases the lock on drop -- callers keep the guard bound for the
-/// duration of the indexing run so it covers the walk + upsert + prune
-/// sequence.
-pub fn acquire_index_lock(data_dir: &Path, repo: &str) -> Result<PidLockGuard> {
+/// Lock lives at `<data_dir>/locks/index-<repo>.lock`: a live holder errors
+/// loudly with its pid (`LegionError::IndexAlreadyRunning`); a dead holder
+/// is reclaimed. Callers keep the returned lock bound for the duration of
+/// the indexing run so it covers the walk + upsert + prune sequence.
+pub fn acquire_index_lock(data_dir: &Path, repo: &str) -> Result<PidLock> {
     let lock_path = data_dir.join("locks").join(format!("index-{repo}.lock"));
-
-    if lock_path.exists() {
-        let contents = std::fs::read_to_string(&lock_path).unwrap_or_default();
-        if let Ok(pid) = contents.trim().parse::<u32>() {
-            if process_alive(pid) {
-                return Err(LegionError::IndexAlreadyRunning {
-                    repo: repo.to_string(),
-                    pid,
-                });
-            }
-            eprintln!("[legion index] removing stale lock (pid {pid}) for {repo}");
-        }
-    }
-
-    let pid = std::process::id();
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&lock_path, pid.to_string())?;
-    Ok(PidLockGuard(lock_path))
+    acquire_lock(&lock_path, |pid| LegionError::IndexAlreadyRunning {
+        repo: repo.to_string(),
+        pid,
+    })
 }
 
-/// RAII guard that releases the PID lock file on drop.
-///
-/// Holds the lock path and removes the file when dropped, ensuring the lock
-/// is always released even on panic or task abort.
-#[derive(Debug)]
-pub struct PidLockGuard(pub PathBuf);
+/// Whether a process with the given PID is alive: smugglr-core's probe
+/// (`kill(pid, 0)` on Unix, always `false` elsewhere). This is the single
+/// liveness probe for the whole binary -- watch locks and the daemon
+/// pidfile machinery share it so they can never disagree about whether a
+/// pidfile holder is alive (#611).
+pub(crate) use smugglr_core::daemon::is_process_running as process_alive;
 
-impl Drop for PidLockGuard {
-    fn drop(&mut self) {
-        release_pid_lock(&self.0);
-        eprintln!("[legion] released lock: {}", self.0.display());
-    }
-}
-
-/// Check whether a process with the given PID is alive.
+/// Send `signal` (e.g. "TERM", "KILL") to `pid`. Returns true when the
+/// signal was delivered; always false off Unix.
 ///
-/// Shells out to `kill -0` on Unix (signal 0 probes existence without
-/// delivering a signal; the no-unsafe invariant rules out libc::kill).
-/// Always returns `false` on non-Unix platforms where we cannot probe
-/// process state. This is the single liveness probe for the whole binary --
-/// watch locks and the daemon pidfile machinery share it so they can never
-/// disagree about whether a pidfile holder is alive (#611).
-pub(crate) fn process_alive(pid: u32) -> bool {
+/// Shells out to `kill` rather than calling libc: legion forbids `unsafe`.
+/// The one signal sender for the binary (watch worker stop, daemon stop).
+pub(crate) fn send_signal(pid: u32, signal: &str) -> bool {
     #[cfg(unix)]
     {
-        let result = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
+        std::process::Command::new("kill")
+            .args([format!("-{signal}"), pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
-        matches!(result, Ok(status) if status.success())
+            .status()
+            .is_ok_and(|s| s.success())
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
-    }
-}
-
-/// Send SIGTERM to `pid`. Returns true when the signal was delivered.
-///
-/// Shells out to `kill` for the same reason [`process_alive`] does -- one
-/// mechanism for process control across the binary, no libc dependency. TERM
-/// rather than KILL so the target runs its own Stop hook (which releases its
-/// locks and finalizes its wake-attempt row) instead of leaving the state this
-/// function exists to clean up.
-pub(crate) fn terminate_process(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let result = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        matches!(result, Ok(status) if status.success())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
+        let _ = (pid, signal);
         false
     }
 }
@@ -704,10 +650,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let lock_path = dir.path().join("test.pid");
 
-        acquire_pid_lock(&lock_path).expect("acquire lock");
+        let lock = acquire_pid_lock(&lock_path).expect("acquire lock");
         assert!(lock_path.exists());
 
-        release_pid_lock(&lock_path);
+        drop(lock);
         assert!(!lock_path.exists());
     }
 
@@ -720,7 +666,7 @@ mod tests {
         std::fs::write(&lock_path, "999999999").expect("write stale lock");
 
         // Should succeed because the process is not running
-        acquire_pid_lock(&lock_path).expect("acquire lock over stale");
+        let _lock = acquire_pid_lock(&lock_path).expect("acquire lock over stale");
     }
 
     // -- acquire_index_lock (#722) --------------------------------------------

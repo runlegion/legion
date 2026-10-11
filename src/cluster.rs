@@ -1,16 +1,14 @@
 //! Multi-node cluster sync via LAN broadcast with encryption.
 //!
-//! Legion nodes on the same subnet discover each other via UDP broadcast
-//! and synchronize reflections, cards, and schedules using delta packets.
-//! All traffic is encrypted with XChaCha20-Poly1305 using a pre-shared key.
+//! Legion nodes on the same subnet gossip over smugglr-core's multicast
+//! group (see `sync_actor`): every node heartbeats a digest of its synced
+//! rows, and a node missing rows asks for them. All traffic is sealed with
+//! XChaCha20-Poly1305 using a pre-shared key.
 //!
 //! Trust model: the PSK is the entire boundary. Schedules sync across the
 //! cluster and the schedule runner executes their commands, so possession
 //! of the secret (or compromise of any one node) is command execution on
-//! every node. Share the key accordingly. Discovery announcements are
-//! unauthenticated by design (availability only -- delta payloads stay
-//! AEAD-sealed); an on-LAN spoofer can misdirect traffic but not read or
-//! forge it.
+//! every node. Share the key accordingly.
 //!
 //! Configuration is stored in `<data_dir>/cluster.toml`:
 //! ```toml
@@ -18,6 +16,7 @@
 //! secret = "64-hex-chars"
 //! port = 31337
 //! instance_id = "hostname"
+//! interval_secs = 60
 //! last_sync = "2026-04-15T00:00:00Z"
 //! ```
 
@@ -44,6 +43,12 @@ pub struct ClusterConfig {
     /// Instance identity (defaults to hostname)
     pub instance_id: Option<String>,
 
+    /// Seconds between digest heartbeats (default: 60). Each digest carries
+    /// one pk-to-hash entry per synced row, so this sets the steady-state
+    /// bandwidth cost of the mesh.
+    #[serde(default = "default_interval_secs")]
+    pub interval_secs: u64,
+
     /// Last successful sync timestamp
     pub last_sync: Option<String>,
 
@@ -56,6 +61,10 @@ fn default_port() -> u16 {
     31337
 }
 
+fn default_interval_secs() -> u64 {
+    60
+}
+
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
@@ -63,6 +72,7 @@ impl Default for ClusterConfig {
             secret: None,
             port: default_port(),
             instance_id: None,
+            interval_secs: default_interval_secs(),
             last_sync: None,
             extra: toml::Table::new(),
         }
@@ -102,12 +112,9 @@ impl ClusterConfig {
 
     /// Resolve the instance ID, falling back to hostname.
     pub fn resolve_instance_id(&self) -> String {
-        self.instance_id.clone().unwrap_or_else(|| {
-            hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| "unknown".to_string())
-        })
+        self.instance_id
+            .clone()
+            .unwrap_or_else(crate::host::hostname)
     }
 }
 
@@ -119,15 +126,18 @@ pub fn generate_key() -> String {
 }
 
 /// Validate a hex-encoded 256-bit key.
+///
+/// Decoded by smugglr-core, the same code the sync actor keys the mesh with,
+/// so a key accepted here is a key the mesh can use.
 pub fn validate_key(key: &str) -> Result<()> {
-    let bytes =
-        hex::decode(key).map_err(|_| LegionError::Config("key must be valid hex".to_string()))?;
-    if bytes.len() != 32 {
-        return Err(LegionError::Config(
-            "key must be 64 hex characters (256-bit)".to_string(),
-        ));
-    }
-    Ok(())
+    let config = smugglr_core::broadcast::BroadcastConfig {
+        secret: Some(key.to_string()),
+        ..Default::default()
+    };
+    config
+        .encryption_key()
+        .map(|_| ())
+        .map_err(|e| LegionError::Config(e.to_string()))
 }
 
 /// Handle cluster subcommands.

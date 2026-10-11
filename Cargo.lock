@@ -1518,17 +1518,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link",
-]
-
-[[package]]
 name = "htmlescape"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2065,7 +2054,6 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "hex",
- "hostname",
  "ignore",
  "jiff",
  "jsonschema",
@@ -4091,11 +4079,12 @@ checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
 name = "smugglr-core"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e41ba9c13a82ea180f63547220ee44ebb4f763be7e2c7c0b98fbd364a68702da"
+checksum = "3b1d0409858b8957056d1e29d722c54198e6791ef1443b2235fa7eeac14d378f"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
  "hex",
@@ -4107,6 +4096,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smugglr-wire",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.18",
@@ -4114,6 +4104,15 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "smugglr-wire"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c09b29a75399ffa584a7f8b83a858e2b7779ef07d57d09bcca22c3729590191"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
