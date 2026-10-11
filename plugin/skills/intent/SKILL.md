@@ -33,7 +33,7 @@ When that prints nothing, the reference cannot be read: tell the team so, and st
 
 ## Open
 
-The surface is the argument (`/legion:intent bandz`); ask for it when it is missing. Look for an intent that already exists with `legion document list --doc-type intent --surface <surface> --json`, and when one does, read it with `legion document view <id> --json`: this is a revision.
+The surface is the argument (`/legion:intent bandz`); ask for it when it is missing. An intent belongs to a version: each major and minor version gets its own intent, and a patch needs none. Look for the intents that already exist with `legion document list --doc-type intent --surface <surface> --json`. An intent for the version being worked on, not yet built, is a revision: read it with `legion document view <id> --json`. An intent for a version already built is closed and never revised; new capability opens the intent for the next minor or major version.
 
 The words file is `~/.claude/intent/<surface>-words.md`. Create it, or read it to resume. When revising, write the current intent's statements into it first, one per line.
 
