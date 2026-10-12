@@ -20,14 +20,14 @@ Discover is where the team understands the problem before anyone designs an answ
 
 Teams run discovery the same way everywhere. The right people are in the room, not everyone. Each person writes their own sticky notes, silently and separately, so the first voice does not anchor the rest: what the problem is, who has it, what happens today, what they know and what they are guessing. The notes go on a wall, often a Miro or FigJam board. The facilitator clusters them, the room argues them down to the problem worth solving, and someone writes it up.
 
-Legion runs the same workshop with fewer moving parts:
+Legion runs the same workshop with fewer moving parts, and its room holds agents and people alike: the operator, the repo agent, and any other person or agent the service concerns are all parties, each writing their own notes and each accepting the intent.
 
 - **The words file is the board.** Each concerned party's notes go into it verbatim and unlabeled, one thought per line, gathered separately so no party anchors another. An exported board (Miro, FigJam, Mural JSON) can be the words file directly.
 - **not-hotdog is the facilitator.** It sorts every note into why and not-why, clusters what belongs together, parks the hows for later, and asks about what the wall is missing.
 - **The intent is what the wall produces**: the problem worth solving, for whom, what happens to them today, and how they meet it.
-- **Every party accepting it is the room agreeing.** Nobody leaves until it reads true to each of them.
+- **Every party accepting it is the room agreeing**, agent or person. Nobody leaves until it reads true to each of them.
 
-Keep the workshop's discipline: the right parties, not a committee; raw notes, not a polished summary written early; and the problem before any answer.
+Keep the workshop's discipline: the right parties, agents and people, not a committee; raw notes, not a polished summary written early; and the problem before any answer.
 
 ## Before you start
 
