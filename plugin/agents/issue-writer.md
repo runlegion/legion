@@ -87,7 +87,7 @@ language is the highest-leverage drift point in the whole chain.
 
 ## Which work needs a spec
 
-Work toward a major or minor version traces to that version's spec; work for a patch does not need one. When the work adds new capability toward a major or minor version and no spec covers it, do not write the issue: return `UNCLEAR: this is <major|minor> work and needs its version's intent and spec first`. A patch, a fix to a version already built, goes straight to an issue, anchored by its premise as below.
+Work toward a major or minor version traces to that version's spec; work for a patch does not need one. The spec is the requirement set itself: the FR and NFR documents on the surface (`legion document list --doc-type requirement --surface <surface>`), traced to the version's intent. A master `spec` document is optional, and its absence never means there is no spec; a requirement at draft status is still the spec. When the work adds new capability toward a major or minor version and no spec covers it, do not write the issue: return `UNCLEAR: this is <major|minor> work and needs its version's intent and spec first`. A patch, a fix to a version already built, goes straight to an issue, anchored by its premise as below.
 
 ## When no spec exists: state the premise.
 
