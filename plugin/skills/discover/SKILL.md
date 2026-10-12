@@ -40,6 +40,10 @@ Keep the workshop's discipline: the right parties, agents and people, not a comm
 2. **The workshop, when cornerstone is installed.** Run `/workshop` on the accepted intent. It discovers who the service is for and what happens to them today, from stories in their own words, and closes with what needs interface design and the UI/UX goals for each surface. Without cornerstone, free legion has no separate research step: the intent itself carries what exists today, what is broken, and what the team has seen.
 3. **The UI/UX goals.** When people will see or touch the service (the intent's `interface.users` includes humans), make sure the goals are stated before Design: the workshop's close carries them; without the workshop, ask the team for them in their words, through `/legion:intent`, as part of how the service is used. Goals say what the experience must achieve (the feeling at its moment of truth, what must be understood without being told, what must never surprise), never screens or components. When only agents use the service, there are no UI/UX goals; the agent's experience is its help text, output and errors, and Design shapes those.
 
+## Optional reviews
+
+Any party can ask to review between steps: after the intent lands, after the workshop's close, or after the UI/UX goals. When asked, stop there, show that step's output, and go on only when the reviewer says so. When legion's window exists, reviews happen there.
+
 ## Hand off
 
 Tell the team the intent id, the UI/UX goals (or that the service is agent-only), and that the next step is `/legion:design <intent id>`.
