@@ -9,7 +9,7 @@ description: |
   /legion:legion-verify.
 version: 1.0.0
 user-invocable: true
-allowed-tools: Bash, Read, Task
+allowed-tools: Bash, Read, Task, Skill
 ---
 
 # Legion Review
@@ -32,7 +32,7 @@ without guessing.
 
 2. **Weigh the change before you spend on it.** Read the diff's file list and size first; the review is sized to what changed, not run in full every time.
    - **Prose only** (docs, changelog, comments, skill and agent text, README): review it yourself, in one pass, with no agents and no refuters. Check it against the issue, check that it does not contradict itself or the code, and that every command, path and link it names is real. Security applies only to a command the text tells someone to run.
-   - **Small code** (under ~100 changed lines, or config): one combined agent covering the dimensions the diff touches. Say so in the report.
+   - **Small code** (under ~100 changed lines, or config): check the diff against the issue yourself, in one pass, then run the harness review at its small setting (`/code-review low`) for correctness, with no agent of your own. Its findings pass the same scope line as every dimension: a case, test or hardening the spec and the issue do not name is a spec gap, never a finding. You still decide and record the gate (steps 4 and 5); the harness review records nothing. Grade its findings yourself: a correctness bug inside the spec's scope is HIGH, a cleanup is LOW. They skip the refuters in step 3, because the small setting already reports only what it is confident of. Say so in the report.
    - **Everything else:** fan out, below, with only the dimensions the diff touches. `security` runs when the diff handles input, shell, secrets, files or the network; a diff that touches none of those skips it and says so.
 
    Tests, builds and lints are verify's and CI's work, not review's: never run the suite to review prose.
