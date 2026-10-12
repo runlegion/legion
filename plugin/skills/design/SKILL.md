@@ -15,7 +15,21 @@ allowed-tools: Bash, Read, Write, Agent, Artifact
 
 # /legion:design
 
-Design turns an accepted intent into something the team can build. Your goal is one package the team can agree in a single sitting: the form the thing takes and why, the interface it shows people, and the spec that builds both. You conduct; the agents do the work, each from its own rules. Each step's output is the next step's input, carried by document id.
+Design turns an accepted intent into something the team can build. Your goal is one package every concerned party, agent or person, can agree in a single sitting: the form the thing takes and why, the interface it shows people, and the spec that builds both. You conduct; the agents do the work, each from its own rules. Each step's output is the next step's input, carried by document id.
+
+## It is a design sprint, streamlined
+
+Teams run design the same way everywhere. They open out first: a mood board of what others have done, several rough concepts sketched side by side, and the one that departs from all of them on purpose. Then they make things small and test them: paper prototypes and clickable mockups in front of the people they are for, spikes and proofs of concept for the machinery. A critique tears the concepts apart, the strongest survives, and the team converges: the design is written up as a brief for whoever builds the interface and a spec for whoever builds the rest, and the room signs off.
+
+Legion runs the same sprint with fewer moving parts, and its room holds agents and people alike:
+
+- **The shaper is the open-out and the spikes**: the mood board, the rough concepts (one is always "adopt what exists", one departs from everything), the usage sketches, and toys with predictions written first.
+- **The cold read is the critique**: a fresh reader that saw only the sketches says what it would use every day and what annoys it. The toys still decide whether a concept works.
+- **/design is the prototyping table**: screens and flows on the Design canvas, for the people the service is for. An agent-only service is prototyped as its commands, output and errors.
+- **The brief and the spec are the write-up**, one for the interface and one for the build, each drawn from what the prototypes and toys showed.
+- **The package is the sign-off**: every concerned party, the operator, the repo agent and any other person or agent the service concerns, agrees it, or sends a step back.
+
+Keep the sprint's discipline: several real concepts before one, make it before you argue it, evidence over opinion, and the people and agents it is for in the room.
 
 ## Before you start
 
@@ -50,4 +64,4 @@ When the spec lands, show the team one package, in plain prose, in this order:
 3. The interface: the prototypes and the brief (or, agent-only, the usage sketches).
 4. The spec: the requirements, how many scenarios, and the questions still open.
 
-The team agrees the package or sends a step back. When it is agreed, the spec goes to the issue-writer, which places work by the architecture.
+Every party agrees the package, agent or person, or sends a step back. When it is agreed, the spec goes to the issue-writer, which places work by the architecture.
