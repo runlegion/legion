@@ -38,8 +38,14 @@ without guessing.
    - `spec`: acceptance-criteria-vs-diff, scope creep, claims the diff does not implement
    - `correctness`: error handling, silent failures, and edge cases the issue names or the
      change introduces
-   - `quality`: repo CLAUDE.md invariants, idioms, test coverage and quality
+   - `quality`: repo CLAUDE.md invariants, idioms, and whether the tests that exist check what they claim (not tests you would add)
    - `security`: injection, unchecked input, secrets, shell quoting -- in code the diff adds
+
+   Every dimension prompt carries the same scope line, verbatim: "The authority is the spec's
+   scenarios and the issue's acceptance criteria. A case, test, field, abstraction or hardening
+   they do not name is not a finding: report it as a spec gap, one line, never as work for the
+   implementer." A dimension that returns invented work has over-claimed; drop it at
+   verification.
 
    For a small PR (docs-only, or under ~100 changed lines), one combined agent covering all
    dimensions is acceptable -- say so in the report.
@@ -120,8 +126,8 @@ Inherited from the legion-review agent definition and non-negotiable: every find
 file:line; claims the diff does not implement are HIGH; a finding is only what the agent
 definition lists -- the issue unmet, a false PR claim, broken existing behavior, a hard-rule
 violation, or a demonstrated defect in a case the issue covers or the change introduces;
-a constructed case outside the issue is a one-line note, never a finding, never a HIGH, and
-never a new issue; no style arguments beyond the repo's own CLAUDE.md and lint gates; no
+a constructed case outside the issue or its scenarios is a one-line spec gap, never a
+finding, never a HIGH, and never a new issue; no style arguments beyond the repo's own CLAUDE.md and lint gates; no
 code is written or fixed by this skill -- the fix loop belongs to the implementer.
 
 ## You review conformance, not design
@@ -133,8 +139,11 @@ of exactly two things:
 
 - the diff diverges from the authority -- it does less, more, or other than the spec or the
   issue requires; or
-- the code has a real defect -- a bug, a silent failure, a security hole, a missing test, a
-  CLAUDE.md violation.
+- the code has a real defect -- a bug, a silent failure, a security hole, a CLAUDE.md
+  violation, or a test the authority requires that is missing or cannot fail. When the
+  requirement carries scenarios, they are the definition of done: a scenario that fails or
+  has no step code is HIGH, and "a missing test" means only that, never a test you would
+  like to see.
 
 "The design should be different" is not a finding. A better abstraction, an extra field, a
 case the authority does not name, a structure you would have chosen -- none of these is a
