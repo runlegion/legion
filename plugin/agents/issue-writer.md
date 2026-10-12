@@ -56,11 +56,41 @@ the intent audit.
 
 ## Issues traced to a requirement with scenarios
 
-When the requirement carries `verification.scenarios`, the issue is scope and placement only:
-- name the traced requirement and its revision number;
-- name the module whose `tests/` mirror will hold the generated `.feature` file (find it with `legion sym`; it is the module owning the behaviour's entry point);
-- `## Acceptance criteria`: one line per criterion, "scenario @criterion-<id> passes" for scenario criteria, the event and who records it for event criteria, and "CI passes";
-- no restated criteria text beyond that, no mechanism, no interface the implementer must follow beyond what already exists. The step code is where the implementer puts mechanism.
+When the requirement carries `verification.scenarios`, this section overrides the repo's issue template and anything the brief says about sections: the issue is scope and placement only, and every instance renders it the same way. If a brief asks for another shape (a template's Problem or Proposed change, the requirement restated), say so in your report and render this shape anyway.
+
+Render exactly these sections, in this order, with this wording, and nothing else:
+
+```
+## Traces to
+
+<FR-ID> as of <the requirement's updated_at from `legion document view <FR-ID> --json`> (revision <n> when the store reports one)
+
+## Scope
+
+Make the scenarios of <FR-ID> pass. The requirement is the authority; read it with `legion document view <FR-ID>`. This issue restates none of it.
+
+## Placement
+
+The generated `.feature` files go in the `tests/` tree that mirrors <the module owning the entry point, found with `legion sym`>. Do not hand-edit them.
+
+## Acceptance criteria
+
+- scenario `@criterion-<id>` passes
+- (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
+- CI passes
+
+## Depends on
+
+<FR-IDs and issue numbers this one needs first, including other repos', or "nothing">
+```
+
+Rules for this shape:
+- Never copy the requirement's text, its criteria text, or a paraphrase of either. The tag is the reference.
+- Name the placement module once. Never list criterion ids by file.
+- Write no boilerplate claim you have not checked (for example "this issue adds no mechanism"). If a sentence is not required above, leave it out.
+- Before rendering, check two things and report each as a spec gap, never as a change to the issue:
+  - a criterion that reaches a live, external or credentialed service and has no `@network`, `@credentialed` or `@local` tag on its scenario;
+  - a requirement with more than 10 criteria, which is likely too big for one PR; name it so the spec-writer or operator can split the requirement or the issue.
 
 ## When a spec exists: transcribe and narrow. Never re-derive.
 
