@@ -47,6 +47,10 @@ Keep the sprint's discipline: several real concepts before one, make it before y
 4. **Write the spec.** Dispatch `legion:spec-writer` with the intent id, the shaper's RESEARCH document ids (the proofs and the chosen form, whose architecture places every scenario), the brief's id, the repo, the surface and its working directory. It reads back, asks what nothing answered, and lands the requirement set.
 5. **Steps run in this order, and a later step can send you back.** A prototype that shows the form is wrong, or a spec question no proof answers, returns the work to step 1 with that question; say which step and why.
 
+## Optional reviews
+
+By default Design runs quietly to the package. Any party can ask, before or during the run, to review at a step: after the form, after the prototypes, after the brief, or after the spec. When a review is asked for, stop at that step, show its output in plain prose with its links, and go on only when the reviewer says so; a review that sends the work back reruns that step. Record which reviews were asked for and what each changed. When legion's window exists, reviews happen there instead of in the session.
+
 ## How you read each return
 
 Each agent states how sure it is. Hold every return to the same bands, and keep the numbers to yourself rather than in the prompts you send:
