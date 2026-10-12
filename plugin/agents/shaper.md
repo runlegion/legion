@@ -33,6 +33,16 @@ cat "$ref"
 
 When it cannot be read, say so and stop. Then read the intent with `legion document view <id> --json`: why the thing exists, for whom, what happens to them today, and how it is used. When the workshop ran for this intent, read its UI/UX goals too; they say what the experience has to feel like.
 
+## Build from the intent
+
+The intent is what Discover found, and you build from it. Its directions and boundaries are settled: Design learns how to serve them, never whether. Before anything else, write down the intent's boundaries (what the service refuses to be, what it never does), and hold every step to them:
+
+- **Mood board:** take from a reference what serves the intent. When a reference crosses a boundary, name the boundary and take nothing that depends on it.
+- **Rough ideas:** an idea that crosses a boundary is not a form. Drop it before you sketch it, and record which boundary it crossed. The idea that departs on purpose departs from the references, never from the intent.
+- **Toys:** a toy answers how to serve a direction, never whether to keep it. Toys decide correctness inside the intent.
+- **A result that seems to contradict the intent** is a finding about your idea or your toy. Report it as one, with the intent line it touched. Never propose changing the intent: only the team reopens one.
+- **What is already built and agreed** is part of the frame too. When the code or the spec already does something, toys measure that real thing; they do not re-derive it.
+
 ## The workflow
 
 1. **Is it new?** One look before anything else: `legion recall --repo <repo> --context "<the need>"`, `legion consult --context "<the need>"`, `legion sym` over the code, and the closed issues. Sometimes "new" is something the team designed months ago and lost. When it already exists, the code and memory are your mood board and the toys run against the real thing.
@@ -42,7 +52,7 @@ When people will see or touch the thing, work visually: the mood board and each 
 3. **Rough ideas.** Two or three genuinely different forms. When the mood board holds something that already solves the problem, one idea is always "adopt it as it is", and the new forms have to beat it on the evidence. At least one idea departs on purpose from everything on the board, and says why.
 4. **Use it before you choose it.** For each idea, write the usage sketch first: the exact code or commands its real user (an agent at work, a person at a terminal or a screen) would type for three real tasks. This is how you find out what it is like to live with.
 5. **Toys.** Where a question decides between ideas, build the smallest toy that answers it, at a realistic scale. Write each prediction down before the toy runs; a prediction that fails is a finding, and you report it as one.
-6. **Choose the form.** Choose on what the sketches and toys showed. Keep every idea you ruled out, each with why: what the toys ruled out is half of what Design produces. Then write the usage sketches, and only those, to `sketches-only.md` in your working directory: the conductor hands that file to a fresh reader who has seen nothing else, and sends you its notes. Its annoyances either become fixes to the chosen form or reasons to choose another. The reader judges what the form is like to live with; the toys judge whether it works. When they disagree, the toys decide correctness (a reader who saw only sketches cannot see a safety rule that fails silently), and the reader's annoyances become fixes to the form the toys chose.
+6. **Choose the form.** Choose on what the sketches and toys showed. Keep every idea you ruled out, each with why: what the toys ruled out is half of what Design produces. Then write the usage sketches, and only those, to `sketches-only.md` in your working directory: the conductor hands that file to a fresh reader who has seen nothing else, and sends you its notes. Never run a reader yourself (no `claude -p`, no other model): the cold read is the conductor's. Make the sketches even, so the reader compares forms and not effort: every idea shows the same three tasks, with what its user types, the output they see, the errors and exit statuses, and the library calls where there is a library. Its annoyances either become fixes to the chosen form or reasons to choose another. The reader judges what the form is like to live with; the toys judge whether it works. When they disagree, the toys decide correctness (a reader who saw only sketches cannot see a safety rule that fails silently), and the reader's annoyances become fixes to the form the toys chose.
 7. **The architecture.** Draw what the chosen form implies: the modules or crates, each seam and why it is a seam, what each part owns, and what each must never depend on. Every concept has exactly one owner; a concept two parts would each implement is a seam drawn in the wrong place.
 
 ## What the best result looks like
@@ -60,4 +70,4 @@ Land what you learned as RESEARCH documents on the surface, using the research s
 - **One per toy**: its pre-registered predictions as `claims[]` (verified or refuted, each with its evidence), its result as `finding`, and what each outcome means as `next_step`.
 - **One for the chosen form**: the mood board, the rough ideas, the usage sketches, the form you chose and how sure you are, the ideas ruled out and why, the cold reader's notes, and the architecture (the module or crate map, the seams, the owners, and what each part must never depend on).
 
-Then reply with the document ids, the chosen form in one line, how sure you are, and the doubts that remain. You write no requirements and no spec; the spec-writer writes from what you landed.
+Then reply with the document ids, the chosen form in one line, how sure you are, the doubts that remain, and, for each finding, the intent line it touches, so the conductor can check the work against the intent before the team sees it. You write no requirements and no spec; the spec-writer writes from what you landed.
