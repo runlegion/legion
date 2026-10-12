@@ -30,7 +30,14 @@ without guessing.
    branch; `legion issue view --repo <repo> --number <n>` for the linked issue's acceptance
    criteria. No linked issue is itself a finding (the workflow requires one).
 
-2. **Fan out review dimensions.** Spawn parallel review agents via the Task tool using
+2. **Weigh the change before you spend on it.** Read the diff's file list and size first; the review is sized to what changed, not run in full every time.
+   - **Prose only** (docs, changelog, comments, skill and agent text, README): review it yourself, in one pass, with no agents and no refuters. Check it against the issue, check that it does not contradict itself or the code, and that every command, path and link it names is real. Security applies only to a command the text tells someone to run.
+   - **Small code** (under ~100 changed lines, or config): one combined agent covering the dimensions the diff touches. Say so in the report.
+   - **Everything else:** fan out, below, with only the dimensions the diff touches. `security` runs when the diff handles input, shell, secrets, files or the network; a diff that touches none of those skips it and says so.
+
+   Tests, builds and lints are verify's and CI's work, not review's: never run the suite to review prose.
+
+   **Fan out review dimensions.** Spawn parallel review agents via the Task tool using
    subagent_type `legion:legion-review` (plugin agents register namespaced; the bare
    `legion-review` form exists only if a repo also carries a local .claude/agents copy --
    check the available-agents list if the namespaced form does not resolve), one per
@@ -47,9 +54,6 @@ without guessing.
    implementer." A dimension that returns invented work has over-claimed; drop it at
    verification.
 
-   For a small PR (docs-only, or under ~100 changed lines), one combined agent covering all
-   dimensions is acceptable -- say so in the report.
-
    **Delegation discipline.** Spawn count is the cost of this stage, not the depth of any
    one agent, so keep it deliberate. Use one agent where one will do and fan out only when
    the dimensions are genuinely independent work on a diff large enough to need them. Do
@@ -60,7 +64,7 @@ without guessing.
    spawns it unless its definition pins one, so a fan-out multiplies whatever model this
    skill is running on.
 
-3. **Adversarial verification.** For every HIGH and MED finding the dimensions return, spawn
+3. **Adversarial verification.** Prose-only reviews skip this step. For every HIGH and MED finding the dimensions return, spawn
    one refuter agent (subagent_type `legion:legion-review`) prompted to REFUTE the finding: read
    the cited code and argue it is wrong, mitigated elsewhere, or out of the PR's scope.
    Findings the refuter kills are dropped; findings that survive are reported. Record the
