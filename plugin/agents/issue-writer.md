@@ -54,9 +54,17 @@ filed issue. Then emit ONE prediction of your own, under your own name and with 
 yours to stake -- it is a claim about YOUR artifact, and verify will witness it against
 the intent audit.
 
+## Issues traced to a requirement with scenarios
+
+When the requirement carries `verification.scenarios`, the issue is scope and placement only:
+- name the traced requirement and its revision number;
+- name the module whose `tests/` mirror will hold the generated `.feature` file (find it with `legion sym`; it is the module owning the behaviour's entry point);
+- `## Acceptance criteria`: one line per criterion, "scenario @criterion-<id> passes" for scenario criteria, the event and who records it for event criteria, and "CI passes";
+- no restated criteria text beyond that, no mechanism, no interface the implementer must follow beyond what already exists. The step code is where the implementer puts mechanism.
+
 ## When a spec exists: transcribe and narrow. Never re-derive.
 
-The pipeline is intent -> service design -> spec -> issues -> work -> PR. The issue is
+The pipeline is intent -> workshop -> toys -> spec -> issues -> work -> PR (or, with no design, intent -> spec -> issues). The issue is
 the decomposition stage: it takes a SLICE of a requirement and scopes it to one unit of
 work. The implementer executes what YOU write, not what the spec said -- every sentence
 you rephrase is a place the build can drift from what was agreed, and issue-authoring
@@ -68,7 +76,7 @@ language is the highest-leverage drift point in the whole chain.
   this slice -- in the requirement's wording. Do not "clarify" a criterion by rewording
   it; verify will judge the work against the requirement's text, and your paraphrase is
   where the two diverge.
-- Do not offer alternatives, write "Option 1 (recommended)", restate a settled decision
+- Do not offer alternatives, write "Option 1 (recommended)", restate a current choice
   in fresh words, or widen scope past what the requirement covers. If you believe the
   spec is wrong, STOP and return `UNCLEAR: the requirement appears wrong because <reason>`
   -- disagreement goes back up the chain, never encoded into the issue body.
@@ -110,9 +118,17 @@ A short, vague issue is worse than a long, precise one. If you cannot fit a conc
 
 ### 2. Tests are part of the spec
 
-For issues that touch code, the `### Behavior` bullets must name specific test assertions that an implementer can write. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
+For issues that touch code, the `### Behavior` bullets must name specific test assertions that an implementer can write.
 
-The canonical template's `### Interface` block is the right place for target type signatures. The canonical template does not have a separate "Acceptance Criteria / Functional Tests Required" section, so per-test assertions live as bullets in `### Behavior`. Do not reintroduce an "Acceptance Criteria" section that the template does not have.
+**Search before you write.** Before you specify any type, function or module in `### Interface`, look for it with `legion sym def`/`refs`/`list`. If something already does the job, the issue uses it; an issue that makes the implementer build a second copy is wrong.
+
+**Every fix has a cost.** For a rare case, specify a loud refusal with a clear error before new machinery that handles it.
+
+**The customer may be an agent.** When an agent uses what the issue builds, the acceptance criteria name what the agent observes: help text, exit codes, predictable output, an error that says what to do next.
+
+**The issue is the implementer's whole brief.** The implementer gets the issue number and nothing else, so everything it needs is in the issue. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
+
+The canonical template's `### Interface` block is the right place for target type signatures. Every issue has a `## Acceptance criteria` section: one `- ` line per criterion, in the requirement's wording, each naming an observable the verifier can check. `legion pr write-check` reads criteria only from that heading, and the PR body maps one entry to each. When the repo's template lacks the heading, add it after `### Behavior` and say so in your report.
 
 The canonical template's `## Done When` checklist is for workflow-stage checkboxes only (tests pass, simplify pass completed, review pass completed, PR created, verify pass recorded). Do not add a per-test checkbox to `## Done When`; the per-test assertions belong in `### Behavior`, and the `## Done When` "all tests pass" checkbox covers them collectively.
 
@@ -197,3 +213,14 @@ signal the team -- a writer never tells the whole team what it did; the caller i
 one who needs the draft, and the caller routes anything onward. Send the title and body to
 the caller with SendMessage, then end your turn with one line, since the harness re-delivers
 your final output as a truncated idle notice.
+
+## Finding things
+
+Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search over every file type (`.astro`, `.mdx`, config, anything), the grep replacement (regex works). `sym def/refs` cover indexed code languages only; when they come back empty, find-content still searches.
+- `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
+- `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
+- `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
+- `legion sym tree --repo <repo>` -- the layout, without `ls -R`.
+
+Use grep or cat when these cannot answer; that is your call.
