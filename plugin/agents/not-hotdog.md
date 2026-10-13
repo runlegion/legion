@@ -57,7 +57,7 @@ The service's own name and the subject it works on are part of the why: a tool f
 Who uses the service and how they reach it are not mechanisms; they decide what Design makes. A service only agents use needs no interface prototype, and one people open in a browser needs one. So the intent always answers:
 
 - who uses it: agents, humans, or both;
-- how agents reach it: CLI, JSON or MCP;
+- how agents reach it: CLI, JSON, MCP, or only as a library inside another app;
 - how humans reach it: CLI or UI;
 - when there is a UI, whether it is web or native.
 
@@ -98,7 +98,7 @@ One JSON object per statement, each on its own line:
 Then one JSON object, on its own line, and stop:
 
 ```
-{"intent": {"what_it_is": "", "becoming": "", "directions": [""], "current_state": {"real": [{"text": ""}], "cut_or_broken": [{"text": "", "why": ""}], "known_gaps": [{"text": "", "when_it_matters": ""}]}, "team_observations": [""], "interface": {"users": ["agent|human"], "agent_access": ["cli|json|mcp"], "human_access": ["cli|ui"], "ui_kind": "web|native"}, "actors": [{"name": "", "type": "human|machine|end-user", "touches": "", "stakes": ""}], "boundaries": [{"owner": "", "owns": ""}], "consumers": [{"name": "", "relationship": "", "status": "built|planned|not-built"}], "open_questions": [{"id": "OQ-1", "question": "", "resolve_with": "operator|research|designer", "resolution": null}]}, "proposals": [{"statement": "<verbatim>", "reading": "<what you take it to mean>", "logic": "<why you question it>", "change": "park for the spec | park for Design | keep as the need: <need> | superseded by <statement>", "question": "<the plain question that settles it>"}], "missing": [{"field": "", "question": ""}]}
+{"intent": {"what_it_is": "", "becoming": "", "directions": [""], "current_state": {"real": [{"text": ""}], "cut_or_broken": [{"text": "", "why": ""}], "known_gaps": [{"text": "", "when_it_matters": ""}]}, "team_observations": [""], "interface": {"users": ["agent|human"], "agent_access": ["cli|json|mcp|library"], "human_access": ["cli|ui"], "ui_kind": "web|native"}, "actors": [{"name": "", "type": "human|machine|end-user", "touches": "", "stakes": ""}], "boundaries": [{"owner": "", "owns": ""}], "consumers": [{"name": "", "relationship": "", "status": "built|planned|not-built"}], "open_questions": [{"id": "OQ-1", "question": "", "resolve_with": "operator|research|designer", "resolution": null}]}, "proposals": [{"statement": "<verbatim>", "reading": "<what you take it to mean>", "logic": "<why you question it>", "change": "park for the spec | park for Design | keep as the need: <need> | superseded by <statement>", "question": "<the plain question that settles it>"}], "missing": [{"field": "", "question": ""}]}
 ```
 
 Leave out an `interface` key the words do not answer, and list it under `missing`. The composed intent carries every statement as it was said; `proposals` holds every change you would make, unmade, and the /legion:intent skill reads each one back to the team.
