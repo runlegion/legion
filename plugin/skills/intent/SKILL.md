@@ -122,7 +122,7 @@ Land the intent as a draft on the team's word, and revise it as the read-back ch
    - When the schema does not resolve, the command refuses with `no schema document declares "x-doc-type": "intent" ...` or reports more than one schema for the type. Show that refusal to the team exactly as it came, and stop. Never land an intent that has not been validated.
    - When the payload fails validation, the command prints one `<json pointer>: <message>` line per violation. Fix every one and land again.
 3. Keep what left the intent in memory, tied to the intent id, in three records:
-   - **The operator's choices**: every form, tool or mechanism the operator chose that is not already recorded, as a current choice: `legion reflect --repo <owner repo> --domain design --tags intent,<surface> --text "Current choice for <surface> (<operator>, <date>; revisable): <the choice, verbatim>"`. The shaper finds these itself and explores within them. Read the list back with the intent, so the operator accepts both together.
+   - **The operator's choices**: every form, tool or mechanism the operator chose that is not already recorded, as a current choice: `legion reflect --repo <owner repo> --domain design --tags intent,<surface> --text "Current choice for <surface> (<operator>, <date>; revisable): <the choice, verbatim>"`. Design reads the intent and nothing else, so a choice Design must build to goes into the intent itself, in the operator's words, and this record is only its history. Read the list back with the intent, so the operator sees which choices the intent carries.
    - **The research**: every "I don't know", marked code or design, with its least work to learn. `legion reflect --repo <owner repo> --domain design --tags intent,research,<surface> --text "Research for intent <id>: CODE: <each>; DESIGN: <each>"`
    - **The rest of box 5**: the mechanisms, proofs and architecture ideas nobody chose yet. A record for the spec to compare against, not a given. `legion reflect --repo <owner repo> --domain design --tags intent,parked-for-spec,<surface> --text "Parked for the spec from intent <id>: <each note, verbatim>"`
 
@@ -138,4 +138,4 @@ Then revise the intent with `meta.status: final`.
 
 ## Hand off
 
-Tell the team the intent id, and that the next step is Design. Design takes the intent id and nothing else; its agents find the operator's choices and the research themselves.
+Tell the team the intent id, and that the next step is Design. Design takes the intent id and nothing else, and works from the intent alone; what the intent does not say comes back as a question.
