@@ -7,7 +7,7 @@ description: |
   Runs the conversation as a product trio's kickoff board (the Lean UX canvas), with the session
   taking part as the engineer and writing stickies of its own; routes every question (what questions
   stay in the intent, unknowns go to research as code or design, taste or money goes to the operator);
-  has the not-hotdog agent check the board for how; reads the intent back, lands it, and hands off to
+  has the not-hotdog agent compose the intent from the stickies alone; reads the intent back, lands it, and hands off to
   Design once every concerned party accepts it: the operator and the repo agent at least, and any
   other person or agent the service concerns.
 version: 0.4.0
@@ -68,7 +68,7 @@ How it is used is part of the intent, and the intent is not done without it: who
 - **An "I don't know" goes to research**, marked **code** (a toy proves it) or **design** (design research learns it). Box 7's risks are these; box 8 is the first research for each.
 - **Taste or money goes to the operator**: ask it, briefly.
 
-Everything else, answer yourself. When the evidence, the operator's recorded words or what you know points one way, write the answer as your sticky and let the operator strike it. Ask at most a couple of questions at a pause, never a list.
+Everything else, answer yourself, as a sticky: when the evidence, the operator's recorded words or what you know points one way, write the answer on the board and into the words file, where the operator can strike it. Ask at most a couple of questions at a pause, never a list.
 
 Draft when boxes 1, 3 and 4 say what the service is, for whom and why, when the team asks, or when an intent that already exists is corrected.
 
@@ -100,16 +100,16 @@ Words: <absolute path of the words file>
 
 Its return is one line per statement with its verdict, then the composed intent, which carries every statement as it was said, with `proposals` (each change not-hotdog would make, unmade) and `missing`.
 
-not-hotdog is the check on the board, not its author. Its return is your input, never your script: you have the board, the recall and the conversation, and it has only the words.
+not-hotdog composes the intent, from the words file alone. You influence the intent only through stickies in the words file, where the operator sees each one; you never edit what not-hotdog composed.
 
 - **Parks are one line.** Box 5 and the proofs move to the spec as a group: say so once ("the mechanisms, test results and architecture go to the spec"), never as a question per statement.
-- **A proposal reaches the team only when it is real**: when a why statement carries a how that would decide what Design is for. Settle the rest yourself.
-- **A `missing` item the board, the recall or the operator's words already answer is answered**, by you, from there. Route the rest as above: only what questions and taste or money reach the operator.
-- **Compare its draft with the board.** Where it dropped or bent something the board holds, the board wins.
+- **A proposal reaches the team only when it is real**: when a why statement carries a how that would decide what Design is for. The rest are parks.
+- **A `missing` item the board, the recall or the operator's words already answer** gets that answer added to the words file as a sticky, and not-hotdog composes again. Route the rest as above: only what questions and taste or money reach the operator.
+- **Compare its draft with the board.** Where it dropped or bent something the board holds, write a clearer sticky and run not-hotdog again. Never fix the draft by hand.
 
 ## Read it back
 
-Show the team, in plain prose, the intent you composed from the board and not-hotdog's check: what it is, what it is becoming, the directions, what exists today and what is broken, what the team has seen, how it is used, the actors, boundaries and consumers, and its open questions, which are only what questions. Then the few real proposals, each as a question, the one line on what moved to the spec, and the research list, each item marked code or design.
+Show the team, in plain prose, the intent not-hotdog composed: what it is, what it is becoming, the directions, what exists today and what is broken, what the team has seen, how it is used, the actors, boundaries and consumers, and its open questions, which are only what questions. Then the few real proposals, each as a question, the operator's choices that go to Design as givens, the one line on what moved to the spec, and the research list, each item marked code or design.
 
 Ask what is wrong. Append every correction to the words file and draft again. Repeat until the team says to land it.
 
@@ -117,12 +117,12 @@ Ask what is wrong. Append every correction to the words file and draft again. Re
 
 Land the intent as a draft on the team's word, and revise it as the read-back changes it.
 
-1. Build the payload from the composed intent. The intent schema the plugin ships, resolved by its `"x-doc-type": "intent"`, is the shape, and the payload follows it. `meta` carries the team's name for it as `title`, the `surface`, `status: draft`, the agent that owns the surface as `owner` (the repo agent), today's `date`, a `purpose`, and the words file as a source of kind `doc`. The directions go in as settled bets (`status: settled`, `needs_pressure_test: false`): Design learns how to serve them, never whether. The intent carries no research target: what is true today and what the team has seen are the intent's own fields.
+1. Build the payload from not-hotdog's composed intent, with only the proposals the team agreed applied, and nothing else changed. The intent schema the plugin ships, resolved by its `"x-doc-type": "intent"`, is the shape, and the payload follows it. `meta` carries the team's name for it as `title`, the `surface`, `status: draft`, the agent that owns the surface as `owner` (the repo agent), today's `date`, a `purpose`, and the words file as a source of kind `doc`. The directions go in as settled bets (`status: settled`, `needs_pressure_test: false`): Design learns how to serve them, never whether. The intent carries no research target: what is true today and what the team has seen are the intent's own fields.
 2. Write it to a file in a fresh directory (`mktemp -d`) and land it with `legion document create --doc-type intent --owner <owner> --surface <surface> --from <file>`, or `legion document revise <id> --from <file>` for an intent that already exists. Both validate the payload against the intent schema before anything is written.
    - When the schema does not resolve, the command refuses with `no schema document declares "x-doc-type": "intent" ...` or reports more than one schema for the type. Show that refusal to the team exactly as it came, and stop. Never land an intent that has not been validated.
    - When the payload fails validation, the command prints one `<json pointer>: <message>` line per violation. Fix every one and land again.
 3. Keep what left the intent in memory, tied to the intent id, in three records:
-   - **The operator's choices**: every form, tool or mechanism the operator chose, verbatim. These are givens for Design: the conductor hands them to the shaper as the starting point it explores within, never as options to compete against. `legion reflect --repo <owner repo> --domain design --tags intent,givens,<surface> --text "Givens for Design from intent <id> (operator's choices, verbatim): <each>"`
+   - **The operator's choices**: every form, tool or mechanism the operator chose, verbatim. These are givens for Design: the shaper finds this record by the intent id and explores within it, never against it. Read the list back with the intent, so the operator accepts both together. `legion reflect --repo <owner repo> --domain design --tags intent,givens,<surface> --text "Givens for Design from intent <id> (operator's choices, verbatim): <each>"`
    - **The research**: every "I don't know", marked code or design, with its least work to learn. `legion reflect --repo <owner repo> --domain design --tags intent,research,<surface> --text "Research for intent <id>: CODE: <each>; DESIGN: <each>"`
    - **The rest of box 5**: the mechanisms, proofs and architecture ideas nobody chose yet. A record for the spec to compare against, not a given. `legion reflect --repo <owner repo> --domain design --tags intent,parked-for-spec,<surface> --text "Parked for the spec from intent <id>: <each note, verbatim>"`
 
@@ -138,4 +138,4 @@ Then revise the intent with `meta.status: final`.
 
 ## Hand off
 
-Tell the team the intent id, and that the next step is Design. Design is handed the intent, the operator's choices as givens, and the research list.
+Tell the team the intent id, and that the next step is Design. Design takes the intent id and nothing else; its agents find the givens and the research by that id.
