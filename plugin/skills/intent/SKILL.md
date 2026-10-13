@@ -122,7 +122,7 @@ Land the intent as a draft on the team's word, and revise it as the read-back ch
    - When the schema does not resolve, the command refuses with `no schema document declares "x-doc-type": "intent" ...` or reports more than one schema for the type. Show that refusal to the team exactly as it came, and stop. Never land an intent that has not been validated.
    - When the payload fails validation, the command prints one `<json pointer>: <message>` line per violation. Fix every one and land again.
 3. Keep what left the intent in memory, tied to the intent id, in three records:
-   - **The operator's choices**: every form, tool or mechanism the operator chose, verbatim. These are givens for Design: the shaper finds this record by the intent id and explores within it, never against it. Read the list back with the intent, so the operator accepts both together. `legion reflect --repo <owner repo> --domain design --tags intent,givens,<surface> --text "Givens for Design from intent <id> (operator's choices, verbatim): <each>"`
+   - **The operator's choices**: every form, tool or mechanism the operator chose that is not already recorded, as a current choice: `legion reflect --repo <owner repo> --domain design --tags intent,<surface> --text "Current choice for <surface> (<operator>, <date>; revisable): <the choice, verbatim>"`. The shaper finds these itself and explores within them. Read the list back with the intent, so the operator accepts both together.
    - **The research**: every "I don't know", marked code or design, with its least work to learn. `legion reflect --repo <owner repo> --domain design --tags intent,research,<surface> --text "Research for intent <id>: CODE: <each>; DESIGN: <each>"`
    - **The rest of box 5**: the mechanisms, proofs and architecture ideas nobody chose yet. A record for the spec to compare against, not a given. `legion reflect --repo <owner repo> --domain design --tags intent,parked-for-spec,<surface> --text "Parked for the spec from intent <id>: <each note, verbatim>"`
 
@@ -138,4 +138,4 @@ Then revise the intent with `meta.status: final`.
 
 ## Hand off
 
-Tell the team the intent id, and that the next step is Design. Design takes the intent id and nothing else; its agents find the givens and the research by that id.
+Tell the team the intent id, and that the next step is Design. Design takes the intent id and nothing else; its agents find the operator's choices and the research themselves.
