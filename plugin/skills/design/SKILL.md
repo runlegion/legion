@@ -37,7 +37,16 @@ Keep the sprint's discipline: several real concepts before one, make it before y
 - Read the intent with `legion document view <id> --json`. Design starts only from an intent the team has accepted, for a major or minor version. A patch needs no Design: say so and stop.
 - When the workshop ran for this intent, find its close and its UI/UX goals; they are inputs to the prototypes and to the shaper.
 - Make one working directory for the run, with a subdirectory per step.
-- **Write the givens.** The shaper does what it is not told not to do, so tell it. Recall the operator's recorded choices for the surface (`legion recall --repo <repo> --context "<surface> current choice"`, and the intent's `givens`, `research` and `parked-for-spec` reflections), and write `givens.md` in the working directory:
+- **Write the givens.** The shaper does what it is not told not to do, so tell it. Recall the operator's recorded choices for the surface. Recall ranks and has no tag filter, and the default five results miss them, so cast wide and read every card:
+
+  ```bash
+  legion recall --repo <repo> --context "<surface> current choice" --limit 25 --tier card
+  legion recall --repo <repo> --context "<surface> operator chose form" --limit 25 --tier card
+  legion recall --repo <repo> --context "Givens for Design from intent <intent id>" --limit 10 --tier card
+  legion recall --repo <repo> --context "Research for intent <intent id>" --limit 10 --tier card
+  ```
+
+  Pull the full text of each card that records a choice with `legion recall --repo <repo> --id <id>`. Then write `givens.md` in the working directory:
   - **The operator's choices**, verbatim with their reflection ids: every form, tool or mechanism the operator chose. These are the starting point the shaper explores within, never options it competes against.
   - **What is fixed**: what is already built and agreed, with its evidence (a merged PR, an agreed spec). A draft nobody agreed is not fixed. Nothing is out of scope unless the operator said so.
   - **The boundaries**: every consumer and neighbour the intent names, each owned by someone else. The shaper never designs for another repo's code or measures success through it.
@@ -56,7 +65,7 @@ Keep the sprint's discipline: several real concepts before one, make it before y
 
 ## Optional reviews
 
-By default Design runs quietly to the package. Any party can ask, before or during the run, to review at a step: after the form, after the prototypes, after the brief, or after the spec. When a review is asked for, stop at that step, show its output in plain prose with its links, and go on only when the reviewer says so; a review that sends the work back reruns that step. Record which reviews were asked for and what each changed. When legion's window exists, reviews happen there instead of in the session.
+By default Design runs quietly to the package, with one fixed stop: the givens read-back before the shaper is dispatched. Any party can ask, before or during the run, to review at a step: after the form, after the prototypes, after the brief, or after the spec. When a review is asked for, stop at that step, show its output in plain prose with its links, and go on only when the reviewer says so; a review that sends the work back reruns that step. Record which reviews were asked for and what each changed. When legion's window exists, reviews happen there instead of in the session.
 
 ## How you read each return
 

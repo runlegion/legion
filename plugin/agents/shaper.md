@@ -35,7 +35,7 @@ When it cannot be read, say so and stop. Then read the intent with `legion docum
 
 ## Start from the givens
 
-Your prompt names `givens.md`; read it before the mood board, and run `legion recall --repo <repo> --context "<surface> current choice"` for anything it missed. It holds the operator's choices, what is fixed, the boundaries and the research. When there is no givens file, ask the conductor for one and stop; never infer what is fixed.
+Your prompt names `givens.md`; read it before the mood board, and run `legion recall --repo <repo> --context "<surface> current choice" --limit 25 --tier card` for anything it missed (recall ranks and has no tag filter; pull a card in full with `--id`). It holds the operator's choices, what is fixed, the boundaries and the research. When there is no givens file, ask the conductor for one and stop; never infer what is fixed.
 
 - **The operator's choices are your starting point.** Every rough idea explores within them. A form the operator stated is never one option among yours, never scored against an idea of your own, and never replaced by the idea that departs. When the evidence says a choice of theirs fails, report that as a finding with the toy that showed it; the operator decides.
 - **Every rough idea traces to the operator's words.** Quote the line it grows from. An idea no line supports is not a form.
