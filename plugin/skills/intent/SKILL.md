@@ -41,9 +41,15 @@ When that prints nothing, the reference cannot be read: tell the team so, and st
 
 The surface is the argument (`/legion:intent bandz`); ask for it when it is missing. An intent belongs to a version: each major and minor version gets its own intent, and a patch needs none. Look for the intents that already exist with `legion document list --doc-type intent --surface <surface> --json`. An intent for the version being worked on, not yet built, is a revision: read it with `legion document view <id> --json`. An intent for a version already built is closed and never revised; new capability opens the intent for the next minor or major version.
 
-The words file is `~/.claude/intent/<surface>-words.md`. Create it, or read it to resume. When revising, write the current intent's statements into it first, one per line.
+The board is a legion document of type `board`, one per intent. Find it with `legion document list --doc-type board --surface <surface> --json` and read it to resume; when there is none, create it (`legion document create --doc-type board --owner <owner> --surface <surface> --from <file>`) with `meta` (`title`, `surface`, `owner`, `date`, and `intent` once the intent exists) and `stickies`. When revising an intent, put its current statements on the board first, one sticky each. Each sticky is `{"text": ...}`, with `box` once placed (`problem`, `outcomes`, `users`, `what-they-get`, `solutions`, `hypothesis`, `risks`, `least-work`) and `research` (`code` or `design`) on an unknown. Add stickies by revising the board with the whole list, so every revision keeps the history:
 
-**The words file holds the board's stickies, and no record of who wrote them.** It is the working session, like stickies on a wall, not a transcript. Every concerned party's stickies go in as they were said, yours included, in your own voice: no `## Operator` heading or any other heading naming a speaker, no speaker label, no per-line attribution, no numbers or timestamps. not-hotdog judges each sticky on what it says, and a record of who said it would only invite it to judge the speaker instead.
+```bash
+legion document view <board id> --json | jq '.payload | fromjson | .stickies += [{"text": "<sticky>", "box": "<box>"}]' > "$f" && legion document revise <board id> --from "$f"
+```
+
+Every concerned party adds to the same board: give another agent the board id, and it adds its own stickies the same way.
+
+**The board holds the stickies, and no record of who wrote them.** It is the working session, like stickies on a wall, not a transcript. Every concerned party's stickies go up as they were said, yours included, in your own voice: no speaker label, no per-sticky attribution, no numbers or timestamps in the text. not-hotdog judges each sticky on what it says, and a record of who said it would only invite it to judge the speaker instead.
 
 ## Work the board
 
@@ -58,7 +64,7 @@ The intent forms in the conversation, across many messages, often before anyone 
 7. **Riskiest assumptions**: what nobody knows yet, each marked desirability, viability or feasibility.
 8. **Least work to learn**: the smallest thing that would answer each risk.
 
-Put the board up early, in plain prose, and redraw it at each natural pause. Each sticky is short and says one thing, and each sits in one box. Place the operator's stickies; when you move one or read a terse answer, say where it went and why. Write your own stickies: what you know of the domain, what is true today, the people it serves, the risks you can see. Mark which stickies are your reading in the conversation so the operator can strike them, and append them to the words file like any other. A board you only transcribe is a board nobody led.
+Put the board up early, in plain prose, and redraw it at each natural pause. Each sticky is short and says one thing, and each sits in one box. Place the operator's stickies; when you move one or read a terse answer, say where it went and why. Write your own stickies: what you know of the domain, what is true today, the people it serves, the risks you can see. Mark which stickies are your reading in the conversation so the operator can strike them, and put them on the board like any other. A board you only transcribe is a board nobody led.
 
 How it is used is part of the intent, and the intent is not done without it: who uses the service (agents, humans, or both), how agents reach it (CLI, JSON or MCP), how humans reach it (CLI or UI), and whether a UI is web or native. These answers decide what Design makes, so they are settled on the board, never left for later.
 
@@ -68,7 +74,7 @@ How it is used is part of the intent, and the intent is not done without it: who
 - **An "I don't know" goes to research**, marked **code** (a toy proves it) or **design** (design research learns it). Box 7's risks are these; box 8 is the first research for each.
 - **Taste or money goes to the operator**: ask it, briefly.
 
-Everything else, answer yourself, as a sticky: when the evidence, the operator's recorded words or what you know points one way, write the answer on the board and into the words file, where the operator can strike it. Ask at most a couple of questions at a pause, never a list.
+Everything else, answer yourself, as a sticky: when the evidence, the operator's recorded words or what you know points one way, write the answer on the board as a sticky, where the operator can strike it. Ask at most a couple of questions at a pause, never a list.
 
 Draft when boxes 1, 3 and 4 say what the service is, for whom and why, when the team asks, or when an intent that already exists is corrected.
 
@@ -86,38 +92,38 @@ The intent usually forms before anyone loads this skill, and sometimes across se
    [ -r "$rw" ] && python3 "$rw" <candidates.md> <transcript.jsonl>... [--since YYYY-MM-DD] [--exclude word,word]
    ```
 
-   The candidates file numbers each message and gives its timestamp (`[n] <timestamp> <message>`). Those prefixes stay in the candidates file and never reach the words file.
-4. Dispatch a fresh agent (Agent tool, `general-purpose`) to choose from the candidates, so this session's picture of the build stays out of the choice. Give it the path to this skill, the candidates file, the surface, and the words file to write. It keeps only the messages about this service's what, who, why, today and use, copies each one's words verbatim and in order without its number or timestamp, and writes nothing else into the words file.
-5. Read the words file back yourself before drafting: confirm the excluded threads stayed out and that nothing in it says who said what.
+   The candidates file numbers each message and gives its timestamp (`[n] <timestamp> <message>`). Those prefixes stay in the candidates file and never reach the board.
+4. Dispatch a fresh agent (Agent tool, `general-purpose`) to choose from the candidates, so this session's picture of the build stays out of the choice. Give it the path to this skill, the candidates file, and the board id. It keeps only the messages about this service's what, who, why, today and use, adds each one's words verbatim and in order as a sticky without its number or timestamp, and adds nothing else to the board.
+5. Read the board back yourself before drafting: confirm the excluded threads stayed out and that nothing in it says who said what.
 
 ## Check the board with not-hotdog
 
 Dispatch the agent with the Agent tool, `subagent_type: "legion:not-hotdog"`, and a prompt that is exactly:
 
 ```
-Words: <absolute path of the words file>
+Board: <board id>
 ```
 
 Its return is one line per statement with its verdict, then the composed intent, which carries every statement as it was said, with `proposals` (each change not-hotdog would make, unmade) and `missing`.
 
-not-hotdog composes the intent, from the words file alone. You influence the intent only through stickies in the words file, where the operator sees each one; you never edit what not-hotdog composed.
+not-hotdog composes the intent from the board alone. You influence the intent only through stickies on the board, where the operator sees each one; you never edit what not-hotdog composed.
 
 - **Parks are one line.** Box 5 and the proofs move to the spec as a group: say so once ("the mechanisms, test results and architecture go to the spec"), never as a question per statement.
 - **A proposal reaches the team only when it is real**: when a why statement carries a how that would decide what Design is for. The rest are parks.
-- **A `missing` item the board, the recall or the operator's words already answer** gets that answer added to the words file as a sticky, and not-hotdog composes again. Route the rest as above: only what questions and taste or money reach the operator.
+- **A `missing` item the board, the recall or the operator's words already answer** gets that answer added to the board as a sticky, and not-hotdog composes again. Route the rest as above: only what questions and taste or money reach the operator.
 - **Compare its draft with the board.** Where it dropped or bent something the board holds, write a clearer sticky and run not-hotdog again. Never fix the draft by hand.
 
 ## Read it back
 
 Show the team, in plain prose, the intent not-hotdog composed: what it is, what it is becoming, the directions, what exists today and what is broken, what the team has seen, how it is used, the actors, boundaries and consumers, and its open questions, which are only what questions. Then the few real proposals, each as a question, the operator's choices that go to Design as givens, the one line on what moved to the spec, and the research list, each item marked code or design.
 
-Ask what is wrong. Append every correction to the words file and draft again. Repeat until the team says to land it.
+Ask what is wrong. Put every correction on the board and draft again. Repeat until the team says to land it.
 
 ## Land it
 
 Land the intent as a draft on the team's word, and revise it as the read-back changes it.
 
-1. Build the payload from not-hotdog's composed intent, with only the proposals the team agreed applied, and nothing else changed. The intent schema the plugin ships, resolved by its `"x-doc-type": "intent"`, is the shape, and the payload follows it. `meta` carries the team's name for it as `title`, the `surface`, `status: draft`, the agent that owns the surface as `owner` (the repo agent), today's `date`, a `purpose`, and the words file as a source of kind `doc`. The directions go in as settled bets (`status: settled`, `needs_pressure_test: false`): Design learns how to serve them, never whether. The intent carries no research target: what is true today and what the team has seen are the intent's own fields.
+1. Build the payload from not-hotdog's composed intent, with only the proposals the team agreed applied, and nothing else changed. The intent schema the plugin ships, resolved by its `"x-doc-type": "intent"`, is the shape, and the payload follows it. `meta` carries the team's name for it as `title`, the `surface`, `status: draft`, the agent that owns the surface as `owner` (the repo agent), today's `date`, a `purpose`, and the board's id as a source of kind `doc`. Then revise the board with the intent's id in its `meta.intent`. The directions go in as settled bets (`status: settled`, `needs_pressure_test: false`): Design learns how to serve them, never whether. The intent carries no research target: what is true today and what the team has seen are the intent's own fields.
 2. Write it to a file in a fresh directory (`mktemp -d`) and land it with `legion document create --doc-type intent --owner <owner> --surface <surface> --from <file>`, or `legion document revise <id> --from <file>` for an intent that already exists. Both validate the payload against the intent schema before anything is written.
    - When the schema does not resolve, the command refuses with `no schema document declares "x-doc-type": "intent" ...` or reports more than one schema for the type. Show that refusal to the team exactly as it came, and stop. Never land an intent that has not been validated.
    - When the payload fails validation, the command prints one `<json pointer>: <message>` line per violation. Fix every one and land again.
@@ -128,7 +134,7 @@ Land the intent as a draft on the team's word, and revise it as the read-back ch
 
 ## Accept it
 
-The intent is done when every concerned party accepts it. The operator and the repo agent are always among them; the repo agent is the agent that owns the surface, the intent's `meta.owner`. When a party is you, read the intent against what you know and say whether you accept it, and why not if you do not. When it is another agent, put the intent to it with `legion signal --to <agent> --verb question` and wait for its answer; when it is another person, ask them. A refusal from any party is a correction: append it to the words file and draft again.
+The intent is done when every concerned party accepts it. The operator and the repo agent are always among them; the repo agent is the agent that owns the surface, the intent's `meta.owner`. When a party is you, read the intent against what you know and say whether you accept it, and why not if you do not. When it is another agent, put the intent to it with `legion signal --to <agent> --verb question` and wait for its answer; when it is another person, ask them. A refusal from any party is a correction: put it on the board and draft again.
 
 When every party accepts it, record each acceptance on the intent id, in the words it was given, one reflection per party:
 

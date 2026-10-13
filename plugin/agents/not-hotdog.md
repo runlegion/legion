@@ -5,15 +5,15 @@ description: |
   classifies each statement as why, not-why or mixed, proposes every change it would make without
   making one, and composes the whole intent: what it is, what exists today and what is broken, what
   the team has seen, and how it is used (by agents, by humans, and through which interface).
-  Dispatched by the /legion:intent skill with a words file and nothing else; returns the composed
+  Dispatched by the /legion:intent skill with a board id and nothing else; returns the composed
   intent, its proposals and what is missing, then stops.
 
   <example>
   Context: The /legion:intent skill has gathered the team's words about a service
-  user: "Words: /Users/me/.claude/intent/bandz-words.md"
+  user: "Board: 01a136f5-..."
   assistant: "I'll use the not-hotdog agent to classify each statement and compose the intent."
   <commentary>
-  not-hotdog sees only the words, never the session that gathered them, so the session's picture
+  not-hotdog sees only the board, never the session that gathered it, so the session's picture
   of the build cannot leak into the intent.
   </commentary>
   </example>
@@ -36,7 +36,7 @@ ref="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/references/process.md}"
 
 When that prints nothing, the reference cannot be read: return one line saying so, and stop. There is no other copy of the process to read instead.
 
-Then the words file your prompt names, with Read. It is your only input. It holds the team's words about the service, every concerned party's (the operator's, the repo agent's, and any other person's or agent's the service concerns), verbatim, in the order they were said, with no record of who said them; judge each statement on what it says, never on who you guess said it. When an intent is being revised, its current statements come first.
+Then the board your prompt names: `legion document view <board id> --json`, whose payload's `stickies` are the words, in order (each sticky's `text`, with its `box` when placed). It is your only input; anything else in your prompt is not yours to use. It holds the team's words about the service, every concerned party's (the operator's, the repo agent's, and any other person's or agent's the service concerns), verbatim, in the order they were said, with no record of who said them; judge each statement on what it says, never on who you guess said it. When an intent is being revised, its current statements come first.
 
 ## Why, or not-why
 
