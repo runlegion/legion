@@ -19,10 +19,10 @@ Design turns an accepted intent into something the team can build. Your goal is 
 
 ## It is a design sprint, streamlined
 
-Legion runs a streamlined design sprint, and its room holds agents and people alike. The intent says what the thing is and the operator's recorded choices say what form it takes; Design makes that form concrete, proves it, and writes it up. It invents no alternatives.
+Legion runs a streamlined design sprint, and its room holds agents and people alike. The intent says what the thing is and what form it takes, and Design works from the intent alone: it makes that form concrete, proves it, and writes it up. It invents no alternatives and fills no gap with a guess; a gap is a question for the operator.
 
-- **The shaper is the spikes**: it writes down the operator's form, filled out from the intent, sketches how it is used, and proves it with toys whose predictions are written first. A form the toys show will not work goes back to the operator.
-- **The cold read is the critique**: a fresh reader that saw only the operator's choices and the sketch says what annoys it and where the sketch departs from the choices. The toys still decide whether it works.
+- **The shaper is the spikes**: it writes down the form the intent describes, sketches how it is used, and proves it with toys whose predictions are written first. A form the toys show will not work goes back to the operator.
+- **The cold read is the critique**: a fresh reader that saw only the intent's lines and the sketch says what annoys it and where the sketch departs from the intent. The toys still decide whether it works.
 - **/design is the prototyping table**: screens and flows on the Design canvas, for the people the service is for. An agent-only service is prototyped as its commands, output and errors.
 - **The brief and the spec are the write-up**, one for the interface and one for the build, each drawn from what the prototypes and toys showed.
 - **The package is the sign-off**: every concerned party, the operator, the repo agent and any other person or agent the service concerns, agrees it, or sends a step back.
@@ -37,7 +37,7 @@ Keep the sprint's discipline: make it before you argue it, evidence over opinion
 - Read the intent with `legion document view <id> --json`. Start only when its `meta.status` is `final`. A draft has not been accepted: say so and stop. A patch needs no Design: say so and stop.
 - Make one working directory for the run, with a subdirectory per step.
 
-**Every dispatch is exactly its template**, ids and paths only, nothing added: no summary, no context, no emphasis, no correction in your own words. Each agent reads the intent, the operator's recorded choices and its inputs itself, by id.
+**Every dispatch is exactly its template**, ids and paths only, nothing added: no summary, no context, no emphasis, no correction in your own words. Each agent reads the intent and its inputs itself, by id.
 
 ## The steps
 
@@ -48,9 +48,9 @@ Keep the sprint's discipline: make it before you argue it, evidence over opinion
    Workdir: <working directory>/shape
    ```
 
-   It finds the operator's recorded choices itself, writes down the form they describe, sketches it, proves it with toys and draws its architecture. Its return lists the operator's recorded choices it found, the RESEARCH document ids, the form, the questions for the operator, how sure it is, and the doubts that remain. Bring its questions to the operator, and resume the shaper with the operator's answers verbatim.
-   **Check the return against the choices it listed, before anything else**, whatever its confidence. When the form replaces or demotes an operator's choice, adds a part no intent line or choice asks for, offers alternatives of its own, coins a name for something the operator named, puts something out of scope or calls a draft agreed, designs for or measures through a boundary, or turns toy scaffolding into the design, resume it with exactly `Breaks given <reflection id or intent field>: <the given or intent line, verbatim>`, one line per given. When you are unsure whether a given is broken, ask the operator; never argue it with the shaper.
-1b. **The cold read.** Spawn a new Agent (model sonnet) that has seen nothing else, with exactly: `Read <workdir>/shape/sketches-only.md. What annoys you about using this, and where does the sketch depart from the operator's choices quoted at its top?` Never reuse an agent that has read other designs. Resume the shaper with the reader's reply verbatim, nothing added; the toys still decide correctness.
+   It works from the intent alone, writes down the form the intent describes, sketches it, proves it with toys and draws its architecture. Its return lists the intent lines the form grows from, the RESEARCH document ids, the form, the questions for the operator, how sure it is, and the doubts that remain. Bring its questions to the operator, and resume the shaper with the operator's answers verbatim.
+   **Check the return against the intent, before anything else**, whatever its confidence. When the form departs from the intent, adds a part no intent line asks for, fills a gap with a guess instead of a question, names a library or tool the intent does not, offers alternatives of its own, coins a name for something the intent names, puts something out of scope or calls a draft agreed, designs for or measures through a boundary, or turns toy scaffolding into the design, resume it with exactly `Breaks intent <field>: <the line, verbatim>`, one line per break. When you are unsure, ask the operator; never argue it with the shaper.
+1b. **The cold read.** Spawn a new Agent (model sonnet) that has seen nothing else, with exactly: `Read <workdir>/shape/sketches-only.md. What annoys you about using this, and where does the sketch depart from, or add to, the intent lines quoted at its top?` Never reuse an agent that has read other designs. Resume the shaper with the reader's reply verbatim, nothing added; the toys still decide correctness.
 2. **Make the prototypes (frontstage), on /design.** When people use the service (the intent's `interface.users` includes humans), run `/legion:prototype <intent id>`; it reads the intent and the form itself. When only agents use it, there is nothing to prototype; the shaper's usage sketches are the agent's interface, and the brief is drawn from them.
 3. **Write the brief.** Dispatch `legion:brief-writer` with exactly:
 
@@ -78,7 +78,7 @@ By default Design runs quietly to the package. Any party can ask, before or duri
 
 ## How you read each return
 
-Each agent states how sure it is. The givens check comes first: a return that breaks a given goes back however sure the agent is. When a band says to talk a doubt through, ask the agent its doubt and take its answer; you do not supply one. Then hold every return to the same bands, and keep the numbers to yourself rather than in the prompts you send:
+Each agent states how sure it is. The intent check comes first: a return that departs from the intent goes back however sure the agent is. When a band says to talk a doubt through, ask the agent its doubt and take its answer; you do not supply one. Then hold every return to the same bands, and keep the numbers to yourself rather than in the prompts you send:
 
 - **0.68 and above:** go on to the next step.
 - **0.50 to 0.67:** stop and talk it through before going on: ask the agent what it is unsure of and why, consult the advisor or a fresh model with the doubt, and decide whether it is a defect or only a weaker point. A defect goes back to its step.
