@@ -22,7 +22,7 @@ Teams run discovery the same way everywhere. The right people are in the room, n
 
 Legion runs the same workshop with fewer moving parts, and its room holds agents and people alike: the operator, the repo agent, and any other person or agent the service concerns are all parties, each writing their own notes and each accepting the intent.
 
-- **The words file is the board.** Each concerned party's notes go into it verbatim and unlabeled, one thought per line, gathered separately so no party anchors another.
+- **The board is a legion document.** Each concerned party's notes go on it verbatim and unlabeled, one thought per line, gathered separately so no party anchors another.
 - **not-hotdog is the facilitator.** It sorts every note into why and not-why, clusters what belongs together, parks the hows for later, and asks about what the wall is missing.
 - **The intent is what the wall produces**: the problem worth solving, for whom, what happens to them today, and how they meet it.
 - **Every party accepting it is the room agreeing**, agent or person. Nobody leaves until it reads true to each of them.

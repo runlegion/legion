@@ -878,10 +878,10 @@ impl Database {
     }
 }
 
-/// The six document types whose schemas ship with the plugin (#1390, #1387),
+/// The seven document types whose schemas ship with the plugin (#1390, #1387),
 /// each embedded at build time from `plugin/schemas/`. The name is the
 /// shipped file, kept so a refusal can name it.
-const SHIPPED_SCHEMAS: [(&str, &str, &str); 6] = [
+const SHIPPED_SCHEMAS: [(&str, &str, &str); 7] = [
     (
         "intent",
         "plugin/schemas/intent.schema.json",
@@ -912,9 +912,14 @@ const SHIPPED_SCHEMAS: [(&str, &str, &str); 6] = [
         "plugin/schemas/prototype.schema.json",
         include_str!("../plugin/schemas/prototype.schema.json"),
     ),
+    (
+        "board",
+        "plugin/schemas/board.schema.json",
+        include_str!("../plugin/schemas/board.schema.json"),
+    ),
 ];
 
-/// Whether `doc_type` is one of the six types whose schema ships with the
+/// Whether `doc_type` is one of the seven types whose schema ships with the
 /// plugin, so a caller knows when first use applies.
 pub(crate) fn is_shipped_schema_type(doc_type: &str) -> bool {
     SHIPPED_SCHEMAS.iter().any(|(t, _, _)| *t == doc_type)
@@ -956,8 +961,8 @@ impl Database {
     }
 
     /// First use (#1390): make sure the store holds exactly the shipped
-    /// schema for each of intent, brief, requirement, nfr, research and
-    /// prototype.
+    /// schema for each of intent, brief, requirement, nfr, research,
+    /// prototype and board.
     ///
     /// A type with no schema gets the shipped one landed. A type with one
     /// schema whose content differs gets it revised in place, so the store
@@ -2111,17 +2116,18 @@ mod tests {
 
     // -- first use: shipped schemas (#1390) ----------------------------------
 
-    const SHIPPED_TYPES: [&str; 6] = [
+    const SHIPPED_TYPES: [&str; 7] = [
         "intent",
         "brief",
         "requirement",
         "nfr",
         "research",
         "prototype",
+        "board",
     ];
 
     #[test]
-    fn first_use_lands_six_schemas_in_empty_store() {
+    fn first_use_lands_seven_schemas_in_empty_store() {
         let db = test_db();
         db.ensure_shipped_schemas().expect("first use");
         for doc_type in SHIPPED_TYPES {
