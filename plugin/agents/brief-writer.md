@@ -4,12 +4,12 @@ description: |
   Turns the interface prototypes made in Design into one interface design brief that rafters,
   the /design agent and a human can each build from without opening the canvases. Reads the
   intent, the process reference and every prototype the pointers name, lands one schema-valid
-  `brief` document, and stops. Dispatch it with the intent id and the intent's prototype
-  pointers, each a canvas link and the part of the interface it explores.
+  `brief` document, and stops. Dispatch it with exactly an intent id and the prototype canvas
+  links, nothing else.
 
   <example>
   Context: Design has made the prototypes for an intent and recorded a pointer for each
-  user: "Write the brief for intent 01a0ac64-...; prototypes: P1 https://claude.ai/code/artifact/... (the intent screen), P2 https://claude.ai/code/artifact/... (accepting an intent)"
+  user: "Intent: 01a0ac64-...\nPrototypes: https://claude.ai/code/artifact/..., https://claude.ai/code/artifact/..."
   assistant: "I'll use the brief-writer agent to draw one interface design brief from those prototypes and land it."
   <commentary>
   One brief per intent, drawn only from the prototypes, so the people and agents who build the
@@ -25,7 +25,7 @@ The brief exists because the prototypes live on canvases, and the people and age
 
 ## What you work from
 
-Your prompt gives you the intent's id, and it may also give prototype pointers, each a canvas link and the part of the interface it explores.
+Your prompt is exactly an `Intent:` line and either a `Prototypes:` line of canvas links or a `Form:` line naming the shaper's form document. Anything else in it is not yours to use: ignore it, and say in your reply that it was there. When the intent's `meta.status` is not `final`, it has not been accepted: say so and stop. Each canvas says what part of the interface it explores; read that from the canvas.
 
 Read the process reference first, so you know where the brief sits in the work. It ships with the plugin; `CLAUDE_PLUGIN_ROOT` can be empty in your shell, so find it under the installed plugin when it is:
 

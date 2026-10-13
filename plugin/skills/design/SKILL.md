@@ -6,7 +6,7 @@ description: |
   (/legion:prototype on the Design canvas), draw the design brief from them (brief-writer), and write
   the spec from the prose, the proofs and the brief (spec-writer). Load it yourself when an intent
   has been accepted and the team is ready to design; the operator can also invoke
-  /legion:design <intent id>. It ends with one package the team agrees: the form, the brief, and the
+  /legion:design <intent id>; it takes the intent id and nothing else. It ends with one package the team agrees: the form, the brief, and the
   spec. Major and minor versions only; a patch goes straight to an issue.
 version: 0.1.0
 user-invocable: true
@@ -15,7 +15,7 @@ allowed-tools: Bash, Read, Write, Agent, Artifact
 
 # /legion:design
 
-Design turns an accepted intent into something the team can build. Your goal is one package every concerned party, agent or person, can agree in a single sitting: the form the thing takes and why, the interface it shows people, and the spec that builds both. You conduct; the agents do the work, each from its own rules. Each step's output is the next step's input, carried by document id.
+Design turns an accepted intent into something the team can build. Your goal is one package every concerned party, agent or person, can agree in a single sitting: the form the thing takes and why, the interface it shows people, and the spec that builds both. You conduct; the agents do the work, each from its own rules. Each step's output is the next step's input, carried by document id, and the intent id is the only thing you bring.
 
 ## It is a design sprint, streamlined
 
@@ -31,45 +31,56 @@ Legion runs the same sprint with fewer moving parts, and its room holds agents a
 
 Keep the sprint's discipline: several real concepts before one, make it before you argue it, evidence over opinion, and the people and agents it is for in the room.
 
-## Before you start
+## The intent id is your only input
+
+`/legion:design <intent id>` takes the id and nothing else. Ignore everything else you know: this conversation, the words that formed the intent, your own memory of the surface, any argument for how it should work. The intent was accepted as written; your picture of it is not the intent, and every run where the conductor carried its picture forward changed the intent. You never revise the intent, never restate it, and never write a word an agent will read as input.
 
 - Read the process reference (`references/process.md` in the installed plugin).
-- Read the intent with `legion document view <id> --json`. Design starts only from an intent the team has accepted, for a major or minor version. A patch needs no Design: say so and stop.
-- When the workshop ran for this intent, find its close and its UI/UX goals; they are inputs to the prototypes and to the shaper.
+- Read the intent with `legion document view <id> --json`. Start only when its `meta.status` is `final`. A draft has not been accepted: say so and stop. A patch needs no Design: say so and stop.
 - Make one working directory for the run, with a subdirectory per step.
-- **Write the givens.** The shaper does what it is not told not to do, so tell it. Recall the operator's recorded choices for the surface. Recall ranks and has no tag filter, and the default five results miss them, so cast wide and read every card:
 
-  ```bash
-  legion recall --repo <repo> --context "<surface> current choice" --limit 25 --tier card
-  legion recall --repo <repo> --context "<surface> operator chose form" --limit 25 --tier card
-  legion recall --repo <repo> --context "Givens for Design from intent <intent id>" --limit 10 --tier card
-  legion recall --repo <repo> --context "Research for intent <intent id>" --limit 10 --tier card
-  ```
-
-  Pull the full text of each card that records a choice with `legion recall --repo <repo> --id <id>`. Then write `givens.md` in the working directory:
-  - **The operator's choices**, verbatim with their reflection ids: every form, tool or mechanism the operator chose. These are the starting point the shaper explores within, never options it competes against.
-  - **What is fixed**: what is already built and agreed, with its evidence (a merged PR, an agreed spec). A draft nobody agreed is not fixed. Nothing is out of scope unless the operator said so.
-  - **The boundaries**: every consumer and neighbour the intent names, each owned by someone else. The shaper never designs for another repo's code or measures success through it.
-  - **The research**: each "I don't know" from the intent, marked code (the shaper's toys) or design (/legion:prototype or design research).
-  Show the givens to the operator in plain prose, briefly, and go on when they say so or correct it. A shaper sent without givens invents them.
+**Every dispatch is exactly its template**, ids and paths only, nothing added: no summary, no context, no emphasis, no correction in your own words. Each agent reads the intent, the operator's recorded choices and its inputs itself, by id.
 
 ## The steps
 
-1. **Find the form (backstage).** Dispatch `legion:shaper` with the intent id, the repo, the surface, its working directory and the path to `givens.md`. It works quietly: mood board, rough ideas, usage sketches, toys, the chosen form and its architecture. Read its return: the RESEARCH document ids, the chosen form, how sure it is, and the doubts that remain.
-   **Check it against the givens before anything else**, whatever its confidence. Send it back, naming the given, when the chosen form replaces or demotes an operator's choice, when it coins a name for something the operator already named, when it put something out of scope or called a draft agreed, when it designs for or measures through a boundary, or when a structure a toy needed (a dialect, a workflow, a store) became the design without the operator's words calling for it.
-1b. **The cold read.** Spawn a new Agent (model sonnet) that has seen nothing else, give it the shaper's `sketches-only.md` and the operator's choices from `givens.md`, and ask which form it would reach for every day, what annoys it, and where a sketch departs from what the operator chose. A reader shown only the shaper's sketches ratifies whatever it is shown. Never reuse an agent that has read other designs. Send its notes to the shaper (resume it), which fixes the chosen form or reconsiders; the toys still decide correctness.
-2. **Make the prototypes (frontstage), on /design.** When people use the service (the intent's `interface.users` includes humans), run `/legion:prototype` for the intent, guided by the workshop's UI/UX goals and the chosen form, so the screens show the form, not a guess at it. When only agents use it, there is nothing to prototype; the shaper's usage sketches are the agent's interface, and the brief is drawn from them.
-3. **Write the brief.** Dispatch `legion:brief-writer` with the intent id and the prototype pointers (or, for an agent-only service, the shaper's form document). It lands one brief document.
-4. **Write the spec.** Dispatch `legion:spec-writer` with the intent id, the shaper's RESEARCH document ids (the proofs and the chosen form, whose architecture places every scenario), the brief's id, the repo, the surface and its working directory. It reads back, asks what nothing answered, and lands the requirement set.
-5. **Steps run in this order, and a later step can send you back.** A prototype that shows the form is wrong, or a spec question no proof answers, returns the work to step 1 with that question; say which step and why.
+1. **Find the form (backstage).** Dispatch `legion:shaper` with exactly:
+
+   ```
+   Intent: <intent id>
+   Workdir: <working directory>/shape
+   ```
+
+   It finds the operator's recorded choices itself and works inside them: mood board, rough ideas, usage sketches, toys, the chosen form and its architecture. Its return lists the givens it found, the RESEARCH document ids, the chosen form, how sure it is, and the doubts that remain.
+   **Check the return against the givens it listed, before anything else**, whatever its confidence. When the chosen form replaces or demotes an operator's choice, coins a name for something the operator named, puts something out of scope or calls a draft agreed, designs for or measures through a boundary, or turns toy scaffolding into the design, resume it with exactly `Breaks given <reflection id>: <the given, verbatim>`, one line per given. When you are unsure whether a given is broken, ask the operator; never argue it with the shaper.
+1b. **The cold read.** Spawn a new Agent (model sonnet) that has seen nothing else, with exactly: `Read <workdir>/shape/sketches-only.md and <workdir>/shape/givens.md. Which form would you reach for every day, what annoys you about each, and where does a sketch depart from the givens?` Never reuse an agent that has read other designs. Resume the shaper with the reader's reply verbatim, nothing added; the toys still decide correctness.
+2. **Make the prototypes (frontstage), on /design.** When people use the service (the intent's `interface.users` includes humans), run `/legion:prototype <intent id>`; it reads the intent and the chosen form itself. When only agents use it, there is nothing to prototype; the shaper's usage sketches are the agent's interface, and the brief is drawn from them.
+3. **Write the brief.** Dispatch `legion:brief-writer` with exactly:
+
+   ```
+   Intent: <intent id>
+   Prototypes: <canvas link>, <canvas link>
+   ```
+
+   (or, for an agent-only service, `Form: <the shaper's form document id>` in place of the prototypes). It lands one brief document.
+4. **Write the spec.** Dispatch `legion:spec-writer` with exactly:
+
+   ```
+   Intent: <intent id>
+   Research: <RESEARCH id>, <RESEARCH id>
+   Brief: <brief id>
+   Workdir: <working directory>/spec
+   ```
+
+   It reads back, asks what nothing answered, and lands the requirement set.
+5. **Steps run in this order, and a later step can send you back.** A prototype that shows the form is wrong, or a spec question no proof answers, returns the work to step 1. The way back is the operator's words or the later agent's words, verbatim, never your summary of them.
 
 ## Optional reviews
 
-By default Design runs quietly to the package, with one fixed stop: the givens read-back before the shaper is dispatched. Any party can ask, before or during the run, to review at a step: after the form, after the prototypes, after the brief, or after the spec. When a review is asked for, stop at that step, show its output in plain prose with its links, and go on only when the reviewer says so; a review that sends the work back reruns that step. Record which reviews were asked for and what each changed. When legion's window exists, reviews happen there instead of in the session.
+By default Design runs quietly to the package. Any party can ask, before or during the run, to review at a step: after the form, after the prototypes, after the brief, or after the spec. When a review is asked for, stop at that step, show its output in plain prose with its links, and go on only when the reviewer says so; a review that sends the work back reruns that step. Record which reviews were asked for and what each changed. When legion's window exists, reviews happen there instead of in the session.
 
 ## How you read each return
 
-Each agent states how sure it is. The givens check comes first: a return that breaks a given goes back however sure the agent is. Then hold every return to the same bands, and keep the numbers to yourself rather than in the prompts you send:
+Each agent states how sure it is. The givens check comes first: a return that breaks a given goes back however sure the agent is. When a band says to talk a doubt through, ask the agent its doubt and take its answer; you do not supply one. Then hold every return to the same bands, and keep the numbers to yourself rather than in the prompts you send:
 
 - **0.68 and above:** go on to the next step.
 - **0.50 to 0.67:** stop and talk it through before going on: ask the agent what it is unsure of and why, consult the advisor or a fresh model with the doubt, and decide whether it is a defect or only a weaker point. A defect goes back to its step.
