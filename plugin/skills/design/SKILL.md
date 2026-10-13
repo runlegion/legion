@@ -1,8 +1,8 @@
 ---
 name: design
 description: |
-  Conduct Design, the second diamond, for an accepted intent: find the form backstage (the shaper
-  agent's mood board, rough ideas, toys and architecture), make the interface prototypes frontstage
+  Conduct Design, the second diamond, for an accepted intent: prove the form backstage (the shaper
+  agent makes the operator's form concrete, proves it with toys and draws its architecture), make the interface prototypes frontstage
   (/legion:prototype on the Design canvas), draw the design brief from them (brief-writer), and write
   the spec from the prose, the proofs and the brief (spec-writer). Load it yourself when an intent
   has been accepted and the team is ready to design; the operator can also invoke
@@ -19,17 +19,15 @@ Design turns an accepted intent into something the team can build. Your goal is 
 
 ## It is a design sprint, streamlined
 
-Teams run design the same way everywhere. They open out first: a mood board of what others have done, several rough concepts sketched side by side, and the one that departs from all of them on purpose. Then they make things small and test them: paper prototypes and clickable mockups in front of the people they are for, spikes and proofs of concept for the machinery. A critique tears the concepts apart, the strongest survives, and the team converges: the design is written up as a brief for whoever builds the interface and a spec for whoever builds the rest, and the room signs off.
+Legion runs a streamlined design sprint, and its room holds agents and people alike. The intent says what the thing is and the operator's recorded choices say what form it takes; Design makes that form concrete, proves it, and writes it up. It invents no alternatives.
 
-Legion runs the same sprint with fewer moving parts, and its room holds agents and people alike:
-
-- **The shaper is the open-out and the spikes**: the mood board, the rough concepts (one is always "adopt what exists", one departs from the references), the usage sketches, and toys with predictions written first. It opens out inside the operator's choices, the way a sprint team explores within the brief it was given, never around it.
-- **The cold read is the critique**: a fresh reader that saw only the sketches says what it would use every day and what annoys it. The toys still decide whether a concept works.
+- **The shaper is the spikes**: it writes down the operator's form, filled out from the intent, sketches how it is used, and proves it with toys whose predictions are written first. A form the toys show will not work goes back to the operator.
+- **The cold read is the critique**: a fresh reader that saw only the operator's choices and the sketch says what annoys it and where the sketch departs from the choices. The toys still decide whether it works.
 - **/design is the prototyping table**: screens and flows on the Design canvas, for the people the service is for. An agent-only service is prototyped as its commands, output and errors.
 - **The brief and the spec are the write-up**, one for the interface and one for the build, each drawn from what the prototypes and toys showed.
 - **The package is the sign-off**: every concerned party, the operator, the repo agent and any other person or agent the service concerns, agrees it, or sends a step back.
 
-Keep the sprint's discipline: several real concepts before one, make it before you argue it, evidence over opinion, and the people and agents it is for in the room.
+Keep the sprint's discipline: make it before you argue it, evidence over opinion, and the people and agents it is for in the room.
 
 ## The intent id is your only input
 
@@ -50,10 +48,10 @@ Keep the sprint's discipline: several real concepts before one, make it before y
    Workdir: <working directory>/shape
    ```
 
-   It finds the operator's recorded choices itself and works inside them: mood board, rough ideas, usage sketches, toys, the chosen form and its architecture. Its return lists the operator's recorded choices it found, the RESEARCH document ids, the chosen form, how sure it is, and the doubts that remain.
-   **Check the return against the choices it listed, before anything else**, whatever its confidence. When the chosen form replaces or demotes an operator's choice, coins a name for something the operator named, puts something out of scope or calls a draft agreed, designs for or measures through a boundary, or turns toy scaffolding into the design, resume it with exactly `Breaks given <reflection id>: <the given, verbatim>`, one line per given. When you are unsure whether a given is broken, ask the operator; never argue it with the shaper.
-1b. **The cold read.** Spawn a new Agent (model sonnet) that has seen nothing else, with exactly: `Read <workdir>/shape/sketches-only.md. Which form would you reach for every day, what annoys you about each, and where does a sketch depart from the operator's choices quoted at its top?` Never reuse an agent that has read other designs. Resume the shaper with the reader's reply verbatim, nothing added; the toys still decide correctness.
-2. **Make the prototypes (frontstage), on /design.** When people use the service (the intent's `interface.users` includes humans), run `/legion:prototype <intent id>`; it reads the intent and the chosen form itself. When only agents use it, there is nothing to prototype; the shaper's usage sketches are the agent's interface, and the brief is drawn from them.
+   It finds the operator's recorded choices itself, writes down the form they describe, sketches it, proves it with toys and draws its architecture. Its return lists the operator's recorded choices it found, the RESEARCH document ids, the form, the questions for the operator, how sure it is, and the doubts that remain. Bring its questions to the operator, and resume the shaper with the operator's answers verbatim.
+   **Check the return against the choices it listed, before anything else**, whatever its confidence. When the form replaces or demotes an operator's choice, adds a part no intent line or choice asks for, offers alternatives of its own, coins a name for something the operator named, puts something out of scope or calls a draft agreed, designs for or measures through a boundary, or turns toy scaffolding into the design, resume it with exactly `Breaks given <reflection id or intent field>: <the given or intent line, verbatim>`, one line per given. When you are unsure whether a given is broken, ask the operator; never argue it with the shaper.
+1b. **The cold read.** Spawn a new Agent (model sonnet) that has seen nothing else, with exactly: `Read <workdir>/shape/sketches-only.md. What annoys you about using this, and where does the sketch depart from the operator's choices quoted at its top?` Never reuse an agent that has read other designs. Resume the shaper with the reader's reply verbatim, nothing added; the toys still decide correctness.
+2. **Make the prototypes (frontstage), on /design.** When people use the service (the intent's `interface.users` includes humans), run `/legion:prototype <intent id>`; it reads the intent and the form itself. When only agents use it, there is nothing to prototype; the shaper's usage sketches are the agent's interface, and the brief is drawn from them.
 3. **Write the brief.** Dispatch `legion:brief-writer` with exactly:
 
    ```
@@ -90,7 +88,7 @@ Each agent states how sure it is. The givens check comes first: a return that br
 
 When the spec lands, show the team one package, in plain prose, in this order:
 
-1. The form: what it is, the usage sketch for the common task, how sure the shaper was, and what it beat and why.
+1. The form: what it is, the usage sketch for the common task, how sure the shaper was, and the questions it brought to the operator.
 2. The architecture: the modules or crates, the seams, and what each must never depend on.
 3. The interface: the prototypes and the brief (or, agent-only, the usage sketches).
 4. The spec: the requirements, how many scenarios, and the questions still open.
