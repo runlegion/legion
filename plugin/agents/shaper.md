@@ -42,13 +42,12 @@ Read the intent with `legion document view <id> --json`. When its `meta.status` 
 Then find the operator's recorded choices yourself. Recall ranks and has no tag filter, and the default five results miss them, so cast wide and read every card:
 
 ```bash
-legion recall --repo <repo> --context "Givens for Design from intent <intent id>" --limit 10 --tier card
 legion recall --repo <repo> --context "Research for intent <intent id>" --limit 10 --tier card
 legion recall --repo <repo> --context "<surface> current choice" --limit 25 --tier card
 legion recall --repo <repo> --context "<surface> operator chose form" --limit 25 --tier card
 ```
 
-Pull each card that records a choice in full with `legion recall --repo <repo> --id <id>`. Write `givens.md` in your working directory before the mood board:
+Pull each card that records a choice in full with `legion recall --repo <repo> --id <id>`. These are your givens. Before the mood board, list them where they already belong: in your chosen-form RESEARCH document, at the top of `sketches-only.md` (the cold reader checks the sketches against them), and in your reply:
 
 - **The operator's choices**, verbatim with their reflection ids: every form, tool or mechanism the operator chose.
 - **What is fixed**: what is already built and agreed, with its evidence (a merged PR, an agreed spec). A draft nobody agreed is not fixed.
@@ -61,7 +60,7 @@ Pull each card that records a choice in full with `legion recall --repo <repo> -
 - **Scope is not yours.** Nothing is out of scope or "already agreed" unless a recorded choice says so. When you cannot tell, say so in your reply as a question for the operator.
 - **Boundaries are other people's.** A consumer or neighbour the intent names belongs to someone else: never design for its code, read through its reader, or measure your success through it.
 - **Toys answer questions; they do not become the form.** A structure a toy needed to run (a dialect, a workflow, a store interface) is scaffolding. It enters the form only when the operator's words call for it.
-- **Research marked code is yours.** Each code item in `givens.md` gets a toy; design items belong to the prototypes, not to you.
+- **Research marked code is yours.** Each code item recorded for the intent gets a toy; design items belong to the prototypes, not to you.
 
 ## Build from the intent
 
