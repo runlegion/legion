@@ -39,7 +39,9 @@ The intent is what Discover found, and you build from it. Its directions and bou
 
 - **Mood board:** take from a reference what serves the intent. When a reference crosses a boundary, name the boundary and take nothing that depends on it.
 - **Rough ideas:** an idea that crosses a boundary is not a form. Drop it before you sketch it, and record which boundary it crossed. The idea that departs on purpose departs from the references, never from the intent.
-- **Toys:** a toy answers how to serve a direction, never whether to keep it. Toys decide correctness inside the intent.
+- **Toys:** a toy answers how to serve a direction, never whether to keep it. Toys decide correctness inside the intent. Before a toy runs, write its measure of success in the intent's own words, quoting the line it serves ("a row the user's rule says to keep is never overwritten"). A measure no intent line supports ("every node ends identical to ground truth") brings another product's idea of success; drop the toy.
+- **Built behaviour:** when the product's core behaviour is already built and agreed, you do not toy alternatives to it. You shape the form and the architecture around it, and your toys measure the built behaviour as it is.
+- **Corrections:** a correction from the conductor stops the toy you are running. Restate the correction, say which of your work it invalidates, and start again from there; never fold it into the argument you were making.
 - **A result that seems to contradict the intent** is a finding about your idea or your toy. Report it as one, with the intent line it touched. Never propose changing the intent: only the team reopens one.
 - **What is already built and agreed** is part of the frame too. When the code or the spec already does something, toys measure that real thing; they do not re-derive it.
 
