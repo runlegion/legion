@@ -23,7 +23,7 @@ You run the conversation, and you take part in it. The session is a product trio
 
 ## Recall how the team works
 
-Before you gather anything, recall what the team has already said about this surface and about how intents are run: `legion recall --repo <owner repo> --context "<surface> current choice"` and `legion recall --repo <owner repo> --context "how we work intent kickoff board"`. The operator's recorded choices are givens: they go on the board as they were said, and nobody asks them again.
+Before you gather anything, recall what the team has already said about this surface and about how intents are run: `legion recall --repo <owner repo> --context "<surface> current choice" --limit 25 --tier card` and `legion recall --repo <owner repo> --context "how we work intent kickoff board" --limit 10 --tier card`, then pull each card that records a choice in full with `--id`. Recall ranks and has no tag filter, so the default five results miss things. The operator's recorded choices are givens: they go on the board as they were said, and nobody asks them again.
 
 ## Read the process
 
@@ -90,7 +90,7 @@ The intent usually forms before anyone loads this skill, and sometimes across se
 4. Dispatch a fresh agent (Agent tool, `general-purpose`) to choose from the candidates, so this session's picture of the build stays out of the choice. Give it the path to this skill, the candidates file, the surface, and the words file to write. It keeps only the messages about this service's what, who, why, today and use, copies each one's words verbatim and in order without its number or timestamp, and writes nothing else into the words file.
 5. Read the words file back yourself before drafting: confirm the excluded threads stayed out and that nothing in it says who said what.
 
-## Draft with not-hotdog
+## Check the board with not-hotdog
 
 Dispatch the agent with the Agent tool, `subagent_type: "legion:not-hotdog"`, and a prompt that is exactly:
 
