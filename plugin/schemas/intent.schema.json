@@ -332,13 +332,14 @@
         },
         "agent_access": {
           "type": "array",
-          "description": "How agents reach it. Applies when users includes agent.",
+          "description": "How agents reach it. Applies when users includes agent. library: only through an app that builds it in, with no interface of its own.",
           "items": {
             "type": "string",
             "enum": [
               "cli",
               "json",
-              "mcp"
+              "mcp",
+              "library"
             ]
           }
         },
