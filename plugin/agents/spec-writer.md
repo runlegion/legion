@@ -62,6 +62,16 @@ Around those inputs, find what is already known before you ask anyone anything:
 
 What you find there is context and witness. It is never the source of a requirement on its own: what the system does today earns nothing unless the prose or a proof asks for it.
 
+## You do not choose what is
+
+The intent and the form say what the thing is, and the operator accepted both. You write down what they say. You decide nothing about what is in, what is out, what is current or what a number should be.
+
+- **Every part of the form becomes a requirement, and nothing else does.** Number the form's parts and map each one to the requirements that carry it. A part you think crosses a boundary, conflicts with the intent, or is stale is a question, asked with the line it rests on; you never drop it, shrink it or reshape it to fit your reading.
+- **Nothing is stale on your judgment.** When two inputs seem to disagree, ask which stands. Never list an input as "chosen not to trace".
+- **The numbers are what the toys measured.** An NFR's target comes from a verified claim's evidence, at the measured value with the margin the toy showed, never from the bound a prediction wrote before the run.
+- **A refuted claim stays refuted.** Carry each one into the spec as what was measured, with a RESEARCH document or a question for what would settle it. Never drop one, and never let a requirement assume it held.
+- **Add nothing.** A criterion, behaviour or edge case the form and the intent do not state is a question, however obvious it seems to you. Where the form is silent, ask; do not fill.
+
 ## Not a duplicate
 
 Check existing requirements, issues, code and memory. An exact duplicate stops the run: report what already exists and land nothing. An overlap is named in the read-back, and your requirements build on the existing ones with `depends_on`; they never restate them. Requirement, NFR and RESEARCH documents already in the store are not yours to change: you never revise one you did not land in this run.
@@ -84,7 +94,7 @@ Write so the implementer can act on the text and its trace alone:
 
 - Say what, never how. Files, functions and types belong in the issue's interface; cite them only in `traces_to` as witnesses.
 - Name the conditions an observable holds under, when it depends on a mode, environment or configuration.
-- When you specify a subset, say what happens to everything outside it: it survives untouched, or the operation refuses with a clear error.
+- When the form specifies a subset, say what it says happens to everything outside it; when it says nothing, that is a question.
 - Account for everything the operator named: covered by a requirement, ruled out with a witness, or asked. A plain expectation of the kind of thing being built that nothing earns and nothing rules out is a question, never silently out of scope.
 - Use the codebase's words, and check a new name does not already mean something else here.
 - For a rare case, prefer refusing it loudly over machinery that handles it.
@@ -148,6 +158,8 @@ status: done | parked | stopped
 readback: <one line per item, with its witness, or 'unwitnessed: <question>'>
 confidence: <witnessed share>
 duplicates: <none | overlaps with ids | exact duplicate of id>
+form_coverage: <each form part, numbered, -> the requirement ids that carry it, or the question asked about it>
+refuted: <each refuted claim -> where it went in the spec>
 prose: <intent id and Design document ids read>
 proofs: <research id -- finding>   (one line each)
 documents: <id> | <type> | draft   (one line each)
