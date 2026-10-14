@@ -59,7 +59,7 @@ Keep the sprint's discipline: make it before you argue it, evidence over opinion
    Prototypes: <canvas link>, <canvas link>
    ```
 
-   (or, for an agent-only service, `Form: <the shaper's form document id>` in place of the prototypes). It lands one brief document.
+   It lands one brief document. An agent-only service has no brief: skip this step; the shaper's form, in the research ids, is the agents' interface.
 4. **Write the spec.** Dispatch `legion:spec-writer` with exactly:
 
    ```
@@ -68,6 +68,8 @@ Keep the sprint's discipline: make it before you argue it, evidence over opinion
    Brief: <brief id>
    Workdir: <working directory>/spec
    ```
+
+   For an agent-only service, leave out the `Brief:` line.
 
    It reads back, asks what nothing answered, and lands the requirement set.
 5. **Steps run in this order, and a later step can send you back.** A prototype that shows the form is wrong, or a spec question no proof answers, returns the work to step 1. The way back is the operator's words or the later agent's words, verbatim, never your summary of them.
