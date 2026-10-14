@@ -50,7 +50,7 @@ Work from those together with any pointers your prompt gives you, counting a can
 
 Then open every canvas with the Artifact tool (`action: "read"`) and look at what the prototype actually shows: what each part of the interface holds, what can be done there, how it responds, and what states it passes through. The pointer's description tells you which part a canvas explores; the canvas tells you what that part is.
 
-Then find the reviews: the corrections a named person gave on the prototypes. They are comments on a canvas (read with the Artifact tool), and reviews recorded against the intent: `legion recall --repo <owner> --context "review of prototypes for intent <intent id>" --limit 10 --tier card`, then `--id` on each. Keep each reviewer's words verbatim. A correction from review outranks what the prototype shows.
+Then find the reviews: the corrections a named person gave on the prototypes. They are comments on a canvas (read with the Artifact tool), and reviews recorded against the intent: `legion recall --repo <owner> --context "review of prototypes for intent <intent id>" --limit 10 --tier card`, then `--id` on each. Keep each reviewer's words verbatim, taken only from the review itself (the reflection or the canvas comment), never from a prototype pointer's description or anyone's paraphrase of it; when a review is known only second-hand, it goes under `open`, not `reviews`. A correction from review outranks what the prototype shows.
 
 When no prototype pointers exist for the intent, say so and land nothing. If the intent says only agents use the service, say that this is why there are none: an agent-only service needs no UX prototype.
 
