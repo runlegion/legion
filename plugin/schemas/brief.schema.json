@@ -2,23 +2,53 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "x-doc-type": "brief",
   "title": "Brief",
-  "description": "Interface design brief drawn from the prototypes made in Design. One brief per intent. It is written so rafters, the /design agent and a human can each use it without opening the prototypes' canvases first. Every statement names the prototypes it comes from, by the ids listed under `prototypes`, so a reader can open the canvas behind any line and a statement with no prototype behind it cannot be written.",
+  "description": "Interface design brief for one intent, drawn from the prototypes made in Design and the reviews of them. Written so rafters, the /design agent and a human can each build from it without opening the canvases first. The intent already holds the problem, the audience and the goals; the brief cites the intent for those and never restates them. Every statement names where it comes from -- a prototype, a review, a reference a prototype or review introduced, or the intent line it serves -- so a reader can open the source behind any line, and a statement with no source cannot be written.",
   "type": "object",
   "properties": {
     "meta": {
       "type": "object",
       "properties": {
-        "title": { "type": "string", "minLength": 1 },
-        "intent": { "type": "string", "minLength": 1, "description": "Id of the intent document the prototypes were made for" },
-        "date": { "type": "string", "minLength": 1 },
-        "author": { "type": "string", "minLength": 1 }
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intent": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Id of the intent document the brief serves"
+        },
+        "date": {
+          "type": "string",
+          "minLength": 1
+        },
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who drew the brief"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who leads the brief and answers questions about it"
+        },
+        "approver": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Who signs the brief off; set once they have"
+        }
       },
-      "required": ["title", "intent", "date", "author"]
+      "required": [
+        "title",
+        "intent",
+        "date",
+        "author",
+        "owner"
+      ]
     },
     "summary": {
       "type": "string",
       "minLength": 1,
-      "description": "What the interface is for and who uses it, in a paragraph a reader can act on without opening anything else"
+      "description": "What the interface is and who uses it, in a paragraph a reader can act on without opening anything else"
     },
     "prototypes": {
       "type": "array",
@@ -27,54 +57,371 @@
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "minLength": 1, "description": "Local id that statements cite in `from`, e.g. P1" },
-          "canvas": { "type": "string", "minLength": 1, "description": "Link to the prototype's Design canvas" },
-          "explores": { "type": "string", "minLength": 1, "description": "The part of the interface the prototype explores" }
+          "id": {
+            "type": "string",
+            "pattern": "^P[0-9]+$",
+            "description": "Local id statements cite, e.g. P1"
+          },
+          "canvas": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Link to the prototype's Design canvas"
+          },
+          "explores": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The part of the interface the prototype explores"
+          },
+          "pointer": {
+            "type": "string",
+            "description": "Id of the prototype document, when one was landed"
+          }
         },
-        "required": ["id", "canvas", "explores"]
+        "required": [
+          "id",
+          "canvas",
+          "explores"
+        ]
+      }
+    },
+    "reviews": {
+      "type": "array",
+      "description": "Reviews of the prototypes by a named person. A correction from review outranks what the prototype shows.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^R[0-9]+$",
+            "description": "Local id statements cite, e.g. R1"
+          },
+          "by": {
+            "type": "string",
+            "minLength": 1
+          },
+          "date": {
+            "type": "string",
+            "minLength": 1
+          },
+          "of": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^P[0-9]+$"
+            },
+            "description": "The prototypes reviewed"
+          },
+          "corrections": {
+            "type": "array",
+            "minItems": 1,
+            "description": "What the reviewer said, verbatim. Statements cite the review's id to use them.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "id",
+          "by",
+          "date",
+          "corrections"
+        ]
+      }
+    },
+    "references": {
+      "type": "array",
+      "description": "Outside work a prototype or review brought into the design: real guides, products, studies. The brief-writer never introduces one on its own reading.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^X[0-9]+$",
+            "description": "Local id statements cite, e.g. X1"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "url": {
+            "type": "string"
+          },
+          "takeaway": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What the design takes from it"
+          },
+          "via": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[PR][0-9]+$"
+            },
+            "description": "The prototype or review that introduced this reference"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "takeaway",
+          "via"
+        ]
+      }
+    },
+    "direction": {
+      "type": "object",
+      "description": "What the interface looks and feels like, and what it is built from. Omit it when the prototypes and reviews show none; say so in open.",
+      "properties": {
+        "system": {
+          "$ref": "#/definitions/statement",
+          "description": "The design system and tokens the interface wears, and the components it is built from, with where that comes from"
+        },
+        "statements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/statement"
+          }
+        }
+      },
+      "required": [
+        "system",
+        "statements"
+      ]
+    },
+    "constraints": {
+      "type": "object",
+      "description": "Dos and don'ts that hold across every part, so nothing is left to assumption. Omit it when the prototypes and reviews show none.",
+      "properties": {
+        "do": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/statement"
+          }
+        },
+        "dont": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/statement"
+          }
+        }
       }
     },
     "parts": {
       "type": "array",
       "minItems": 1,
-      "description": "The parts of the interface, each with what the prototypes show about it",
+      "description": "The parts of the interface: a screen, a page, a panel, a moment",
       "items": {
         "type": "object",
         "properties": {
-          "name": { "type": "string", "minLength": 1 },
-          "purpose": { "type": "string", "minLength": 1, "description": "What the person or agent does in this part" },
-          "from": { "$ref": "#/definitions/from" },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What the person or agent does here"
+          },
+          "from": {
+            "$ref": "#/definitions/from"
+          },
           "statements": {
             "type": "array",
             "minItems": 1,
-            "description": "What the prototypes show about this part: what it holds, what can be done there, how it responds, its states",
-            "items": { "$ref": "#/definitions/statement" }
+            "description": "What the part holds, what can be done there and how it responds",
+            "items": {
+              "$ref": "#/definitions/statement"
+            }
+          },
+          "states": {
+            "type": "array",
+            "description": "Each state the part can be in -- empty, loading, error, changed and the like -- and what it shows",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "shows": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "from": {
+                  "$ref": "#/definitions/from"
+                }
+              },
+              "required": [
+                "name",
+                "shows",
+                "from"
+              ]
+            }
+          },
+          "responsive": {
+            "type": "array",
+            "description": "How the part changes across widths and devices",
+            "items": {
+              "$ref": "#/definitions/statement"
+            }
+          },
+          "components": {
+            "type": "array",
+            "description": "The design system's components the part is built from",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "What it does in this part"
+                },
+                "from": {
+                  "$ref": "#/definitions/from"
+                }
+              },
+              "required": [
+                "name",
+                "role",
+                "from"
+              ]
+            }
+          },
+          "content": {
+            "type": "array",
+            "description": "Where each block's content comes from. A block with no source is shown empty, never filled with invented text.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "block": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The source the block is read from, or 'none: empty slot'"
+                },
+                "from": {
+                  "$ref": "#/definitions/from"
+                }
+              },
+              "required": [
+                "block",
+                "source",
+                "from"
+              ]
+            }
           }
         },
-        "required": ["name", "purpose", "from", "statements"]
+        "required": [
+          "name",
+          "purpose",
+          "from",
+          "statements"
+        ]
+      }
+    },
+    "flows": {
+      "type": "array",
+      "description": "How a person or agent moves through the parts to get something done",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "who": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The actor, as the intent names them"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "part": {
+                  "type": "string",
+                  "description": "The part this step happens in, by name"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          },
+          "from": {
+            "$ref": "#/definitions/from"
+          }
+        },
+        "required": [
+          "name",
+          "who",
+          "steps",
+          "from"
+        ]
+      }
+    },
+    "success": {
+      "type": "array",
+      "description": "How we will know the interface works, each observable. Cite the intent line each serves with I:<json-path> rather than restating it.",
+      "items": {
+        "$ref": "#/definitions/statement"
       }
     },
     "open": {
       "type": "array",
-      "description": "What the prototypes leave unsettled, so no reader settles it silently",
-      "items": { "$ref": "#/definitions/statement" }
+      "description": "What the prototypes and reviews leave unsettled -- including direction, constraints or success signs they do not show -- so no reader settles it silently",
+      "items": {
+        "$ref": "#/definitions/statement"
+      }
     }
   },
-  "required": ["meta", "summary", "prototypes", "parts"],
+  "required": [
+    "meta",
+    "summary",
+    "prototypes",
+    "parts"
+  ],
   "definitions": {
     "from": {
       "type": "array",
       "minItems": 1,
-      "description": "Ids of the prototypes, listed under `prototypes`, this comes from",
-      "items": { "type": "string", "minLength": 1 }
+      "description": "Ids of the prototypes (P), reviews (R) or references (X) this comes from, or I:<json-path> for the intent line it serves (e.g. I:/direction/proposals/0)",
+      "items": {
+        "type": "string",
+        "pattern": "^([PRX][0-9]+|I:.+)$"
+      }
     },
     "statement": {
       "type": "object",
       "properties": {
-        "text": { "type": "string", "minLength": 1 },
-        "from": { "$ref": "#/definitions/from" }
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from": {
+          "$ref": "#/definitions/from"
+        }
       },
-      "required": ["text", "from"]
+      "required": [
+        "text",
+        "from"
+      ]
     }
   }
 }
