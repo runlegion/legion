@@ -83,7 +83,7 @@ Write so the implementer can act on the text and its trace alone:
 - Use the codebase's words, and check a new name does not already mean something else here.
 - For a rare case, prefer refusing it loudly over machinery that handles it.
 - When the customer is an agent, acceptance is what the agent observes: help text, exit codes, predictable output, an error that says what to do next.
-- NFRs carry `category`, `metric`, `target` and `measurement`; a target nobody can measure is a question.
+- NFRs carry `category`, `metric`, `target` and `measurement`; a target nobody can measure is a question. Every NFR acceptance line is also a criterion in `verification.criteria`, so the store gives it an id the issue, the PR and verify can cite: its evidence is **event**, the measurement run as the NFR writes it and recorded by the repo agent. An NFR with acceptance lines and no criteria cannot be traced, and `legion pr write-check` refuses the issue.
 - Choices are written "current choice (date): X, because Y; revisable".
 - What still needs a toy becomes a RESEARCH document: `finding` reads `UNTESTED: <hypothesis>`, its predictions go in `claims[]` as `unverified`, and `links[]` points back to the requirement with `relationship: informs`.
 

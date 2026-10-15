@@ -64,6 +64,10 @@ language is the highest-leverage drift point in the whole chain.
 
 - Read the requirement with `legion document view <FR-ID>`. Name it in the issue, with
   the criterion ids this issue services.
+- An NFR is traced the same way, by its criterion ids. A requirement or NFR with no
+  id-carrying `verification.criteria` cannot be traced: STOP and return `UNCLEAR: <id> has
+  no criterion ids` so the spec gets them. Never invent a stand-in such as citing
+  acceptance lines by position; `legion pr write-check` refuses an issue traced that way.
 - Acceptance criteria are drawn from the requirement's `verification` block, narrowed to
   this slice -- in the requirement's wording. Do not "clarify" a criterion by rewording
   it; verify will judge the work against the requirement's text, and your paraphrase is
