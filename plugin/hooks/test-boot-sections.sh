@@ -199,6 +199,18 @@ for sentinel in "${SENTINELS[@]}"; do
   assert_contains "post-compact.sh additionalContext contains ${sentinel}" "$POST_COMPACT_CTX" "$sentinel"
 done
 
+echo "==> identity: a repo with no identity gets the nudge on BOTH hooks; one with an identity does not"
+for ctx_name in SESSION_START_CTX POST_COMPACT_CTX; do
+  assert_not_contains "${ctx_name} with an identity carries no nudge" "${!ctx_name}" "IDENTITY REFLECTION MISSING"
+done
+export FAKE_WHOAMI_EMPTY="1"
+NUDGE_SS_CTX=$(printf '%s' "$EVENT_JSON" | bash "$CLAUDE_PLUGIN_ROOT/hooks/session-start.sh" | jq -r '.hookSpecificOutput.additionalContext // empty')
+NUDGE_PC_CTX=$(printf '%s' "$EVENT_JSON" | bash "$CLAUDE_PLUGIN_ROOT/hooks/post-compact.sh" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_contains "session-start.sh nudges a repo with no identity" "$NUDGE_SS_CTX" "IDENTITY REFLECTION MISSING for ${LEGION_REPO}"
+assert_contains "post-compact.sh nudges a repo with no identity" "$NUDGE_PC_CTX" "IDENTITY REFLECTION MISSING for ${LEGION_REPO}"
+assert_not_contains "session-start.sh with no identity prints no identity banner" "$NUDGE_SS_CTX" "WHO YOU ARE"
+unset FAKE_WHOAMI_EMPTY
+
 echo "==> checkpoint section falls back to domain=snooze on BOTH hooks when no checkpoint exists"
 # legion_boot_fetch_checkpoint's snooze fallback lives once, in the shared
 # lib, so this is not a per-hook behavior to re-verify per hook -- but the

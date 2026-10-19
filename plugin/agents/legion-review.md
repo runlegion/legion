@@ -14,7 +14,7 @@ description: |
 
   <example>
   Context: An implementer agent finished work and the orchestrator wants an independent check
-  user: "The rust agent says the wake-cap feature is done -- verify the claim before I merge"
+  user: "The implementer says the wake-cap feature is done -- verify the claim before I merge"
   assistant: "I'll use the legion-review agent to cross-check the work summary against the actual diff -- claims the diff does not implement are HIGH findings."
   <commentary>
   Honest disagreement with an implementer's self-report is the job; rubber-stamping is a failure.
