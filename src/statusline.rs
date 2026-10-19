@@ -209,11 +209,7 @@ fn parse_input(raw: &str) -> Option<ParsedInput> {
         .and_then(|m| m.get("id"))
         .and_then(|x| x.as_str())
         .map(str::to_owned);
-    let text = |x: Option<&Value>| {
-        x.and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    };
+    let text = |x: Option<&Value>| x.and_then(Value::as_str).map(str::to_owned);
     let display_name = text(v.get("model").and_then(|m| m.get("display_name")));
     let dir =
         text(v.get("workspace").and_then(|w| w.get("current_dir"))).or_else(|| text(v.get("cwd")));
@@ -737,8 +733,22 @@ mod tests {
         assert_eq!(render_line(&parse_input("{}").unwrap(), None), "Claude");
     }
 
+    #[test]
+    fn line_rounds_ties_to_even_like_printf() {
+        let raw = r#"{"rate_limits": {"five_hour": {"used_percentage": 12.5}}}"#;
+        assert_eq!(
+            render_line(&parse_input(raw).unwrap(), None),
+            "Claude  s:12%"
+        );
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
             .arg(dir)
             .args(args)
