@@ -1112,9 +1112,22 @@ pub(crate) enum Commands {
         #[arg(long)]
         issue: u64,
 
-        /// Path to a JSON file with the per-criterion verdicts. Reads stdin
-        /// when omitted. Shape: `[{"criterion": "...", "verdict":
-        /// "pass|fail|uncertain", "evidence": "..."}, ...]`.
+        /// Path to a JSON file with the per-criterion verdicts. Reads stdin when omitted.
+        ///
+        /// Untraced issue (no `## Traces to` section, or `- None -- <reason>`):
+        /// `[{"criterion": "...", "verdict": "pass|fail|uncertain", "evidence":
+        /// "..."}, ...]`.
+        ///
+        /// Traced issue (`## Traces to` names a requirement): `[{"spec_doc_id":
+        /// "<requirement id>", "spec_revision": <n>, "criterion_id": "<criterion
+        /// id>", "verdict": "pass|fail|uncertain", "artifacts": [{"kind":
+        /// "test|diff|command", "ref": "...", "outcome": "..."}]}, ...]`.
+        ///
+        /// A traced issue needs one entry per criterion the trace scopes: every
+        /// criterion of the requirement, or only the ids in `[criteria: id, id]`.
+        /// `spec_revision` is the requirement's current revision; a stale value
+        /// is refused with the expected revision named. `artifacts` may be
+        /// omitted.
         #[arg(long)]
         verdicts_file: Option<String>,
 

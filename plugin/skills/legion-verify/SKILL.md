@@ -71,7 +71,9 @@ never `pass` -- verify never asserts an unprovable claim.
    correctly, not a failure.
 
 4. **Write the verdicts** to a JSON file (e.g. `/tmp/verdicts-<n>.json`) -- a list, one
-   object per criterion:
+   object per criterion. The shape depends on the issue's trace.
+
+   Untraced issue (no `## Traces to` section, or `- None -- <reason>`) -- the issue shape:
 
    ```json
    [
@@ -79,6 +81,21 @@ never `pass` -- verify never asserts an unprovable claim.
      {"criterion": "<criterion text>", "verdict": "uncertain", "evidence": "perf claim, no benchmark"}
    ]
    ```
+
+   Traced issue (`## Traces to` names a requirement) -- the spec shape, one entry per
+   criterion the trace scopes (every criterion of the requirement, or only the ids in
+   `[criteria: id, id]`):
+
+   ```json
+   [
+     {"spec_doc_id": "<requirement id>", "spec_revision": 3, "criterion_id": "<criterion id>",
+      "verdict": "pass",
+      "artifacts": [{"kind": "test", "ref": "tests::foo_does_x", "outcome": "passed"}]}
+   ]
+   ```
+
+   `spec_revision` is the requirement's current revision; a stale value is refused with the
+   expected revision named. `kind` is `test`, `diff` or `command`; `artifacts` may be omitted.
 
    Provide one entry per criterion. A `pass` with empty or vacuous evidence is treated as
    `uncertain` (see "Judge each criterion" above for what counts as vacuous).

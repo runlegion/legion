@@ -101,10 +101,25 @@ Write the verdicts as JSON and record through the plumbing -- judgment here, sto
 
 ```
 legion verify --repo <repo> --issue <n> --verdicts-file <path>
-# shape: [{"criterion": "...", "verdict": "pass|fail|uncertain", "evidence": "..."}, ...]
 ```
 
-When a criterion came from an id-carrying requirement, name the criterion id inside the evidence string so the verdict stays traceable after the requirement is revised. (Issue-traced id-carrying verdicts land with the trace work; until then the id-in-evidence convention is the bridge. Do not claim plumbing that does not exist.)
+The shape depends on the issue's trace.
+
+Untraced issue (no `## Traces to` section, or `- None -- <reason>`) -- the issue shape, one entry per acceptance criterion:
+
+```
+[{"criterion": "...", "verdict": "pass|fail|uncertain", "evidence": "..."}, ...]
+```
+
+Traced issue (`## Traces to` names a requirement) -- the spec shape, one entry per criterion the trace scopes (every criterion of the requirement, or only the ids in `[criteria: id, id]`):
+
+```
+[{"spec_doc_id": "<requirement id>", "spec_revision": <n>, "criterion_id": "<criterion id>",
+  "verdict": "pass|fail|uncertain",
+  "artifacts": [{"kind": "test|diff|command", "ref": "...", "outcome": "..."}]}, ...]
+```
+
+`spec_revision` is the requirement's current revision; a stale value is refused with the expected revision named. `artifacts` may be omitted. `legion verify --help` shows both shapes.
 
 ## Report format (your final message)
 

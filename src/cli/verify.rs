@@ -2510,4 +2510,57 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].severity, FindingSeverity::Med);
     }
+
+    // --- #1402: verify --help documents both verdict shapes ---------------
+
+    #[test]
+    fn verify_help_documents_both_verdict_shapes() {
+        use clap::CommandFactory;
+
+        let mut cli = crate::cli::Cli::command();
+        let help = cli
+            .find_subcommand_mut("verify")
+            .expect("verify subcommand")
+            .render_long_help()
+            .to_string();
+
+        let issue = serde_json::to_value(verify::AcResult {
+            criterion: "c".into(),
+            verdict: verify::AcVerdict::Pass,
+            evidence: "e".into(),
+        })
+        .unwrap();
+        let artifact = verify::VerdictArtifact {
+            kind: verify::ArtifactKind::Test,
+            reference: "r".into(),
+            outcome: "o".into(),
+        };
+        let artifact_value = serde_json::to_value(&artifact).unwrap();
+        let spec = serde_json::to_value(verify::SpecAcResult {
+            spec_doc_id: "d".into(),
+            spec_revision: 1,
+            criterion_id: "i".into(),
+            verdict: verify::AcVerdict::Pass,
+            artifacts: vec![artifact],
+        })
+        .unwrap();
+
+        for value in [&issue, &spec, &artifact_value] {
+            for key in value
+                .as_object()
+                .expect("verdict serializes as an object")
+                .keys()
+            {
+                let quoted = format!("\"{key}\"");
+                assert!(
+                    help.contains(&quoted),
+                    "verify --help is missing {quoted}:\n{help}"
+                );
+            }
+        }
+        assert!(
+            help.contains("test|diff|command"),
+            "verify --help is missing the artifact kinds token:\n{help}"
+        );
+    }
 }
