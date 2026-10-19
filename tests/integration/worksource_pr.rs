@@ -3882,6 +3882,7 @@ fn traced_issue_stub_plugin(doc_id: &str) -> String {
 
 /// A `view-issue` stub whose `## Traces to` section carries one bullet,
 /// `- {bullet}`, verbatim.
+#[cfg(unix)]
 fn trace_bullet_stub_plugin(bullet: &str) -> String {
     format!(
         r##"#!/bin/bash
