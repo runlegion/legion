@@ -1195,7 +1195,7 @@ pub(crate) enum Commands {
     /// model, directory, branch, `ctx:`, `s:` and `w:` percentages. Set
     /// `statusLine.command` in settings.json to `legion statusline`.
     Statusline {
-        /// Print the parsed sample state as JSON instead of the chip
+        /// Print the parsed sample state as JSON instead of the line
         #[arg(long)]
         json: bool,
     },
