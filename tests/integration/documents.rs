@@ -268,6 +268,7 @@ fn document_view_says_criteria_status_unavailable_on_malformed_entry() {
 /// running a full verify, since only the read side is under test here.
 #[test]
 fn document_view_reports_criteria_served_by_a_clean_verdict() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
     let payload = requirement_payload(
@@ -306,7 +307,7 @@ fn document_view_reports_criteria_served_by_a_clean_verdict() {
         ]
     })
     .to_string();
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",

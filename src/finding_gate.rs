@@ -297,7 +297,7 @@ pub fn commits_touching_file_in_range(
         .collect())
 }
 
-/// Reconcile every PENDING finding on `branch`/`skill` against
+/// Reconcile every PENDING finding on `repo`/`branch`/`skill` against
 /// `head_commit`: for each whose flagged file was touched by a commit after
 /// its origin, mark it RESOLVED with that commit
 /// (`Database::mark_finding_resolved`). Best-effort per finding -- a git
@@ -311,11 +311,12 @@ pub fn commits_touching_file_in_range(
 pub fn reconcile_pending_findings(
     database: &Database,
     repo_dir: Option<&std::path::Path>,
+    repo: &str,
     branch: &str,
     skill: &str,
     head_commit: &str,
 ) -> Result<usize> {
-    let pending = database.list_pending_findings(branch, skill)?;
+    let pending = database.list_pending_findings(repo, branch, skill)?;
     let mut resolved_count = 0usize;
     for finding in pending {
         match commits_touching_file_in_range(
@@ -464,6 +465,7 @@ mod tests {
         QualityGateFinding {
             id: uuid::Uuid::now_v7().to_string(),
             gate_id: "gate-1".to_string(),
+            repo: Some("legion".to_string()),
             branch: "feat/x".to_string(),
             skill: "legion-simplify".to_string(),
             origin_commit: "commit-a".to_string(),
@@ -541,6 +543,7 @@ mod tests {
         let finding = db
             .insert_finding(&NewFindingInput {
                 gate_id: "gate-1",
+                repo: "legion",
                 branch: "feat/x",
                 skill: "legion-simplify",
                 origin_commit: "same-commit",
@@ -551,9 +554,15 @@ mod tests {
             })
             .unwrap();
 
-        let resolved_count =
-            reconcile_pending_findings(&db, None, "feat/x", "legion-simplify", "same-commit")
-                .unwrap();
+        let resolved_count = reconcile_pending_findings(
+            &db,
+            None,
+            "legion",
+            "feat/x",
+            "legion-simplify",
+            "same-commit",
+        )
+        .unwrap();
         assert_eq!(resolved_count, 0);
         let refetched = db.get_finding_by_id(&finding.id).unwrap().unwrap();
         assert_eq!(refetched.status, FindingStatus::Pending);
@@ -673,6 +682,7 @@ mod tests {
         let raised = db
             .insert_finding(&NewFindingInput {
                 gate_id: "gate-1",
+                repo: "legion",
                 branch: "feat/x",
                 skill: "legion-simplify",
                 origin_commit: &origin,
@@ -693,6 +703,7 @@ mod tests {
         let resolved_count = reconcile_pending_findings(
             &db,
             Some(dir.path()),
+            "legion",
             "feat/x",
             "legion-simplify",
             &fix_commit,
@@ -747,6 +758,7 @@ mod tests {
         let raised = db
             .insert_finding(&NewFindingInput {
                 gate_id: "gate-1",
+                repo: "legion",
                 branch: "feat/x",
                 skill: "legion-simplify",
                 origin_commit: "0000000000000000000000000000000000dead",
@@ -757,9 +769,15 @@ mod tests {
             })
             .unwrap();
 
-        let resolved_count =
-            reconcile_pending_findings(&db, Some(dir.path()), "feat/x", "legion-simplify", &head)
-                .expect("a per-finding git failure must not fail the whole reconcile call");
+        let resolved_count = reconcile_pending_findings(
+            &db,
+            Some(dir.path()),
+            "legion",
+            "feat/x",
+            "legion-simplify",
+            &head,
+        )
+        .expect("a per-finding git failure must not fail the whole reconcile call");
         assert_eq!(resolved_count, 0);
 
         let refetched = db.get_finding_by_id(&raised.id).unwrap().unwrap();

@@ -5,7 +5,7 @@ use std::str::FromStr;
 use clap::Subcommand;
 
 use crate::cli::util::{
-    git_changed_files, git_head_commit_and_branch, open_db, read_file_or_stdin,
+    current_repo_name, git_changed_files, git_head_commit_and_branch, open_db, read_file_or_stdin,
 };
 use crate::db::findings::{FindingFilter, NewFindingInput, QualityGateFinding};
 use crate::db::quality_gates::{
@@ -185,7 +185,8 @@ pub(crate) enum QualityGateAction {
     },
 
     /// Batch-acknowledge every PENDING LOW-severity finding on a
-    /// (branch, skill) pair with one shared reason (#773 AC3): the
+    /// (branch, skill) pair in the current repo (plus rows that carry no
+    /// repo) with one shared reason (#773 AC3): the
     /// "conscious sweep, not per-nit ceremony" carve-out for cosmetic
     /// findings. Each finding is still dispositioned as its own row (own
     /// `updated_at`, individually queryable), so the audit trail stays
@@ -206,9 +207,14 @@ pub(crate) enum QualityGateAction {
 
     /// List findings for the audit surface (#773 AC4): which findings were
     /// fixed (RESOLVED), waived (DISPOSITIONED), or are still PENDING, over
-    /// time. Filterable by branch, skill, and status; unfiltered lists
+    /// time. Filterable by repo, branch, skill, and status; unfiltered lists
     /// everything, newest first.
     FindingList {
+        /// Repo the findings were recorded in. Rows written before findings
+        /// carried a repo (NULL) match every repo.
+        #[arg(long)]
+        repo: Option<String>,
+
         #[arg(long)]
         branch: Option<String>,
 
@@ -282,6 +288,8 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             }
 
             let (commit_hash, branch) = git_head_commit_and_branch()?;
+            refuse_detached_head(&branch)?;
+            let repo = current_repo_name()?;
 
             let database = open_db()?;
 
@@ -345,6 +353,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // an empty pending set, so this is a no-op for it.
             reconcile_and_refuse_if_findings_pending(
                 &database,
+                &repo,
                 &branch,
                 &skill,
                 &commit_hash,
@@ -375,7 +384,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // above has already passed -- a refused clean call never
             // persists its findings; the caller re-runs with `--result
             // issues` to persist them, then dispositions/acks.
-            persist_raw_findings(&database, &row, &raw_findings);
+            persist_raw_findings(&database, &repo, &row, &raw_findings);
 
             println!("{}", row.id);
         }
@@ -457,6 +466,12 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
                 return Err(error::LegionError::ExitWith(1));
             }
 
+            // #1403: a detached HEAD has no branch to key findings on; refuse
+            // before any other git or articulation work.
+            let (commit_hash, branch) = git_head_commit_and_branch()?;
+            refuse_detached_head(&branch)?;
+            let repo = current_repo_name()?;
+
             // Resolve the changed-file set from git. `--base` overrides the
             // default main/origin-main resolution (#779); an unresolvable
             // `--base` hard-errors rather than falling back silently. Pure
@@ -497,7 +512,6 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // It is valid for --result issues to carry --findings-count 0: the
             // flag is informational, and the skill runner may not always surface
             // a count. The gate result is what matters for `legion pr create`.
-            let (commit_hash, branch) = git_head_commit_and_branch()?;
             // Cleared (R100) renames are excluded from `report`'s coverage
             // requirement but still surfaced here -- count + pairs -- so the
             // exclusion is auditable rather than silent (#779).
@@ -532,6 +546,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // call that reports them, not just a later one.
             reconcile_and_refuse_if_findings_pending(
                 &database,
+                &repo,
                 &branch,
                 &skill,
                 &commit_hash,
@@ -551,7 +566,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             })?;
             // No issue, as in the Record arm: the branch is all this knows.
             emit_gate_trust(&database, &row, None);
-            persist_raw_findings(&database, &row, &raw_findings);
+            persist_raw_findings(&database, &repo, &row, &raw_findings);
 
             println!(
                 "[legion] simplify-check articulation accepted for skill '{skill}' \
@@ -581,10 +596,12 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             skill,
             reason,
         } => {
+            let repo = current_repo_name()?;
             let database = open_db()?;
-            let acked = database.batch_ack_low_findings(&branch, &skill, &reason)?;
+            let acked = database.batch_ack_low_findings(&repo, &branch, &skill, &reason)?;
             println!(
-                "[legion] batch-acked {} LOW finding(s) on branch '{branch}' skill '{skill}': {reason}",
+                "[legion] batch-acked {} LOW finding(s) in repo '{repo}' on branch '{branch}' \
+                 skill '{skill}': {reason}",
                 acked.len()
             );
             for f in &acked {
@@ -593,6 +610,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
         }
 
         QualityGateAction::FindingList {
+            repo,
             branch,
             skill,
             status,
@@ -604,6 +622,7 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             };
             let database = open_db()?;
             let rows: Vec<QualityGateFinding> = database.list_findings(&FindingFilter {
+                repo,
                 branch,
                 skill,
                 status: status_typed,
@@ -657,6 +676,20 @@ fn findings_count_contradicts_extraction(
     raw_findings: &[finding_gate::RawFinding],
 ) -> bool {
     findings_count > 0 && raw_findings.is_empty()
+}
+
+/// Refuse `quality-gate record` / `check` on a detached HEAD (#1403):
+/// findings are keyed by branch, and `git rev-parse --abbrev-ref HEAD`
+/// prints the literal `HEAD` when there is none.
+fn refuse_detached_head(branch: &str) -> error::Result<()> {
+    if branch == "HEAD" {
+        eprintln!(
+            "[legion] error: HEAD is detached -- quality-gate keys findings by branch, and a \
+             detached HEAD has none. Run 'git switch <branch>' and re-run."
+        );
+        return Err(error::LegionError::ExitWith(1));
+    }
+    Ok(())
 }
 
 /// Format a finding's location as `<file>` or `<file>:<line>` when a line is
@@ -759,6 +792,7 @@ fn resolve_gate_id(database: &db::Database, id: &str) -> error::Result<String> {
 /// persisted, which a refused call never does).
 fn reconcile_and_refuse_if_findings_pending(
     database: &db::Database,
+    repo: &str,
     branch: &str,
     skill: &str,
     head_commit: &str,
@@ -766,14 +800,14 @@ fn reconcile_and_refuse_if_findings_pending(
     current_raw_findings: &[finding_gate::RawFinding],
 ) -> error::Result<()> {
     if let Err(e) =
-        finding_gate::reconcile_pending_findings(database, None, branch, skill, head_commit)
+        finding_gate::reconcile_pending_findings(database, None, repo, branch, skill, head_commit)
     {
         eprintln!("[legion] warning: finding-resolution reconcile failed (non-fatal): {e}");
     }
     if !requesting_clean {
         return Ok(());
     }
-    let pending = database.list_pending_findings(branch, skill)?;
+    let pending = database.list_pending_findings(repo, branch, skill)?;
     let refusal = finding_gate::evaluate_refusal(&pending);
     if refusal.blocks() || !current_raw_findings.is_empty() {
         eprintln!(
@@ -788,8 +822,13 @@ fn reconcile_and_refuse_if_findings_pending(
             .iter()
             .chain(refusal.trivial_unacked.iter())
         {
+            let legacy = if f.repo.is_none() {
+                ", legacy, no repo recorded"
+            } else {
+                ""
+            };
             eprintln!(
-                "  - [prior run, {}] {} {} (id {})",
+                "  - [prior run, {}{legacy}] {} {} (id {})",
                 f.severity.as_str(),
                 file_loc(&f.file, f.line),
                 f.summary,
@@ -827,6 +866,7 @@ fn reconcile_and_refuse_if_findings_pending(
 /// path.
 fn persist_raw_findings(
     database: &db::Database,
+    repo: &str,
     gate: &QualityGateRow,
     raw_findings: &[finding_gate::RawFinding],
 ) {
@@ -860,6 +900,7 @@ fn persist_raw_findings(
     // the DB yet when the loop checks it.
     let existing_open: Vec<QualityGateFinding> = database
         .list_findings(&FindingFilter {
+            repo: Some(repo.to_owned()),
             branch: Some(gate.branch.clone()),
             skill: Some(gate.skill.clone()),
             status: None,
@@ -897,6 +938,7 @@ fn persist_raw_findings(
         }
         if let Err(e) = database.insert_finding(&NewFindingInput {
             gate_id: &gate.id,
+            repo,
             branch: &gate.branch,
             skill: &gate.skill,
             origin_commit: &gate.commit_hash,
@@ -914,8 +956,8 @@ fn persist_raw_findings(
 }
 
 /// Print finding rows as a human-readable table to stdout (#773 AC4 audit
-/// surface). Columns: id (full), branch, skill, file:line, severity, status,
-/// created (date). An empty slice prints nothing.
+/// surface). Columns: id (full), repo (`-` when NULL), branch, skill,
+/// file:line, severity, status, created (date). An empty slice prints nothing.
 ///
 /// THE ID IS PRINTED IN FULL, and no truncation width may be reintroduced
 /// (#840). legion ids are UUIDv7: the leading 48 bits are a millisecond
@@ -935,18 +977,26 @@ fn print_findings_table(rows: &[QualityGateFinding]) {
         return;
     }
     println!(
-        "{:<36}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  CREATED",
-        "ID", "BRANCH", "SKILL", "FILE", "SEV", "STATUS"
+        "{:<36}  {:<16}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  CREATED",
+        "ID", "REPO", "BRANCH", "SKILL", "FILE", "SEV", "STATUS"
     );
-    println!("{}", "-".repeat(142));
+    println!("{}", "-".repeat(160));
     for row in rows {
+        let repo_trunc: String = row
+            .repo
+            .as_deref()
+            .unwrap_or("-")
+            .chars()
+            .take(16)
+            .collect();
         let branch_trunc: String = row.branch.chars().take(20).collect();
         let skill_trunc: String = row.skill.chars().take(16).collect();
         let file_trunc: String = file_loc(&row.file, row.line).chars().take(30).collect();
         let created_date: String = row.created_at.chars().take(10).collect();
         println!(
-            "{:<36}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
+            "{:<36}  {:<16}  {:<20}  {:<16}  {:<30}  {:<4}  {:<14}  {}",
             row.id,
+            repo_trunc,
             branch_trunc,
             skill_trunc,
             file_trunc,
@@ -1436,6 +1486,7 @@ mod tests {
     fn finding_input<'a>(gate_id: &'a str, file: &'a str) -> NewFindingInput<'a> {
         NewFindingInput {
             gate_id,
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-simplify",
             origin_commit: "commit-a",
@@ -1882,6 +1933,7 @@ mod tests {
         let db = test_db();
         db.insert_finding(&NewFindingInput {
             gate_id: "gate-1",
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-simplify",
             origin_commit: "commit-a",
@@ -1894,6 +1946,7 @@ mod tests {
 
         let err = reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             "commit-a",
@@ -1911,6 +1964,7 @@ mod tests {
         let db = test_db();
         db.insert_finding(&NewFindingInput {
             gate_id: "gate-1",
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-simplify",
             origin_commit: "commit-a",
@@ -1923,6 +1977,7 @@ mod tests {
 
         let err = reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             "commit-a",
@@ -1941,6 +1996,7 @@ mod tests {
         let finding = db
             .insert_finding(&NewFindingInput {
                 gate_id: "gate-1",
+                repo: "legion",
                 branch: "feat/x",
                 skill: "legion-simplify",
                 origin_commit: "commit-a",
@@ -1955,6 +2011,7 @@ mod tests {
 
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             "commit-a",
@@ -1971,6 +2028,7 @@ mod tests {
         let db = test_db();
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             "commit-a",
@@ -1987,6 +2045,7 @@ mod tests {
         let db = test_db();
         db.insert_finding(&NewFindingInput {
             gate_id: "gate-1",
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-simplify",
             origin_commit: "commit-a",
@@ -1999,6 +2058,7 @@ mod tests {
 
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             "commit-a",
@@ -2015,6 +2075,7 @@ mod tests {
         let db = test_db();
         db.insert_finding(&NewFindingInput {
             gate_id: "gate-1",
+            repo: "legion",
             branch: "feat/other",
             skill: "legion-simplify",
             origin_commit: "commit-a",
@@ -2026,6 +2087,7 @@ mod tests {
         .unwrap();
         db.insert_finding(&NewFindingInput {
             gate_id: "gate-2",
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-review",
             origin_commit: "commit-a",
@@ -2038,6 +2100,7 @@ mod tests {
 
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             "commit-a",
@@ -2066,6 +2129,7 @@ mod tests {
 
         let err = reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-review",
             "commit-a",
@@ -2092,6 +2156,7 @@ mod tests {
 
         let err = reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-review",
             "commit-a",
@@ -2118,6 +2183,7 @@ mod tests {
 
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-review",
             "commit-a",
@@ -2135,6 +2201,7 @@ mod tests {
         let db = test_db();
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-review",
             "commit-a",
@@ -2188,6 +2255,7 @@ mod tests {
         let db = test_db();
         db.insert_finding(&NewFindingInput {
             gate_id: "gate-a",
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-simplify",
             origin_commit: &commit_a,
@@ -2211,6 +2279,7 @@ mod tests {
         finding_gate::reconcile_pending_findings(
             &db,
             Some(dir.path()),
+            "legion",
             "feat/x",
             "legion-simplify",
             &commit_b,
@@ -2221,6 +2290,7 @@ mod tests {
         // finding and allows clean with no current findings.
         reconcile_and_refuse_if_findings_pending(
             &db,
+            "legion",
             "feat/x",
             "legion-simplify",
             &commit_b,
@@ -2255,10 +2325,12 @@ mod tests {
             summary: "unchecked input".to_string(),
         }];
 
-        persist_raw_findings(&db, &gate, &raw);
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
-        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        let pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert_eq!(
             pending.len(),
             1,
@@ -2299,9 +2371,11 @@ mod tests {
             },
         ];
 
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
-        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        let pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert_eq!(pending.len(), 2);
     }
 
@@ -2331,9 +2405,11 @@ mod tests {
         };
         let raw = vec![duplicate.clone(), duplicate];
 
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
-        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        let pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert_eq!(
             pending.len(),
             1,
@@ -2367,17 +2443,21 @@ mod tests {
             severity: "LOW".to_string(),
             summary: "naming nit".to_string(),
         }];
-        persist_raw_findings(&db, &gate, &raw);
-        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        persist_raw_findings(&db, "legion", &gate, &raw);
+        let pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert_eq!(pending.len(), 1);
         db.dispose_finding(&pending[0].id, "won't fix: intentional")
             .unwrap();
 
         // A later run re-reports the exact same finding (e.g. an honest
         // reviewer re-listing the same LOW they already agreed to waive).
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
-        let still_pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        let still_pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert!(
             still_pending.is_empty(),
             "re-reporting an already-dispositioned finding must not resurrect it as PENDING, \
@@ -2385,6 +2465,7 @@ mod tests {
         );
         let all = db
             .list_findings(&FindingFilter {
+                repo: None,
                 branch: Some("feat/x".to_string()),
                 skill: Some("legion-review".to_string()),
                 status: None,
@@ -2423,9 +2504,9 @@ mod tests {
             severity: "MED".to_string(),
             summary: "duplicate WHERE-clause construction".to_string(),
         }];
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
         let pending = db
-            .list_pending_findings("feat/x", "legion-simplify")
+            .list_pending_findings("legion", "feat/x", "legion-simplify")
             .unwrap();
         assert_eq!(pending.len(), 1);
         db.mark_finding_resolved(&pending[0].id, "commit-fix")
@@ -2433,10 +2514,10 @@ mod tests {
 
         // The identical problem recurs -- a regression, not the same
         // still-open finding.
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
         let now_pending = db
-            .list_pending_findings("feat/x", "legion-simplify")
+            .list_pending_findings("legion", "feat/x", "legion-simplify")
             .unwrap();
         assert_eq!(
             now_pending.len(),
@@ -2469,9 +2550,11 @@ mod tests {
             summary: "unchecked input".to_string(),
         }];
 
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
-        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        let pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].gate_id, gate.id);
         assert_eq!(pending[0].origin_commit, "commit-a");
@@ -2504,10 +2587,92 @@ mod tests {
             summary: "weird severity string".to_string(),
         }];
 
-        persist_raw_findings(&db, &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
 
-        let pending = db.list_pending_findings("feat/x", "legion-review").unwrap();
+        let pending = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].severity, FindingSeverity::Med);
+    }
+
+    // --- #1403: repo keying ------------------------------------------------
+
+    /// A legacy NULL-repo PENDING MED on branch `HEAD` (the shape of
+    /// `019fb06d`) does not block a clean gate on a named branch: once `HEAD`
+    /// can no longer be recorded under, those rows stop matching anything.
+    #[test]
+    fn reconcile_and_refuse_ignores_legacy_head_row_on_a_named_branch() {
+        let db = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO quality_gate_findings \
+                 (id, gate_id, branch, skill, origin_commit, file, line, severity, summary, \
+                  status, created_at, updated_at) \
+                 VALUES ('019fb06d-850a-7742-8220-289f5c8cf39d', 'gate-legacy', 'HEAD', \
+                  'legion-review', 'commit-a', 'PR body', NULL, 'MED', 'legacy', 'pending', \
+                  '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        reconcile_and_refuse_if_findings_pending(
+            &db,
+            "smugglr",
+            "feat/x",
+            "legion-review",
+            "commit-b",
+            true,
+            &[],
+        )
+        .expect("a legacy HEAD row must not block a clean gate on feat/x");
+    }
+
+    /// The dedup lookup is scoped to the gate's repo: an open smugglr
+    /// finding with the same file, severity and summary does not stop a
+    /// legion finding from being inserted.
+    #[test]
+    fn persist_raw_findings_dedup_is_scoped_to_repo() {
+        let db = test_db();
+        let gate = db
+            .record_quality_gate(&QualityGateInput {
+                branch: "feat/x",
+                commit_hash: "commit-a",
+                skill: "legion-review",
+                result: GateResult::Issues,
+                findings_count: 1,
+                details: None,
+                provenance: GateProvenance::Asserted,
+                base: None,
+            })
+            .unwrap();
+        let raw = vec![finding_gate::RawFinding {
+            file: "src/foo.rs".to_string(),
+            line: Some(12),
+            severity: "MED".to_string(),
+            summary: "unchecked input".to_string(),
+        }];
+
+        persist_raw_findings(&db, "smugglr", &gate, &raw);
+        persist_raw_findings(&db, "legion", &gate, &raw);
+
+        let legion = db
+            .list_pending_findings("legion", "feat/x", "legion-review")
+            .unwrap();
+        assert_eq!(legion.len(), 1);
+        assert_eq!(legion[0].repo.as_deref(), Some("legion"));
+        let smugglr = db
+            .list_pending_findings("smugglr", "feat/x", "legion-review")
+            .unwrap();
+        assert_eq!(smugglr.len(), 1);
+        assert_eq!(smugglr[0].repo.as_deref(), Some("smugglr"));
+    }
+
+    #[test]
+    fn refuse_detached_head_refuses_only_the_literal_head() {
+        assert!(matches!(
+            refuse_detached_head("HEAD"),
+            Err(error::LegionError::ExitWith(1))
+        ));
+        refuse_detached_head("main").unwrap();
     }
 }

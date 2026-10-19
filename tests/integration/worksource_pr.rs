@@ -952,9 +952,10 @@ fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {
 /// distinction.
 #[test]
 fn quality_gate_record_prints_id() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
-    let id = run_ok(legion_cmd(dir.path()).args([
+    let id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -972,9 +973,10 @@ fn quality_gate_record_prints_id() {
 /// those can only be earned via `quality-gate check`.
 #[test]
 fn quality_gate_record_refuses_clean_for_check_gated_skill() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
-    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -1005,10 +1007,11 @@ fn quality_gate_record_refuses_clean_for_check_gated_skill() {
 /// carries the one finding its `--findings-count 1` asserts.
 #[test]
 fn quality_gate_record_allows_issues_for_check_gated_skill() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
     let details = r#"{"findings":[{"file":"src/foo.rs","line":1,"severity":"MED","summary":"x"}]}"#;
 
-    let id = run_ok(legion_cmd(dir.path()).args([
+    let id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -1032,13 +1035,14 @@ fn quality_gate_record_allows_issues_for_check_gated_skill() {
 /// silent-acceptance bug this issue closed for an `issues` result.
 #[test]
 fn quality_gate_record_with_details() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
     let details = r#"{"result":"issues","findings_count":2,"findings":[
         {"file":"src/foo.rs","line":1,"severity":"MED","summary":"a"},
         {"file":"src/bar.rs","line":2,"severity":"LOW","summary":"b"}
     ]}"#;
 
-    let id = run_ok(legion_cmd(dir.path()).args([
+    let id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -1067,11 +1071,12 @@ fn quality_gate_record_with_details() {
 /// from the (empty) persisted `quality_gate_findings` ledger.
 #[test]
 fn quality_gate_record_issues_result_with_malformed_details_json_is_refused() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
     let malformed =
         r#"[{"severity":"MED","file":"x.rs","issue":"bad","fix":"do X","blocking":false}]"#;
 
-    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).args([
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -1112,12 +1117,13 @@ fn quality_gate_record_issues_result_with_malformed_details_json_is_refused() {
 /// and dispositionable via `finding-disposition --id`.
 #[test]
 fn quality_gate_record_issues_result_with_conforming_details_json_persists_and_dispositions() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
     let conforming = r#"{"decision":"issues","findings":[
         {"file":"x.rs","line":12,"severity":"MED","summary":"real problem"}
     ]}"#;
 
-    let id = run_ok(legion_cmd(dir.path()).args([
+    let id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -1183,6 +1189,156 @@ fn quality_gate_record_issues_result_with_conforming_details_json_persists_and_d
         findings_after[0]["disposition_reason"].as_str().unwrap(),
         "won't fix: out of scope for #1008"
     );
+}
+
+/// #1403: `quality-gate record` from a detached HEAD exits 1 naming
+/// `git switch`, and records no gate row and no finding row.
+#[test]
+fn quality_gate_record_refuses_detached_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = gate_fixture_repo();
+    run_git_fixture(repo.path(), &["checkout", "-q", "--detach"]);
+    let details = r#"{"findings":[{"file":"x.rs","line":1,"severity":"MED","summary":"x"}]}"#;
+
+    for result in ["clean", "issues"] {
+        let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).current_dir(repo.path()).args([
+            "quality-gate",
+            "record",
+            "--skill",
+            "legion-review",
+            "--result",
+            result,
+            "--details-json",
+            details,
+        ]));
+        assert!(
+            stderr.contains("git switch"),
+            "expected the detached-HEAD refusal, got: {stderr}"
+        );
+    }
+
+    let gates = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let gates: Vec<serde_json::Value> = serde_json::from_str(&gates).expect("JSON array");
+    assert!(gates.is_empty(), "no gate row may be recorded: {gates:?}");
+    let findings = run_ok(legion_cmd(dir.path()).args(["quality-gate", "finding-list", "--json"]));
+    let findings: Vec<serde_json::Value> = serde_json::from_str(&findings).expect("JSON array");
+    assert!(
+        findings.is_empty(),
+        "no finding row may be recorded: {findings:?}"
+    );
+}
+
+/// #1403: `quality-gate check` from a detached HEAD exits 1 naming
+/// `git switch`, and records no gate row and no finding row.
+#[test]
+fn quality_gate_check_refuses_detached_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = gate_fixture_repo();
+    run_git_fixture(repo.path(), &["checkout", "-q", "--detach"]);
+    let artic_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(artic_file.path(), "# Simplify articulation\n").unwrap();
+
+    let (_stdout, stderr) = run_fail(legion_cmd(dir.path()).current_dir(repo.path()).args([
+        "quality-gate",
+        "check",
+        "--skill",
+        "legion-simplify",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--findings-json",
+        r#"[{"file":"x.rs","line":1,"severity":"MED","summary":"x"}]"#,
+        "--articulation-file",
+        artic_file.path().to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("git switch"),
+        "expected the detached-HEAD refusal, got: {stderr}"
+    );
+
+    let gates = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let gates: Vec<serde_json::Value> = serde_json::from_str(&gates).expect("JSON array");
+    assert!(gates.is_empty(), "no gate row may be recorded: {gates:?}");
+    let findings = run_ok(legion_cmd(dir.path()).args(["quality-gate", "finding-list", "--json"]));
+    let findings: Vec<serde_json::Value> = serde_json::from_str(&findings).expect("JSON array");
+    assert!(
+        findings.is_empty(),
+        "no finding row may be recorded: {findings:?}"
+    );
+}
+
+/// #1403: a PENDING finding recorded in repo A does not refuse a clean gate
+/// for the same branch name and skill in repo B, and still refuses it in A.
+/// `finding-list --repo` filters by repo and `--json` carries `repo`.
+#[test]
+fn quality_gate_pending_finding_is_scoped_to_its_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_a = gate_fixture_repo();
+    let repo_b = gate_fixture_repo();
+    let name_a = repo_a
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let details = r#"{"findings":[{"file":"x.rs","line":1,"severity":"MED","summary":"x"}]}"#;
+
+    run_ok(legion_cmd(dir.path()).current_dir(repo_a.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "issues",
+        "--findings-count",
+        "1",
+        "--details-json",
+        details,
+    ]));
+
+    let clean = [
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ];
+    run_ok(
+        legion_cmd(dir.path())
+            .current_dir(repo_b.path())
+            .args(clean),
+    );
+    let (_stdout, stderr) = run_fail(
+        legion_cmd(dir.path())
+            .current_dir(repo_a.path())
+            .args(clean),
+    );
+    assert!(
+        stderr.contains("x.rs"),
+        "the pending finding must refuse clean in its own repo, got: {stderr}"
+    );
+
+    let rows = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "finding-list",
+        "--repo",
+        &name_a,
+        "--json",
+    ]));
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&rows).expect("JSON array");
+    assert_eq!(rows.len(), 1, "got: {rows:?}");
+    assert_eq!(rows[0]["repo"].as_str(), Some(name_a.as_str()));
+    let rows = run_ok(legion_cmd(dir.path()).args([
+        "quality-gate",
+        "finding-list",
+        "--repo",
+        "no-such-repo",
+        "--json",
+    ]));
+    assert_eq!(rows.trim(), "[]");
 }
 
 /// `legion pr create` exits 1 with a clear error when no quality gate exists for HEAD.
@@ -2542,12 +2698,13 @@ fn quality_gate_list_empty_json_prints_empty_array() {
 /// render, not which skill carries which.
 #[test]
 fn quality_gate_list_shows_recorded_rows() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
     // Seed two rows with different skills. No --findings-count here: this
     // test only checks that skill/result render, and #1008's contradiction
     // guard now refuses a positive count with no matching --details-json.
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2555,7 +2712,7 @@ fn quality_gate_list_shows_recorded_rows() {
         "--result",
         "issues",
     ]));
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2586,12 +2743,13 @@ fn quality_gate_list_shows_recorded_rows() {
 /// `legion quality-gate list --skill` filters to the named skill only.
 #[test]
 fn quality_gate_list_filter_by_skill() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
     // legion-simplify records "issues" (#780: "clean" is refused for a
     // check-gated skill via `record`) -- irrelevant to this test, which
     // filters on skill name, not result.
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2599,7 +2757,7 @@ fn quality_gate_list_filter_by_skill() {
         "--result",
         "issues",
     ]));
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2623,6 +2781,7 @@ fn quality_gate_list_filter_by_skill() {
 /// `legion quality-gate list --result issues` filters to issues-only rows.
 #[test]
 fn quality_gate_list_filter_by_result() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
     // #1008: --findings-count 2 must be backed by a matching --details-json
     // findings[] array, or the contradiction guard now refuses this record.
@@ -2631,7 +2790,7 @@ fn quality_gate_list_filter_by_result() {
         {"file":"src/bar.rs","line":2,"severity":"LOW","summary":"b"}
     ]}"#;
 
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2639,7 +2798,7 @@ fn quality_gate_list_filter_by_result() {
         "--result",
         "clean",
     ]));
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2690,9 +2849,10 @@ fn quality_gate_list_invalid_result_value_exits_nonzero() {
 /// deletes from it.
 #[test]
 fn quality_gate_void_marks_row_and_stays_visible_in_list() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
-    let id = run_ok(legion_cmd(dir.path()).args([
+    let id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2741,9 +2901,10 @@ fn quality_gate_void_marks_row_and_stays_visible_in_list() {
 /// replacement.
 #[test]
 fn quality_gate_void_links_superseding_row() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
-    let old_id = run_ok(legion_cmd(dir.path()).args([
+    let old_id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2753,7 +2914,7 @@ fn quality_gate_void_links_superseding_row() {
     ]))
     .trim()
     .to_string();
-    let new_id = run_ok(legion_cmd(dir.path()).args([
+    let new_id = run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2811,13 +2972,14 @@ fn quality_gate_void_missing_id_exits_nonzero() {
 /// `legion quality-gate list --json` emits a JSON array with all fields including details.
 #[test]
 fn quality_gate_list_json_emits_array_with_details() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
     // #1008: an empty `findings` array with a positive --findings-count is
     // exactly the contradiction the guard now refuses -- carry one entry so
     // this record succeeds.
     let details = r#"{"findings":[{"file":"src/foo.rs","line":1,"severity":"MED","summary":"a"}]}"#;
 
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2878,12 +3040,13 @@ fn quality_gate_stats_empty_json_prints_empty_array() {
 /// so it is the real skill this recording pattern is legitimate for.
 #[test]
 fn quality_gate_stats_shows_per_skill_aggregates() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
     // 2 runs for legion-review: 1 clean, 1 issues (1 finding). #1008: the
     // issues run's --findings-count 1 needs a matching --details-json entry
     // or the contradiction guard refuses it.
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2891,7 +3054,7 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
         "--result",
         "clean",
     ]));
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2919,6 +3082,7 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
 /// `legion quality-gate stats --json` returns a JSON array with catch_rate field.
 #[test]
 fn quality_gate_stats_json_shape() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
     // 3 runs: 1 clean, 2 issues. The clean run must be recorded FIRST here:
@@ -2927,7 +3091,7 @@ fn quality_gate_stats_json_shape() {
     // refused by the separate finding-resolution gate (#773) for carrying
     // unresolved prior findings -- stats aggregation is order-independent,
     // so recording clean first sidesteps that unrelated guard entirely.
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2939,7 +3103,7 @@ fn quality_gate_stats_json_shape() {
     // --details-json entry or the contradiction guard refuses it. Distinct
     // file per run so persist_raw_findings's dedup does not collapse them.
     for file in ["src/foo.rs", "src/bar.rs"] {
-        run_ok(legion_cmd(dir.path()).args([
+        run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
             "quality-gate",
             "record",
             "--skill",
@@ -2979,12 +3143,13 @@ fn quality_gate_stats_json_shape() {
 /// `legion quality-gate stats --skill` filters the aggregate to that skill only.
 #[test]
 fn quality_gate_stats_filter_by_skill() {
+    let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
     // legion-simplify records "issues" (#780: "clean" is refused for a
     // check-gated skill via `record`) -- irrelevant to this test, which
     // filters on skill name, not result.
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -2992,7 +3157,7 @@ fn quality_gate_stats_filter_by_skill() {
         "--result",
         "issues",
     ]));
-    run_ok(legion_cmd(dir.path()).args([
+    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
@@ -3030,7 +3195,7 @@ fn quality_gate_stats_filter_by_skill() {
 /// commit.gpgsign=false` -- never a `git config` write -- so the fixture
 /// cannot poison the enclosing real checkout's config (#723).
 fn setup_git_repo_with_feature_branch() -> tempfile::TempDir {
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     run_git_fixture(rp, &["init", "-b", "main"]);
@@ -3212,7 +3377,7 @@ fn quality_gate_check_outside_git_repo_exits_nonzero() {
 #[test]
 fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     // Use a non-standard default branch name so neither `main` nor
@@ -3269,7 +3434,7 @@ fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
 #[test]
 fn quality_gate_check_initial_commit_vacuous_pass_warns_on_stderr() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     // A non-standard branch name (neither `main` nor `origin/main`) with a
@@ -3325,7 +3490,7 @@ fn quality_gate_check_initial_commit_vacuous_pass_warns_on_stderr() {
 #[test]
 fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     run_git_fixture(rp, &["init", "-b", "main"]);
@@ -3416,7 +3581,7 @@ fn good_articulation_for(path: &str) -> String {
 #[test]
 fn quality_gate_check_base_override_scopes_to_stacked_branch_and_is_recorded() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     run_git_fixture(rp, &["init", "-b", "main"]);
@@ -3532,7 +3697,7 @@ fn quality_gate_check_base_unresolvable_ref_hard_errors() {
 #[test]
 fn quality_gate_check_pure_rename_auto_cleared_and_recorded() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     run_git_fixture(rp, &["init", "-b", "main"]);
@@ -3605,7 +3770,7 @@ fn quality_gate_check_pure_rename_auto_cleared_and_recorded() {
 #[test]
 fn quality_gate_check_pure_rename_cleared_despite_diff_renames_false_config() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     run_git_fixture(rp, &["init", "-b", "main"]);
@@ -3655,7 +3820,7 @@ fn quality_gate_check_pure_rename_cleared_despite_diff_renames_false_config() {
 #[test]
 fn quality_gate_check_rename_with_delta_requires_new_path_not_old_path() {
     let _config_guard = RealRepoConfigGuard::new();
-    let repo = tempfile::tempdir().unwrap();
+    let repo = gate_repo_dir();
     let rp = repo.path();
 
     run_git_fixture(rp, &["init", "-b", "main"]);
@@ -4260,6 +4425,7 @@ fn issue_close_refused_when_verify_verdict_is_absent() {
 #[cfg(unix)]
 #[test]
 fn issue_close_refused_when_verify_verdict_is_not_clean() {
+    let gate_repo = gate_fixture_repo();
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
     setup_pr_read_stub(
@@ -4271,14 +4437,18 @@ fn issue_close_refused_when_verify_verdict_is_not_clean() {
     // No --findings-count here: this test only cares that a non-clean
     // verdict blocks the close, and #1008's contradiction guard now refuses
     // a positive count recorded via the CLI with no matching --details-json.
-    run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "record",
-        "--skill",
-        "legion-verify:issue-owner/stub#42",
-        "--result",
-        "issues",
-    ]));
+    run_ok(
+        legion_cmd(data_dir.path())
+            .current_dir(gate_repo.path())
+            .args([
+                "quality-gate",
+                "record",
+                "--skill",
+                "legion-verify:issue-owner/stub#42",
+                "--result",
+                "issues",
+            ]),
+    );
 
     let (_stdout, stderr) = run_fail(
         pr_read_cmd(data_dir.path(), plugin_root.path())
@@ -4298,6 +4468,7 @@ fn issue_close_refused_when_verify_verdict_is_not_clean() {
 #[cfg(unix)]
 #[test]
 fn issue_close_allowed_when_verify_verdict_is_clean() {
+    let gate_repo = gate_fixture_repo();
     let data_dir = tempfile::tempdir().unwrap();
     let plugin_root = tempfile::tempdir().unwrap();
     setup_pr_read_stub(
@@ -4306,14 +4477,18 @@ fn issue_close_allowed_when_verify_verdict_is_clean() {
         &close_stub_plugin_with_criteria(),
     );
 
-    run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "record",
-        "--skill",
-        "legion-verify:issue-owner/stub#42",
-        "--result",
-        "clean",
-    ]));
+    run_ok(
+        legion_cmd(data_dir.path())
+            .current_dir(gate_repo.path())
+            .args([
+                "quality-gate",
+                "record",
+                "--skill",
+                "legion-verify:issue-owner/stub#42",
+                "--result",
+                "clean",
+            ]),
+    );
 
     let stdout = run_ok(
         pr_read_cmd(data_dir.path(), plugin_root.path())
