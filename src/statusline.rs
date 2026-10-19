@@ -1,24 +1,24 @@
 //! Claude Code statusline subcommand.
 //!
 //! Consumes the Claude Code statusLine JSON on stdin, persists rate-limit
-//! and usage samples to legion's local store, and renders a single-line
-//! status chip on stdout.
+//! and usage samples to legion's local store, and prints the operator's
+//! status line on stdout: model, directory, branch, context and rate-limit
+//! percentages.
 //!
 //! See docs at code.claude.com/docs/en/statusline for the input JSON contract.
-//! The mtberlin2023 reference implementation (MIT) informed the threshold
-//! calibration and rendering conventions; legion's implementation is native.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
-use chrono::{Local, TimeZone, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::Database;
-use crate::usage::{RawTokens, TranscriptTail, format_tokens, parse_transcript_tail};
+use crate::usage::{TranscriptTail, parse_transcript_tail};
 
 // ---------------------------------------------------------------------------
 // Persisted sample types
@@ -59,24 +59,14 @@ pub struct UsageSample {
 }
 
 // ---------------------------------------------------------------------------
-// Thresholds (starting calibration; refine from cluster data over time)
+// Constants
 // ---------------------------------------------------------------------------
 
-/// Next-turn replay bands driving chip color and action hint.
-const REPLAY_YELLOW: u64 = 200_000;
-const REPLAY_RED: u64 = 500_000;
-const REPLAY_HARD_CAP: u64 = 1_000_000;
-
-/// Rate-limit warn/alert thresholds; below warn the cap segment is hidden.
-const FIVE_HOUR_WARN_PCT: f64 = 75.0;
-const FIVE_HOUR_ALERT_PCT: f64 = 90.0;
-const SEVEN_DAY_WARN_PCT: f64 = 60.0;
-const SEVEN_DAY_ALERT_PCT: f64 = 85.0;
-
-/// Cache window: how long a rendered chip stays fresh before re-render.
+/// Sample throttle window: a session whose stamp file is younger than this
+/// skips sample persistence. The line itself is rendered on every call.
 const CACHE_TTL_SECS: u64 = 10;
 
-/// Subdirectory (under legion's data dir) that holds per-session chip caches.
+/// Subdirectory (under legion's data dir) that holds per-session stamp files.
 /// User-scoped by construction: the parent `data_dir()` lives under the
 /// current user's XDG data / macOS Application Support tree, so a different
 /// user on the same host cannot poison or collide with these files.
@@ -87,25 +77,12 @@ const CACHE_SUBDIR: &str = "cache/statusline";
 /// because `OpenOptions::append` follows symlinks.
 const ERROR_LOG_SUBPATH: &str = "logs/hook-errors.log";
 
-/// Default action slash command surfaced at yellow+ replay thresholds.
-/// Overridable via the `LEGION_STATUSLINE_ACTION` environment variable.
-const DEFAULT_ACTION: &str = "/log";
-
-// Chip glyphs are part of the output contract -- agents and dashboards
-// parse them. Escape sequences keep the source bytes ASCII-only while
-// rendering emoji at runtime.
-const GREEN: &str = "\u{1F7E2}";
-const YELLOW: &str = "\u{1F7E1}";
-const RED: &str = "\u{1F534}";
-const WARN: &str = "\u{26A0}";
-const ALERT: &str = "\u{1F6A8}";
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 /// Run the statusline subcommand. Reads JSON on stdin, writes samples
-/// to the database, and prints either the rendered chip (default) or
+/// to the database, and prints either the status line (default) or
 /// a JSON summary (when `json` is true).
 ///
 /// Cannot fail: a broken statusline must not surface as an error to the
@@ -128,43 +105,14 @@ pub fn run(json: bool) {
         }
     };
 
-    let session_id = match parsed.session_id.as_deref() {
-        Some(sid) if !sid.is_empty() => sid.to_string(),
-        _ => {
-            log_error("stdin JSON missing session_id".to_string());
-            return;
-        }
-    };
-
-    let cache_path = cache_path_for(&session_id);
-
-    // Fast path: cache hit, re-emit and exit without DB writes. The cached
-    // content already carries its trailing newline from write_cache, so emit
-    // it verbatim with print! rather than println!. A missing or unresolvable
-    // cache path just skips the fast path; the render below still runs.
-    if !json
-        && let Some(ref p) = cache_path
-        && let Some(cached) = read_cache_if_fresh(p, CACHE_TTL_SECS)
-    {
-        print!("{cached}");
+    if !json {
+        record_samples(&parsed, true);
+        let branch = parsed.dir.as_deref().and_then(git_branch);
+        println!("{}", render_line(&parsed, branch.as_deref()));
         return;
     }
 
-    let hostname = resolve_hostname();
-    let sampled_at = Utc::now().to_rfc3339();
-
-    let tail: TranscriptTail = parsed
-        .transcript_path
-        .as_deref()
-        .map(parse_transcript_tail)
-        .unwrap_or_default();
-
-    let rate_sample = build_rate_sample(&hostname, &session_id, &sampled_at, &parsed);
-    let usage_sample = build_usage_sample(&hostname, &session_id, &sampled_at, &parsed, &tail);
-
-    persist_samples(&rate_sample, usage_sample.as_ref());
-
-    if json {
+    if let Some((rate_sample, usage_sample, tail)) = record_samples(&parsed, false) {
         let payload = serde_json::json!({
             "rate_limit": rate_sample,
             "usage": usage_sample,
@@ -181,17 +129,48 @@ pub fn run(json: bool) {
             Ok(s) => println!("{s}"),
             Err(e) => log_error(format!("serialise json output: {e}")),
         }
-        return;
+    }
+}
+
+/// Build and persist this render's samples. Returns `None`, persisting
+/// nothing, when the input has no `session_id` or, with `throttle`, when the
+/// session's stamp file is younger than [`CACHE_TTL_SECS`].
+fn record_samples(
+    parsed: &ParsedInput,
+    throttle: bool,
+) -> Option<(RateLimitSample, Option<UsageSample>, TranscriptTail)> {
+    let Some(session_id) = parsed.session_id.as_deref().filter(|s| !s.is_empty()) else {
+        log_error("stdin JSON missing session_id".to_string());
+        return None;
+    };
+
+    // A missing or unresolvable stamp path just skips the throttle.
+    let cache_path = cache_path_for(session_id);
+    if throttle
+        && let Some(ref p) = cache_path
+        && read_cache_if_fresh(p, CACHE_TTL_SECS).is_some()
+    {
+        return None;
     }
 
-    let chip = render_chip(&tail, &parsed);
-    // Include the trailing newline in both the stdout emission and the
-    // cached bytes so a subsequent cache-hit emits byte-identical output.
-    let chip_line = format!("{chip}\n");
-    if let Some(ref p) = cache_path {
-        write_cache(p, &chip_line);
+    let hostname = resolve_hostname();
+    let sampled_at = Utc::now().to_rfc3339();
+
+    let tail: TranscriptTail = parsed
+        .transcript_path
+        .as_deref()
+        .map(parse_transcript_tail)
+        .unwrap_or_default();
+
+    let rate_sample = build_rate_sample(&hostname, session_id, &sampled_at, parsed);
+    let usage_sample = build_usage_sample(&hostname, session_id, &sampled_at, parsed, &tail);
+
+    persist_samples(&rate_sample, usage_sample.as_ref());
+
+    if throttle && let Some(ref p) = cache_path {
+        write_cache(p, &sampled_at);
     }
-    print!("{chip_line}");
+    Some((rate_sample, usage_sample, tail))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +185,9 @@ struct ParsedInput {
     session_id: Option<String>,
     transcript_path: Option<PathBuf>,
     model: Option<String>,
+    display_name: Option<String>,
+    dir: Option<String>,
+    context_pct: Option<f64>,
     five_hour_pct: Option<f64>,
     five_hour_resets_at: Option<i64>,
     seven_day_pct: Option<f64>,
@@ -227,6 +209,23 @@ fn parse_input(raw: &str) -> Option<ParsedInput> {
         .and_then(|m| m.get("id"))
         .and_then(|x| x.as_str())
         .map(str::to_owned);
+    let text = |x: Option<&Value>| {
+        x.and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let display_name = text(v.get("model").and_then(|m| m.get("display_name")));
+    let dir =
+        text(v.get("workspace").and_then(|w| w.get("current_dir"))).or_else(|| text(v.get("cwd")));
+    let cw = v.get("context_window");
+    let context_pct = cw
+        .and_then(|c| c.get("used_percentage"))
+        .and_then(as_f64)
+        .or_else(|| {
+            cw.and_then(|c| c.get("remaining_percentage"))
+                .and_then(as_f64)
+                .map(|r| 100.0 - r)
+        });
 
     let rl = v.get("rate_limits");
     let fh = rl.and_then(|r| r.get("five_hour"));
@@ -236,6 +235,9 @@ fn parse_input(raw: &str) -> Option<ParsedInput> {
         session_id,
         transcript_path,
         model,
+        display_name,
+        dir,
+        context_pct,
         five_hour_pct: fh.and_then(|x| x.get("used_percentage")).and_then(as_f64),
         five_hour_resets_at: fh.and_then(|x| x.get("resets_at")).and_then(as_i64),
         seven_day_pct: sd.and_then(|x| x.get("used_percentage")).and_then(as_f64),
@@ -349,154 +351,56 @@ fn database_path() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Chip rendering
+// Line rendering
 // ---------------------------------------------------------------------------
 
-/// Render the statusline chip for the given tail + parsed input.
-fn render_chip(tail: &TranscriptTail, parsed: &ParsedInput) -> String {
-    let replay = next_turn_replay(&tail.last_assistant);
-    let (emoji, action_suffix) = replay_band(replay, &action_command());
-    let err_suffix = error_suffix(tail.max_error_bytes);
-    let cap_suffix = cap_segments(parsed);
-
-    format!(
-        "{emoji} [{turns}] {replay} next turn{action}{err}{cap}",
-        emoji = emoji,
-        turns = tail.real_turns,
-        replay = format_tokens(replay),
-        action = action_suffix,
-        err = err_suffix,
-        cap = cap_suffix,
-    )
+/// Render the status line: model, directory, branch, `ctx:`, `s:`, `w:`,
+/// joined by two spaces. A part whose input is absent is left out.
+fn render_line(parsed: &ParsedInput, branch: Option<&str>) -> String {
+    let model = parsed.display_name.as_deref().unwrap_or("Claude");
+    let dir = parsed
+        .dir
+        .as_deref()
+        .and_then(|d| Path::new(d).file_name())
+        .map(|n| n.to_string_lossy().into_owned());
+    let pct = |label: &str, v: Option<f64>| v.map(|n| format!("{label}:{n:.0}%"));
+    [
+        Some(model.to_owned()),
+        dir,
+        branch.map(str::to_owned),
+        pct("ctx", parsed.context_pct),
+        pct("s", parsed.five_hour_pct),
+        pct("w", parsed.seven_day_pct),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("  ")
 }
 
-/// Next-turn replay cost: the tokens Claude Code will re-read on the
-/// next API call. Sum of cache read, cache creation, and raw input.
-/// Output is deliberately excluded: it is output by the last turn,
-/// not input for the next.
-fn next_turn_replay(raw: &RawTokens) -> u64 {
-    raw.cache_read + raw.cache_write + raw.input
-}
-
-/// Return the action-command slash phrase, overridable via env.
-fn action_command() -> String {
-    std::env::var("LEGION_STATUSLINE_ACTION").unwrap_or_else(|_| DEFAULT_ACTION.to_owned())
-}
-
-/// Map replay tokens to (emoji, action-suffix).
-fn replay_band(replay: u64, action: &str) -> (&'static str, String) {
-    if replay < REPLAY_YELLOW {
-        (GREEN, String::new())
-    } else if replay < REPLAY_RED {
-        (YELLOW, format!(" \u{00B7} {action} after task"))
-    } else if replay < REPLAY_HARD_CAP {
-        (RED, format!(" \u{00B7} {action} now"))
-    } else {
-        (RED, format!(" \u{00B7} {action} before next msg"))
-    }
-}
-
-/// " · ⚠ NKB err" suffix when a large cached error was observed.
-fn error_suffix(bytes: u64) -> String {
-    if bytes == 0 {
-        return String::new();
-    }
-    let kb = bytes / 1024;
-    format!(" \u{00B7} {WARN} {kb}KB err")
-}
-
-/// Concatenated cap segments (5h, weekly) in order.
-fn cap_segments(parsed: &ParsedInput) -> String {
-    let mut out = String::new();
-    if let Some(s) = cap_segment(
-        parsed.five_hour_pct,
-        parsed.five_hour_resets_at,
-        &FIVE_HOUR_CONFIG,
-    ) {
-        out.push_str(&format!(" \u{00B7} {s}"));
-    }
-    if let Some(s) = cap_segment(
-        parsed.seven_day_pct,
-        parsed.seven_day_resets_at,
-        &SEVEN_DAY_CONFIG,
-    ) {
-        out.push_str(&format!(" \u{00B7} {s}"));
-    }
-    out
-}
-
-/// Per-window calibration used by [`cap_segment`].
-struct CapConfig {
-    warn_pct: f64,
-    alert_pct: f64,
-    label: &'static str,
-    format_reset: fn(i64) -> String,
-}
-
-const FIVE_HOUR_CONFIG: CapConfig = CapConfig {
-    warn_pct: FIVE_HOUR_WARN_PCT,
-    alert_pct: FIVE_HOUR_ALERT_PCT,
-    label: "5h",
-    format_reset: format_reset_same_day,
-};
-
-const SEVEN_DAY_CONFIG: CapConfig = CapConfig {
-    warn_pct: SEVEN_DAY_WARN_PCT,
-    alert_pct: SEVEN_DAY_ALERT_PCT,
-    label: "wk",
-    format_reset: format_reset_day_time,
-};
-
-/// Produce one cap segment (e.g. "WARN 78%·5h→14:32") or `None` when the
-/// percentage sits below the warn threshold for this window.
-fn cap_segment(pct: Option<f64>, resets_at: Option<i64>, cfg: &CapConfig) -> Option<String> {
-    let pct = pct?;
-    let marker = if pct >= cfg.alert_pct {
-        ALERT
-    } else if pct >= cfg.warn_pct {
-        WARN
-    } else {
+/// The branch checked out in `dir`, read the way the operator's script read
+/// it: `symbolic-ref` with optional locks off, so it never waits on or takes
+/// the index lock. `None` for a detached HEAD or a directory outside git.
+fn git_branch(dir: &str) -> Option<String> {
+    let out = match Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("-C")
+        .arg(dir)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            log_error(format!("run git symbolic-ref: {e}"));
+            return None;
+        }
+    };
+    if !out.status.success() {
         return None;
-    };
-    let suffix = resets_at
-        .filter(|&t| t > 0)
-        .map(cfg.format_reset)
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("\u{2192}{s}"))
-        .unwrap_or_default();
-    // Round rather than truncate so the displayed integer matches what
-    // the user expects from the float we are showing (e.g. 89.9 displays
-    // as "90%", not "89%"). The marker is still driven by the raw float
-    // so band semantics do not change.
-    Some(format!(
-        "{marker} {pct}%\u{00B7}{label}{suffix}",
-        pct = pct.round() as i64,
-        label = cfg.label,
-    ))
-}
-
-/// Format a 5-hour reset timestamp. Same-day resets use HH:MM local time;
-/// resets that cross a day boundary use "Day HH:MM".
-fn format_reset_same_day(epoch_secs: i64) -> String {
-    let dt = match Local.timestamp_opt(epoch_secs, 0).single() {
-        Some(d) => d,
-        None => return String::new(),
-    };
-    let today = Local::now();
-    if dt.format("%Y-%m-%d").to_string() == today.format("%Y-%m-%d").to_string() {
-        dt.format("%H:%M").to_string()
-    } else {
-        dt.format("%a %H:%M").to_string()
     }
-}
-
-/// Format a weekly reset timestamp as "Day HH:MM".
-fn format_reset_day_time(epoch_secs: i64) -> String {
-    let dt = match Local.timestamp_opt(epoch_secs, 0).single() {
-        Some(d) => d,
-        None => return String::new(),
-    };
-    dt.format("%a %H:%M").to_string()
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!branch.is_empty()).then_some(branch)
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +451,7 @@ fn write_cache(path: &Path, content: &str) {
     // the previous complete file or the new complete file, never a partial
     // write. The previous revision used `File::create(path)` which truncates
     // in place -- a reader racing the writer could observe zero bytes or a
-    // half-written chip. All steps are best-effort: a failure just means
+    // half-written stamp. All steps are best-effort: a failure just means
     // the next render recomputes instead of hitting the cache.
     let Some(parent) = path.parent() else {
         return;
@@ -618,6 +522,7 @@ fn error_log_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::RawTokens;
 
     fn raw(input: u64, output: u64, cache_write: u64, cache_read: u64) -> RawTokens {
         RawTokens {
@@ -634,113 +539,6 @@ mod tests {
             real_turns,
             max_error_bytes,
         }
-    }
-
-    #[test]
-    fn replay_band_green_below_yellow() {
-        let (emoji, suffix) = replay_band(150_000, "/log");
-        assert_eq!(emoji, GREEN);
-        assert!(suffix.is_empty());
-    }
-
-    #[test]
-    fn replay_band_yellow_suggests_after_task() {
-        let (emoji, suffix) = replay_band(300_000, "/log");
-        assert_eq!(emoji, YELLOW);
-        assert!(suffix.contains("/log"));
-        assert!(suffix.contains("after task"));
-    }
-
-    #[test]
-    fn replay_band_red_says_now() {
-        let (emoji, suffix) = replay_band(700_000, "/log");
-        assert_eq!(emoji, RED);
-        assert!(suffix.contains("now"));
-    }
-
-    #[test]
-    fn replay_band_hard_cap_says_before_next() {
-        let (emoji, suffix) = replay_band(1_500_000, "/compact");
-        assert_eq!(emoji, RED);
-        assert!(suffix.contains("/compact"));
-        assert!(suffix.contains("before next msg"));
-    }
-
-    #[test]
-    fn five_hour_segment_hidden_below_warn() {
-        assert!(cap_segment(Some(60.0), Some(1_800_000_000), &FIVE_HOUR_CONFIG).is_none());
-    }
-
-    #[test]
-    fn five_hour_segment_warn_at_75() {
-        let s = cap_segment(Some(78.0), None, &FIVE_HOUR_CONFIG).expect("warn segment present");
-        assert!(s.contains(WARN));
-        assert!(s.contains("78%"));
-        assert!(s.contains("5h"));
-    }
-
-    #[test]
-    fn five_hour_segment_alert_at_90() {
-        let s = cap_segment(Some(92.0), None, &FIVE_HOUR_CONFIG).expect("alert segment present");
-        assert!(s.contains(ALERT));
-        assert!(s.contains("92%"));
-    }
-
-    #[test]
-    fn seven_day_segment_warn_at_60() {
-        let s = cap_segment(Some(62.0), None, &SEVEN_DAY_CONFIG).expect("warn segment present");
-        assert!(s.contains(WARN));
-        assert!(s.contains("62%"));
-        assert!(s.contains("wk"));
-    }
-
-    #[test]
-    fn seven_day_segment_alert_at_85() {
-        let s = cap_segment(Some(88.0), None, &SEVEN_DAY_CONFIG).expect("alert segment present");
-        assert!(s.contains(ALERT));
-        assert!(s.contains("88%"));
-    }
-
-    #[test]
-    fn error_suffix_hidden_below_threshold() {
-        // Tail detection already filters <2KB; this fn treats 0 as absent.
-        assert!(error_suffix(0).is_empty());
-    }
-
-    #[test]
-    fn error_suffix_shows_kb_above_threshold() {
-        let s = error_suffix(5120);
-        assert!(s.contains("5KB err"));
-        assert!(s.contains(WARN));
-    }
-
-    #[test]
-    fn render_chip_healthy() {
-        let t = tail(raw(100, 200, 0, 10_000), 3, 0);
-        let parsed = ParsedInput::default();
-        let chip = render_chip(&t, &parsed);
-        assert!(chip.starts_with(GREEN), "expected green chip, got {chip}");
-        assert!(chip.contains("[3]"));
-        assert!(chip.contains("next turn"));
-        // No cap segments shown when nothing is set.
-        assert!(!chip.contains("5h"));
-        assert!(!chip.contains("wk"));
-    }
-
-    #[test]
-    fn render_chip_with_all_warnings() {
-        let t = tail(raw(0, 0, 250_000, 300_000), 12, 4096);
-        let parsed = ParsedInput {
-            five_hour_pct: Some(92.0),
-            seven_day_pct: Some(87.0),
-            ..Default::default()
-        };
-        let chip = render_chip(&t, &parsed);
-        assert!(chip.starts_with(RED), "expected red chip");
-        assert!(chip.contains("now"));
-        assert!(chip.contains("4KB err"));
-        assert!(chip.contains("92%"));
-        assert!(chip.contains("87%"));
     }
 
     #[test]
@@ -856,10 +654,130 @@ mod tests {
         assert_eq!(got.as_deref(), Some("hello"));
     }
 
+    // --- status line ---------------------------------------------------
+
+    const FULL: &str = r#"{
+        "session_id": "abc-123",
+        "model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
+        "workspace": {"current_dir": "/work/legion"},
+        "cwd": "/elsewhere/other",
+        "context_window": {"used_percentage": 42.4, "remaining_percentage": 10},
+        "rate_limits": {
+            "five_hour": {"used_percentage": 12.6},
+            "seven_day": {"used_percentage": 61}
+        }
+    }"#;
+
+    /// Render `FULL` with `key` removed from the object at pointer `parent`.
+    fn line_without(parent: &str, key: &str, branch: Option<&str>) -> String {
+        let mut v: Value = serde_json::from_str(FULL).unwrap();
+        if let Some(obj) = v.pointer_mut(parent).and_then(Value::as_object_mut) {
+            obj.remove(key);
+        }
+        render_line(&parse_input(&v.to_string()).unwrap(), branch)
+    }
+
     #[test]
-    fn next_turn_replay_excludes_output() {
-        let r = raw(100, 999_999, 200, 300);
-        assert_eq!(next_turn_replay(&r), 600);
+    fn line_with_every_part_present() {
+        assert_eq!(
+            line_without("", "none", Some("feat/x")),
+            "Opus 5.5  legion  feat/x  ctx:42%  s:13%  w:61%"
+        );
+    }
+
+    #[test]
+    fn line_drops_each_absent_part() {
+        let b = Some("feat/x");
+        assert_eq!(
+            line_without("/model", "display_name", b),
+            "Claude  legion  feat/x  ctx:42%  s:13%  w:61%"
+        );
+        assert_eq!(
+            line_without("/rate_limits/five_hour", "used_percentage", b),
+            "Opus 5.5  legion  feat/x  ctx:42%  w:61%"
+        );
+        assert_eq!(
+            line_without("/rate_limits/seven_day", "used_percentage", b),
+            "Opus 5.5  legion  feat/x  ctx:42%  s:13%"
+        );
+        assert_eq!(
+            line_without("", "none", None),
+            "Opus 5.5  legion  ctx:42%  s:13%  w:61%"
+        );
+        let mut v: Value = serde_json::from_str(FULL).unwrap();
+        v.as_object_mut().unwrap().remove("context_window");
+        assert_eq!(
+            render_line(&parse_input(&v.to_string()).unwrap(), b),
+            "Opus 5.5  legion  feat/x  s:13%  w:61%"
+        );
+        v.as_object_mut().unwrap().remove("workspace");
+        v.as_object_mut().unwrap().remove("cwd");
+        assert_eq!(
+            render_line(&parse_input(&v.to_string()).unwrap(), b),
+            "Opus 5.5  feat/x  s:13%  w:61%"
+        );
+    }
+
+    #[test]
+    fn line_dir_falls_back_to_cwd() {
+        assert_eq!(
+            line_without("", "workspace", None),
+            "Opus 5.5  other  ctx:42%  s:13%  w:61%"
+        );
+    }
+
+    #[test]
+    fn line_ctx_from_remaining_when_used_absent() {
+        let line = line_without("/context_window", "used_percentage", None);
+        assert_eq!(line, "Opus 5.5  legion  ctx:90%  s:13%  w:61%");
+    }
+
+    #[test]
+    fn line_from_partial_input_without_session_id() {
+        assert_eq!(render_line(&parse_input("{}").unwrap(), None), "Claude");
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn git_branch_reads_branch_worktree_detached_and_non_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        assert_eq!(git_branch(repo.to_str().unwrap()).as_deref(), Some("main"));
+
+        let wt = tmp.path().join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/x",
+                wt.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(git_branch(wt.to_str().unwrap()).as_deref(), Some("feat/x"));
+
+        git(&repo, &["checkout", "-q", "--detach"]);
+        assert_eq!(git_branch(repo.to_str().unwrap()), None);
+
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        assert_eq!(git_branch(plain.to_str().unwrap()), None);
     }
 
     // --- build_usage_sample contract ---------------------------------
