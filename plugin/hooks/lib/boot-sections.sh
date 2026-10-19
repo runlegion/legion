@@ -102,7 +102,7 @@ boot_section_now() {
 
 # Identity -- who am I. Banner-wrapped by the binary. A repo with no
 # identity reflection gets the nudge to write one instead, every boot until
-# it exists (moved in from the operator's userland SessionStart hook).
+# it exists.
 boot_section_identity() {
   local identity
   identity=$("$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG")
@@ -126,7 +126,7 @@ Then write it, first person:
   legion reflect --repo ${REPO} --whoami --text '<who you are>'
 
 Cover what you exist to do, the principles you have arrived at, what you own
-and what your neighbours own, and how you talk. It is a living document:
+and what your neighbors own, and how you talk. It is a living document:
 update it as you grow. If you are mid-incident, write it at the next clean
 boundary.
 EOF
