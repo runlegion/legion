@@ -80,7 +80,7 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// is below this value, so a new step without a bump never reaches it.
 /// `schema_fingerprint_is_pinned_to_schema_version` fails on a schema
 /// change until this is bumped and the fingerprint re-pinned.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Persistent storage for reflections backed by SQLite.
 pub struct Database {
@@ -212,6 +212,7 @@ impl Database {
         schedules::migrate(&tx)?;
         wake::migrate(&tx)?;
         quality_gates::migrate(&tx)?;
+        findings::migrate(&tx)?;
         documents::migrate(&tx)?;
 
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -645,8 +646,8 @@ mod tests {
 
     /// SHA-256 of a fresh store's [`schema_snapshot`] at [`SCHEMA_VERSION`].
     const PINNED_SCHEMA_FINGERPRINT: (i32, &str) = (
-        2,
-        "ce6d1b974b3f04e8d1f262d4adc335a5cbe9c198c728a29a1f27cb2efe56f869",
+        3,
+        "f531ef60e57697790704efd28c7d4af59fc6dcd5564b0bf29b018f8b259c3bd7",
     );
 
     #[test]

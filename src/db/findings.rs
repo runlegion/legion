@@ -23,9 +23,8 @@ use super::Database;
 use crate::error::{LegionError, Result};
 use crate::finding_gate::{FindingSeverity, FindingStatus};
 
-/// `quality_gate_findings` table (#773). New table -- no `migrate()` is
-/// needed yet; future column additions here follow the has_column-ALTER
-/// pattern the other domain files use (see `quality_gates::migrate`).
+/// `quality_gate_findings` table (#773), base shape. The `repo` column is
+/// added by [`migrate`] (#1403).
 pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS quality_gate_findings (
@@ -52,6 +51,19 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// #1403: key findings on repo as well as branch and skill. The column is
+/// nullable with no backfill: a NULL row predates it and matches every repo.
+pub(super) fn migrate(conn: &Connection) -> Result<()> {
+    if !Database::has_column(conn, "quality_gate_findings", "repo")? {
+        conn.execute_batch("ALTER TABLE quality_gate_findings ADD COLUMN repo TEXT;")?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_quality_gate_findings_repo_branch_skill_status
+             ON quality_gate_findings(repo, branch, skill, status);",
+    )?;
+    Ok(())
+}
+
 /// One structured finding extracted from a quality-gate run, keyed to the
 /// `quality_gates.id` row that recorded it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -59,6 +71,10 @@ pub struct QualityGateFinding {
     pub id: String,
     /// `quality_gates.id` of the gate row this finding was extracted from.
     pub gate_id: String,
+    /// Main-checkout name of the repo the gate was recorded in. `None` on
+    /// rows written before this column existed; a `None` row matches every
+    /// repo (#1403).
+    pub repo: Option<String>,
     /// Denormalized from the gate row so the pending-set query (branch +
     /// skill, #773's refusal predicate) never needs a join.
     pub branch: String,
@@ -84,6 +100,7 @@ pub struct QualityGateFinding {
 /// Input for inserting a new finding (#773).
 pub struct NewFindingInput<'a> {
     pub gate_id: &'a str,
+    pub repo: &'a str,
     pub branch: &'a str,
     pub skill: &'a str,
     pub origin_commit: &'a str,
@@ -97,6 +114,8 @@ pub struct NewFindingInput<'a> {
 /// fields are optional; `None` means "no filter on this dimension".
 #[derive(Debug, Default)]
 pub struct FindingFilter {
+    /// Matches rows with this repo or a NULL (pre-#1403) repo.
+    pub repo: Option<String>,
     pub branch: Option<String>,
     pub skill: Option<String>,
     pub status: Option<FindingStatus>,
@@ -122,7 +141,7 @@ fn parse_status_from_db(s: String) -> std::result::Result<FindingStatus, rusqlit
     })
 }
 
-/// Shared row-mapping closure for the 14-column `SELECT ... FROM
+/// Shared row-mapping closure for the 15-column `SELECT ... FROM
 /// quality_gate_findings` shape every read path here uses.
 fn row_to_finding(
     row: &rusqlite::Row<'_>,
@@ -144,11 +163,12 @@ fn row_to_finding(
         resolved_by_commit: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
+        repo: row.get(14)?,
     })
 }
 
 const SELECT_COLUMNS: &str = "id, gate_id, branch, skill, origin_commit, file, line, severity, \
-     summary, status, disposition_reason, resolved_by_commit, created_at, updated_at";
+     summary, status, disposition_reason, resolved_by_commit, created_at, updated_at, repo";
 
 /// Escape SQL `LIKE` metacharacters in a user-supplied id prefix (#840).
 ///
@@ -175,8 +195,8 @@ impl Database {
         self.conn.execute(
             "INSERT INTO quality_gate_findings \
              (id, gate_id, branch, skill, origin_commit, file, line, severity, summary, \
-              status, disposition_reason, resolved_by_commit, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11)",
+              status, disposition_reason, resolved_by_commit, created_at, updated_at, repo) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL, ?11, ?11, ?12)",
             rusqlite::params![
                 &id,
                 input.gate_id,
@@ -189,11 +209,13 @@ impl Database {
                 input.summary,
                 FindingStatus::Pending.as_str(),
                 &now,
+                input.repo,
             ],
         )?;
         Ok(QualityGateFinding {
             id,
             gate_id: input.gate_id.to_owned(),
+            repo: Some(input.repo.to_owned()),
             branch: input.branch.to_owned(),
             skill: input.skill.to_owned(),
             origin_commit: input.origin_commit.to_owned(),
@@ -246,21 +268,23 @@ impl Database {
         Ok(out)
     }
 
-    /// PENDING findings for a (branch, skill) pair, oldest first -- the set
-    /// `crate::finding_gate::evaluate_refusal` and
-    /// `crate::finding_gate::reconcile_pending_findings` both read.
+    /// PENDING findings for a (repo, branch, skill) triple, oldest first --
+    /// the set `crate::finding_gate::evaluate_refusal` and
+    /// `crate::finding_gate::reconcile_pending_findings` both read. A NULL
+    /// (pre-#1403) repo matches every repo.
     pub fn list_pending_findings(
         &self,
+        repo: &str,
         branch: &str,
         skill: &str,
     ) -> Result<Vec<QualityGateFinding>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {SELECT_COLUMNS} FROM quality_gate_findings \
-             WHERE branch = ?1 AND skill = ?2 AND status = ?3 \
-             ORDER BY created_at ASC"
+             WHERE (repo = ?1 OR repo IS NULL) AND branch = ?2 AND skill = ?3 \
+             AND status = ?4 ORDER BY created_at ASC"
         ))?;
         let rows = stmt.query_map(
-            rusqlite::params![branch, skill, FindingStatus::Pending.as_str()],
+            rusqlite::params![repo, branch, skill, FindingStatus::Pending.as_str()],
             row_to_finding,
         )?;
         let mut out = Vec::new();
@@ -275,6 +299,9 @@ impl Database {
     /// (DISPOSITIONED), and PENDING alike.
     pub fn list_findings(&self, filter: &FindingFilter) -> Result<Vec<QualityGateFinding>> {
         let mut clauses: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+        if let Some(ref r) = filter.repo {
+            clauses.push(("(repo = ? OR repo IS NULL)", Box::new(r.clone())));
+        }
         if let Some(ref b) = filter.branch {
             clauses.push(("branch = ?", Box::new(b.clone())));
         }
@@ -366,7 +393,7 @@ impl Database {
     }
 
     /// Batch-acknowledge every PENDING LOW-severity finding for a
-    /// (branch, skill) pair with one shared reason (#773 AC3 -- "a conscious
+    /// (repo, branch, skill) triple (a NULL repo matches every repo) with one shared reason (#773 AC3 -- "a conscious
     /// sweep, not per-nit ceremony"). Each finding is still dispositioned
     /// individually (its own row, its own `updated_at`), so the audit trail
     /// stays per-finding even though the reason is shared. Returns the
@@ -374,17 +401,19 @@ impl Database {
     /// may simply be nothing pending to ack).
     pub fn batch_ack_low_findings(
         &self,
+        repo: &str,
         branch: &str,
         skill: &str,
         reason: &str,
     ) -> Result<Vec<QualityGateFinding>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {SELECT_COLUMNS} FROM quality_gate_findings \
-             WHERE branch = ?1 AND skill = ?2 AND status = ?3 AND severity = ?4 \
-             ORDER BY created_at ASC"
+             WHERE (repo = ?1 OR repo IS NULL) AND branch = ?2 AND skill = ?3 \
+             AND status = ?4 AND severity = ?5 ORDER BY created_at ASC"
         ))?;
         let rows = stmt.query_map(
             rusqlite::params![
+                repo,
                 branch,
                 skill,
                 FindingStatus::Pending.as_str(),
@@ -416,6 +445,7 @@ mod tests {
     ) -> NewFindingInput<'a> {
         NewFindingInput {
             gate_id,
+            repo: "legion",
             branch: "feat/x",
             skill: "legion-simplify",
             origin_commit: "commit-a",
@@ -577,7 +607,7 @@ mod tests {
         db.insert_finding(&other_branch).unwrap();
 
         let pending = db
-            .list_pending_findings("feat/x", "legion-simplify")
+            .list_pending_findings("legion", "feat/x", "legion-simplify")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].file, "src/a.rs");
@@ -645,7 +675,7 @@ mod tests {
             .unwrap();
         db.mark_finding_resolved(&row.id, "commit-fix").unwrap();
         let pending = db
-            .list_pending_findings("feat/x", "legion-simplify")
+            .list_pending_findings("legion", "feat/x", "legion-simplify")
             .unwrap();
         assert!(pending.is_empty());
     }
@@ -661,7 +691,12 @@ mod tests {
             .unwrap();
 
         let acked = db
-            .batch_ack_low_findings("feat/x", "legion-simplify", "batch ack: formatting only")
+            .batch_ack_low_findings(
+                "legion",
+                "feat/x",
+                "legion-simplify",
+                "batch ack: formatting only",
+            )
             .unwrap();
         assert_eq!(acked.len(), 2);
         assert!(
@@ -671,7 +706,7 @@ mod tests {
         );
 
         let pending = db
-            .list_pending_findings("feat/x", "legion-simplify")
+            .list_pending_findings("legion", "feat/x", "legion-simplify")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].severity, FindingSeverity::High);
@@ -681,7 +716,7 @@ mod tests {
     fn batch_ack_low_findings_empty_when_nothing_pending() {
         let db = test_db();
         let acked = db
-            .batch_ack_low_findings("feat/x", "legion-simplify", "reason")
+            .batch_ack_low_findings("legion", "feat/x", "legion-simplify", "reason")
             .unwrap();
         assert!(acked.is_empty());
     }
@@ -698,6 +733,7 @@ mod tests {
 
         let dispositioned = db
             .list_findings(&FindingFilter {
+                repo: None,
                 status: Some(FindingStatus::Dispositioned),
                 ..Default::default()
             })
@@ -707,6 +743,7 @@ mod tests {
 
         let pending = db
             .list_findings(&FindingFilter {
+                repo: None,
                 status: Some(FindingStatus::Pending),
                 ..Default::default()
             })
@@ -740,6 +777,7 @@ mod tests {
 
         let rows = db
             .list_findings(&FindingFilter {
+                repo: None,
                 branch: Some("feat/x".to_string()),
                 skill: Some("legion-simplify".to_string()),
                 status: None,
@@ -778,5 +816,99 @@ mod tests {
             "the newer row must sort first"
         );
         assert_eq!(rows[1].file, "src/older.rs");
+    }
+
+    // --- #1403: repo keying ---------------------------------------------
+
+    /// Insert a pre-#1403 row (NULL repo) directly via SQL.
+    fn insert_legacy_row(db: &Database, branch: &str, skill: &str) -> String {
+        let id = Uuid::now_v7().to_string();
+        db.conn
+            .execute(
+                "INSERT INTO quality_gate_findings \
+                 (id, gate_id, branch, skill, origin_commit, file, line, severity, summary, \
+                  status, created_at, updated_at) \
+                 VALUES (?1, 'gate-legacy', ?2, ?3, 'commit-a', 'PR body', NULL, 'MED', \
+                  'legacy', 'pending', '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z')",
+                rusqlite::params![&id, branch, skill],
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn null_repo_row_matches_every_repo() {
+        let db = test_db();
+        let id = insert_legacy_row(&db, "feat/x", "legion-simplify");
+        for repo in ["smugglr", "legion"] {
+            let pending = db
+                .list_pending_findings(repo, "feat/x", "legion-simplify")
+                .unwrap();
+            assert_eq!(pending.len(), 1, "a NULL-repo row must match {repo}");
+            assert_eq!(pending[0].id, id);
+            assert!(pending[0].repo.is_none());
+        }
+    }
+
+    #[test]
+    fn list_pending_findings_scoped_to_repo() {
+        let db = test_db();
+        let mut med = input("gate-1", "src/a.rs", FindingSeverity::Med);
+        med.branch = "main";
+        med.skill = "legion-review";
+        db.insert_finding(&med).unwrap();
+
+        assert!(
+            db.list_pending_findings("smugglr", "main", "legion-review")
+                .unwrap()
+                .is_empty()
+        );
+        let pending = db
+            .list_pending_findings("legion", "main", "legion-review")
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].repo.as_deref(), Some("legion"));
+    }
+
+    #[test]
+    fn batch_ack_low_findings_scoped_to_repo() {
+        let db = test_db();
+        db.insert_finding(&input("gate-1", "src/low.rs", FindingSeverity::Low))
+            .unwrap();
+        let mut other = input("gate-2", "src/low.rs", FindingSeverity::Low);
+        other.repo = "smugglr";
+        let smugglr_row = db.insert_finding(&other).unwrap();
+
+        let acked = db
+            .batch_ack_low_findings("legion", "feat/x", "legion-simplify", "nits")
+            .unwrap();
+        assert_eq!(acked.len(), 1);
+        assert_eq!(acked[0].repo.as_deref(), Some("legion"));
+        let still = db.get_finding_by_id(&smugglr_row.id).unwrap().unwrap();
+        assert_eq!(still.status, FindingStatus::Pending);
+    }
+
+    #[test]
+    fn list_findings_repo_filter_includes_null_repo_rows() {
+        let db = test_db();
+        db.insert_finding(&input("gate-1", "src/a.rs", FindingSeverity::Med))
+            .unwrap();
+        let mut other = input("gate-2", "src/b.rs", FindingSeverity::Med);
+        other.repo = "smugglr";
+        db.insert_finding(&other).unwrap();
+        insert_legacy_row(&db, "feat/x", "legion-simplify");
+
+        let rows = db
+            .list_findings(&FindingFilter {
+                repo: Some("legion".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|f| f.repo.as_deref() != Some("smugglr")));
+        assert_eq!(
+            db.list_findings(&FindingFilter::default()).unwrap().len(),
+            3
+        );
     }
 }
