@@ -1029,6 +1029,39 @@ echo "unsupported" >"${BUMP_DIR}/version.yaml"
 no "bump: unsupported format refused" bump_source_file "${BUMP_DIR}/version.yaml" version 0.1.0 0.2.0
 eq "bump: unsupported format untouched" "unsupported" "$(cat "${BUMP_DIR}/version.yaml")"
 
+# A Cargo workspace's internal path-dependency pins move with the version of
+# record (#1383). The registry dependency and the non-path line carry the
+# current version too, and stay put.
+cat >"${BUMP_DIR}/ws.toml" <<'EOF'
+[workspace]
+resolver = "3"
+members = ["crates/alpha", "crates/beta", "crates/gamma"]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2024"
+
+[workspace.dependencies]
+alpha = { path = "crates/alpha", version = "0.1.1" }
+beta = { path = "crates/beta", version = "0.1.1" }
+gamma = { path = "crates/gamma", version = "0.1.1" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+registry = { version = "0.1.1" }
+EOF
+cp "${BUMP_DIR}/ws.toml" "${BUMP_DIR}/ws.before"
+ok "bump: cargo workspace pins" bump_source_file "${BUMP_DIR}/ws.toml" workspace.package.version 0.1.1 0.1.2
+eq "bump: workspace.package version" 'version = "0.1.2"' "$(grep -m1 '^version' "${BUMP_DIR}/ws.toml")"
+for pin in alpha beta gamma; do
+  eq "bump: pin ${pin}" "${pin} = { path = \"crates/${pin}\", version = \"0.1.2\" }" \
+    "$(grep "^${pin} = " "${BUMP_DIR}/ws.toml")"
+done
+eq "bump: registry dependency unchanged" 'rusqlite = { version = "0.40", features = ["bundled"] }' \
+  "$(grep '^rusqlite' "${BUMP_DIR}/ws.toml")"
+eq "bump: non-path version line unchanged" 'registry = { version = "0.1.1" }' \
+  "$(grep '^registry' "${BUMP_DIR}/ws.toml")"
+eq "bump: exactly the version and three pins changed" "4" \
+  "$(diff "${BUMP_DIR}/ws.before" "${BUMP_DIR}/ws.toml" | grep -c '^>')"
+
 # -- merge-queue phase helpers (#844) ---------------------------------------
 
 # Stdin-reading helpers are wrapped so `ok`/`no` can exercise their exit status
