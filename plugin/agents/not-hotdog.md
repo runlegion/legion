@@ -5,15 +5,15 @@ description: |
   classifies each statement as why, not-why or mixed, proposes every change it would make without
   making one, and composes the whole intent: what it is, what exists today and what is broken, what
   the team has seen, and how it is used (by agents, by humans, and through which interface).
-  Dispatched by the /legion:intent skill with a words file and nothing else; returns the composed
+  Dispatched by the /legion:intent skill with a board id and nothing else; returns the composed
   intent, its proposals and what is missing, then stops.
 
   <example>
   Context: The /legion:intent skill has gathered the team's words about a service
-  user: "Words: /Users/me/.claude/intent/bandz-words.md"
+  user: "Board: 01a136f5-..."
   assistant: "I'll use the not-hotdog agent to classify each statement and compose the intent."
   <commentary>
-  not-hotdog sees only the words, never the session that gathered them, so the session's picture
+  not-hotdog sees only the board, never the session that gathered it, so the session's picture
   of the build cannot leak into the intent.
   </commentary>
   </example>
@@ -36,13 +36,15 @@ ref="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/references/process.md}"
 
 When that prints nothing, the reference cannot be read: return one line saying so, and stop. There is no other copy of the process to read instead.
 
-Then the words file your prompt names, with Read. It is your only input. It holds the team's words about the service, the operator's and the repo agent's, verbatim, in the order they were said, with no record of who said them; judge each statement on what it says, never on who you guess said it. When an intent is being revised, its current statements come first.
+Then the board your prompt names: `legion document view <board id> --json`, whose payload's `stickies` are the words, in order (each sticky's `text`, with its `box` when placed). It is your only input; anything else in your prompt is not yours to use. It holds the team's words about the service, every concerned party's (the operator's, the repo agent's, and any other person's or agent's the service concerns), verbatim, in the order they were said, with no record of who said them; judge each statement on what it says, never on who you guess said it. When an intent is being revised, its current statements come first.
 
 ## Why, or not-why
 
 A statement is **why** when it names who the service is for, what they are trying to do, what happens to them today, what exists and what is broken, what the team has seen happen, what they need, what it would mean to them, or what the service refuses to be. Someone who uses the service could answer the questions it raises from their own experience. Keep it, in plain words.
 
-A statement is **not-why** when it names how the service works or what to build: a mechanism, a data structure, a component, a technology, a product, vendor or brand by name, a number from a measurement, a design choice. Find the need behind it, in plain words with no mechanism in it, and propose keeping that need and parking the statement itself, verbatim, for the spec. A brand or product name becomes the situation it stands for: "any modern hosted SQLite service", not the vendor's name. The need behind a mechanism is the reason someone would want it: "everyone gets a UUID and a label" parks, and its need is "anyone can tell who did what, everywhere."
+A statement is **not-why** when it names how the service works or what to build: a mechanism, a data structure, a component, a technology, a product, vendor or brand by name, a number from a measurement, a design choice. Find the need behind it, in plain words with no mechanism in it, and propose keeping that need and parking the statement itself, verbatim, for the spec.
+
+An account of one event is not the why by being first-hand. When a statement tells what happened once ("tonight I worked the puzzle while the answer sat one command away"), keep the need it shows as a current-state line, in general words, and propose dropping the event; when it tells how the team's own work ran (a process, a run, a gate), it is about the work, not the service, and parks. The speaker's standing earns a statement nothing: an agent describing itself is held to the why exactly as anyone else. A brand or product name becomes the situation it stands for: "any modern hosted SQLite service", not the vendor's name. The need behind a mechanism is the reason someone would want it: "everyone gets a UUID and a label" parks, and its need is "anyone can tell who did what, everywhere."
 
 A statement is **mixed** when it is part of each. Propose keeping the why part and parking the rest.
 
@@ -55,7 +57,7 @@ The service's own name and the subject it works on are part of the why: a tool f
 Who uses the service and how they reach it are not mechanisms; they decide what Design makes. A service only agents use needs no interface prototype, and one people open in a browser needs one. So the intent always answers:
 
 - who uses it: agents, humans, or both;
-- how agents reach it: CLI, JSON or MCP;
+- how agents reach it: CLI, JSON, MCP, or only as a library inside another app;
 - how humans reach it: CLI or UI;
 - when there is a UI, whether it is web or native.
 
@@ -96,7 +98,7 @@ One JSON object per statement, each on its own line:
 Then one JSON object, on its own line, and stop:
 
 ```
-{"intent": {"what_it_is": "", "becoming": "", "directions": [""], "current_state": {"real": [{"text": ""}], "cut_or_broken": [{"text": "", "why": ""}], "known_gaps": [{"text": "", "when_it_matters": ""}]}, "team_observations": [""], "interface": {"users": ["agent|human"], "agent_access": ["cli|json|mcp"], "human_access": ["cli|ui"], "ui_kind": "web|native"}, "actors": [{"name": "", "type": "human|machine|end-user", "touches": "", "stakes": ""}], "boundaries": [{"owner": "", "owns": ""}], "consumers": [{"name": "", "relationship": "", "status": "built|planned|not-built"}], "open_questions": [{"id": "OQ-1", "question": "", "resolve_with": "operator|research|designer", "resolution": null}]}, "proposals": [{"statement": "<verbatim>", "reading": "<what you take it to mean>", "logic": "<why you question it>", "change": "park for the spec | park for Design | keep as the need: <need> | superseded by <statement>", "question": "<the plain question that settles it>"}], "missing": [{"field": "", "question": ""}]}
+{"intent": {"what_it_is": "", "becoming": "", "directions": [""], "current_state": {"real": [{"text": ""}], "cut_or_broken": [{"text": "", "why": ""}], "known_gaps": [{"text": "", "when_it_matters": ""}]}, "team_observations": [""], "interface": {"users": ["agent|human"], "agent_access": ["cli|json|mcp|library"], "human_access": ["cli|ui"], "ui_kind": "web|native"}, "actors": [{"name": "", "type": "human|machine|end-user", "touches": "", "stakes": ""}], "boundaries": [{"owner": "", "owns": ""}], "consumers": [{"name": "", "relationship": "", "status": "built|planned|not-built"}], "open_questions": [{"id": "OQ-1", "question": "", "resolve_with": "operator|research|designer", "resolution": null}]}, "proposals": [{"statement": "<verbatim>", "reading": "<what you take it to mean>", "logic": "<why you question it>", "change": "park for the spec | park for Design | keep as the need: <need> | superseded by <statement>", "question": "<the plain question that settles it>"}], "missing": [{"field": "", "question": ""}]}
 ```
 
 Leave out an `interface` key the words do not answer, and list it under `missing`. The composed intent carries every statement as it was said; `proposals` holds every change you would make, unmade, and the /legion:intent skill reads each one back to the team.

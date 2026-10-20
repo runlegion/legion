@@ -124,6 +124,24 @@ impl Database {
         }
     }
 
+    /// The distinct input fingerprints on `surface` that start with
+    /// `prefix`, in any live state (#1415). `substr` rather than `LIKE`, so
+    /// the match is exact-case and `_`/`%` in the prefix are literal.
+    pub(crate) fn fingerprints_with_prefix(
+        &self,
+        surface: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT input_fingerprint FROM uncertainty_prediction \
+             WHERE surface = ?1 AND substr(input_fingerprint, 1, length(?2)) = ?2 \
+               AND deleted_at IS NULL \
+             ORDER BY input_fingerprint",
+        )?;
+        let rows = stmt.query_map(params![surface, prefix], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
     /// Every Emitted prediction on `surface` whose payload names `session_id`
     /// (`prediction_payload.session_id`), oldest first. The legion-cmd
     /// witness pass (#1272) reads this to find the rewrites its own session

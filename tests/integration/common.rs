@@ -288,6 +288,30 @@ pub fn run_git_fixture(repo_dir: &Path, args: &[&str]) {
     );
 }
 
+/// A tempdir for a fixture repo that `quality-gate record` / `check` run in
+/// (#1403). The gate's repo key is the directory name, and a bare
+/// `tempdir()` is named `.tmpXXXX`, which fails legion's repo-name check.
+pub fn gate_repo_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("gate-repo-")
+        .tempdir()
+        .expect("create gate fixture repo dir")
+}
+
+/// A fixture repo on branch `main` with one commit, for tests that run
+/// `quality-gate record` / `check` and would otherwise inherit the test
+/// process's cwd -- a detached HEAD under CI's `pull_request` checkout,
+/// which those commands refuse (#1403).
+pub fn gate_fixture_repo() -> tempfile::TempDir {
+    let repo = gate_repo_dir();
+    run_git_fixture(repo.path(), &["init", "-q", "-b", "main"]);
+    run_git_fixture(
+        repo.path(),
+        &["commit", "-q", "--allow-empty", "-m", "seed"],
+    );
+    repo
+}
+
 /// Read-only counterpart to `run_git_fixture` for queries whose stdout the
 /// caller needs (e.g. `rev-parse HEAD`), sharing the same config/dir
 /// isolation so a read can no more resolve the enclosing checkout than a

@@ -51,9 +51,10 @@ pub(crate) fn raise_fd_limit() {
 
 /// Read the current HEAD commit hash and branch name. Errors if `git
 /// rev-parse HEAD` fails (not a git repo / no commits); the branch falls back
-/// to "unknown" when its lookup fails, since a detached HEAD still has a valid
-/// commit to key a quality gate on. Shared by the quality-gate recorder and
-/// the `pr create` / `pr write-check` gate checks.
+/// to "unknown" when its lookup fails. On a detached HEAD the branch is the
+/// literal `HEAD`, which is not a valid key for quality-gate findings:
+/// `quality-gate record` and `check` refuse it (#1403). Shared by the
+/// quality-gate recorder and the `pr create` / `pr write-check` gate checks.
 pub(crate) fn git_head_commit_and_branch() -> Result<(String, String), error::LegionError> {
     let head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -78,6 +79,24 @@ pub(crate) fn git_head_commit_and_branch() -> Result<(String, String), error::Le
         "unknown".to_owned()
     };
     Ok((commit_hash, branch))
+}
+
+/// The repo key for a gate record (#1403): the main-checkout name of the
+/// process cwd, via [`crate::cmd::hook::repo_for`] (a linked worktree maps to
+/// its main checkout). `LEGION_REPO` is deliberately not consulted: the
+/// commit hash comes from the cwd's git, so the repo key must too.
+pub(crate) fn current_repo_name() -> Result<String, error::LegionError> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        error::LegionError::WorkSource(format!(
+            "cannot read the current directory ({e}); a gate cannot be recorded without a repo name"
+        ))
+    })?;
+    crate::cmd::hook::repo_for(None, cwd.to_str()).ok_or_else(|| {
+        error::LegionError::WorkSource(format!(
+            "cannot derive a repo name from {}; a gate cannot be recorded without a repo name",
+            cwd.display()
+        ))
+    })
 }
 
 /// Read input from `path` (the value of a `--*-file` flag) or, when it is

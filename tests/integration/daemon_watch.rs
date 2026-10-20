@@ -366,3 +366,130 @@ fn session_start_hook_no_longer_claims_the_lock_itself() {
         "session-start.sh must delegate the lock to session-lock.sh (#996)"
     );
 }
+
+/// Spawn a stand-in session running `script` under bash, with the real
+/// session-lock hook and the real binary wired through the environment, feed
+/// it the SessionStart JSON, and wait for `<data>/sessions/<repo>.session`.
+/// Returns the stand-in child and the pid the lock recorded.
+#[cfg(unix)]
+fn run_session_lock_hook(
+    data_dir: &std::path::Path,
+    script: &str,
+    env: &[(&str, &str)],
+) -> (std::process::Child, u32) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo = "session-lock-pid-probe";
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(script)
+        .env("LEGION_BIN", env!("CARGO_BIN_EXE_legion"))
+        .env("CLAUDE_PLUGIN_ROOT", manifest.join("plugin"))
+        .env("LEGION_DATA_DIR", data_dir)
+        .env("LEGION_REPO", repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn stand-in session");
+    {
+        let mut stdin = child.stdin.take().expect("stand-in stdin");
+        let payload = format!(
+            r#"{{"session_id":"t","cwd":"{}"}}"#,
+            data_dir.to_string_lossy()
+        );
+        stdin
+            .write_all(payload.as_bytes())
+            .expect("write hook stdin");
+    }
+
+    let lock = data_dir.join("sessions").join(format!("{repo}.session"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let recorded = loop {
+        if let Some(pid) = std::fs::read_to_string(&lock)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{} never appeared", lock.display());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    (child, recorded)
+}
+
+/// #1400: where the session runs the hook itself (an exec'd wrapper, macOS
+/// today), the lock names `$PPID`, unchanged. The stand-in's own argv does not
+/// contain `hooks/session-lock.sh`; the hook path reaches it only through `HOOK`.
+#[cfg(unix)]
+#[test]
+fn session_lock_hook_records_ppid_when_parent_is_the_session() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("plugin/hooks/session-lock.sh")
+        .to_string_lossy()
+        .into_owned();
+    let (mut child, recorded) = run_session_lock_hook(
+        data_dir.path(),
+        r#"bash "$HOOK"; sleep 30"#,
+        &[("HOOK", &hook)],
+    );
+    let session = child.id();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(recorded, session, "the lock must name the hook's parent");
+}
+
+/// #1400: where the hook runs under a live `sh -c` wrapper that did not exec
+/// (observed on Linux), the lock names the wrapper's parent -- the session --
+/// not the wrapper, which exits with the hook. The trailing `:` stops any `sh`
+/// build from exec'ing, so the wrapper stays alive on every runner.
+#[cfg(unix)]
+#[test]
+fn session_lock_hook_records_session_not_live_wrapper() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (mut child, recorded) = run_session_lock_hook(
+        data_dir.path(),
+        r#"sh -c "$WRAP"; sleep 30"#,
+        &[(
+            "WRAP",
+            r#"bash "${CLAUDE_PLUGIN_ROOT}/hooks/session-lock.sh"; :"#,
+        )],
+    );
+    let session = child.id();
+
+    // Wait for the wrapper (the stand-in's child naming the hook) to exit.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::process::Command::new("pgrep")
+        .args(["-P", &session.to_string(), "-f", "hooks/session-lock.sh"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the wrapper never exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &recorded.to_string()])
+        .status()
+        .is_ok_and(|s| s.success());
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        recorded, session,
+        "the lock must name the session, not the sh wrapper"
+    );
+    assert!(alive, "the recorded pid must outlive the wrapper");
+}

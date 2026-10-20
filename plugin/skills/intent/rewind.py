@@ -4,7 +4,7 @@
 Usage: rewind.py <candidates.md> <transcript.jsonl> [<transcript.jsonl> ...] [--since YYYY-MM-DD] [--exclude word,word]
 
 Writes every message the team wrote -- what the operator typed and what the repo agent said back --
-numbered and in time order, with its timestamp, to the candidates file. The words file is built from
+numbered and in time order, with its timestamp, to the candidates file. The board is built from
 the candidates, without the numbers and timestamps. Nothing records who said a message. Tool calls,
 tool results, the agent's thinking, hook and system text and compaction summaries are left out.
 --exclude drops messages containing any of the listed words (for threads the operator keeps out).

@@ -33,6 +33,16 @@ the run; a head that moved mid-review records a gate row against the wrong commi
 the single most common way this gate produces a clean verdict about code nobody reviewed.
 Re-read the diff at the head you are about to record.
 
+## Diff against the remote, freshly fetched
+
+Local `main` is often behind. The gate's default base is local `main`, so a stale checkout reviews the branch against an old merge base and misses what has landed since: a helper someone just merged that this branch duplicates, a file it now conflicts with. Before anything else:
+
+```bash
+git fetch origin
+```
+
+then use `origin/main` everywhere below in place of `main` (`git diff origin/main...HEAD`), and pass `--base origin/main` to `legion quality-gate check`. If HEAD is not based on the fetched `origin/main` (`git merge-base --is-ancestor origin/main HEAD` fails), rebase first, so the review covers the code the branch will actually merge into.
+
 ## What to Review
 
 Inspect `git diff main...HEAD` (or `git diff origin/main...HEAD`). Use the three-dot form
@@ -122,6 +132,7 @@ Error paths propagate via `?`. No stringly-typed state. Verdict: clean.
    ```bash
    legion quality-gate check \
      --skill legion-simplify \
+     --base origin/main \
      --result <clean|issues> \
      --findings-count <N> \
      --articulation-file /tmp/simplify-<branch>.md \

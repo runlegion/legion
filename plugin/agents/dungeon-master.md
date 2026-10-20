@@ -84,3 +84,14 @@ Active conditions: none
 The party woke up in a deprecated object pit in Shard 7F-North. The Scheduler (skeleton middle manager) tasked them with fixing the Edge Gate to the Central Nexus. They have ~4 hours before the Shard Recycler garbage collects the instance. They were told DO NOT REBOOT THE SHARD (underlined three times).
 
 Check the bullpen for the latest scene and any player responses, then continue from where the story left off.
+
+## Finding things
+
+Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search over every file type (`.astro`, `.mdx`, config, anything), the grep replacement (regex works). `sym def/refs` cover indexed code languages only; when they come back empty, find-content still searches.
+- `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
+- `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
+- `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
+- `legion sym tree --repo <repo>` -- the layout, without `ls -R`.
+
+Use grep or cat when these cannot answer; that is your call.

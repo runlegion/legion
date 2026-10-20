@@ -60,11 +60,15 @@ splits the difference. Stopping is the correct outcome, not a failure.
 
 ## The three audits
 
+### 0. Scenarios, when the requirement has them
+
+When the requirement carries `verification.scenarios`, run them at the PR's head. Each criterion's verdict is its tagged scenario: passed is pass; failed, missing, skipped or without step code is fail. Read the step code for each passing scenario; a step that cannot fail, or mocks the thing under test, makes that criterion fail. Record the scenario name and the run as the criterion's evidence. You add no criteria and no scenarios: a case nobody specified is a spec gap for the spec writer, reported under its own heading, never a fail of this work.
+
 ### 1. Spec conformance (when a trace exists)
 
 Judge the work against the REQUIREMENT's criteria, in the requirement's wording -- never against the issue's restatement. Two findings only this stage can produce:
 
-- **Fidelity**: the issue's criteria drifted from the requirement's -- narrowed past recognition, reworded into something weaker, or invented criteria the requirement does not contain. The work may satisfy the issue perfectly and still fail here. Name the divergence, criterion by criterion.
+- **Fidelity**: the issue's criteria drifted from the requirement's -- narrowed past recognition, reworded into something weaker, or invented criteria the requirement does not contain. You hold yourself to the same line: verify never invents work or criteria. The work may satisfy the issue perfectly and still fail here. Name the divergence, criterion by criterion.
 - **Intent**: every criterion passes, and the requirement's description or the master spec's stated purpose is still not met -- the criteria were incomplete. This finding goes to the SPEC's author, not the implementer. Say so explicitly; blaming the implementer for a spec gap poisons the verdict corpus.
 
 If the issue has no trace and no spec exists for the surface: skip this audit and say so -- that is the normal case for defects, not a failure.
@@ -145,3 +149,14 @@ Every finding names its audience. An intent gap to the spec author and a missing
 Delivery: your final message is your report, and it reaches your caller as your return
 value. Record your structured verdict via `legion verify` -- that ledger is the durable,
 searchable record.
+
+## Finding things
+
+Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search over every file type (`.astro`, `.mdx`, config, anything), the grep replacement (regex works). `sym def/refs` cover indexed code languages only; when they come back empty, find-content still searches.
+- `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
+- `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
+- `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
+- `legion sym tree --repo <repo>` -- the layout, without `ls -R`.
+
+Use grep or cat when these cannot answer; that is your call.

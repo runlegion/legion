@@ -100,9 +100,36 @@ boot_section_now() {
   "$LEGION" now --banner 2>>"$LOG"
 }
 
-# Identity -- who am I. Banner-wrapped by the binary.
+# Identity -- who am I. Banner-wrapped by the binary. A repo with no
+# identity reflection gets the nudge to write one instead, every boot until
+# it exists.
 boot_section_identity() {
-  "$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG"
+  local identity
+  identity=$("$LEGION" whoami --repo "$REPO" --limit 5 2>>"$LOG")
+  if [ -n "$identity" ]; then
+    printf '%s' "$identity"
+    return
+  fi
+  cat <<EOF
+[Legion] IDENTITY REFLECTION MISSING for ${REPO}
+
+You boot without a self-concept. The agent tomorrow is not a stranger: it is
+you, amnesiac. What you write once is the version of you that persists across
+model swaps and session deaths. Write to yourself.
+
+Before starting work, find yourself:
+  1. What others said about you: legion consult --context '${REPO}' --limit 10
+  2. Your own voice: legion recall --repo ${REPO} --context "voice personality character" --limit 5
+  3. What you shipped: git log -n 50, and legion recall --repo ${REPO} --latest
+
+Then write it, first person:
+  legion reflect --repo ${REPO} --whoami --text '<who you are>'
+
+Cover what you exist to do, the principles you have arrived at, what you own
+and what your neighbors own, and how you talk. It is a living document:
+update it as you grow. If you are mid-incident, write it at the next clean
+boundary.
+EOF
 }
 
 # Operating contract -- how I operate (domain: workflow). Lands right after

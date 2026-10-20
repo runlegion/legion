@@ -176,8 +176,13 @@ bump_source_file() {
   leaf="$(field_leaf "$field")"
   case "$file" in
     *.toml)
-      awk -v old="${leaf} = \"${current}\"" -v new="${leaf} = \"${new}\"" '
-        !done && $0 == old { print new; done = 1; next } { print }
+      awk -v old="${leaf} = \"${current}\"" -v new="${leaf} = \"${new}\"" \
+          -v oldv="version = \"${current}\"" -v newv="version = \"${new}\"" '
+        !done && $0 == old { print new; done = 1; next }
+        index($0, "path = \"") > 0 && (i = index($0, oldv)) > 0 {
+          $0 = substr($0, 1, i - 1) newv substr($0, i + length(oldv))
+        }
+        { print }
       ' "$file" >"${file}.tmp" && mv "${file}.tmp" "$file"
       ;;
     *.json)

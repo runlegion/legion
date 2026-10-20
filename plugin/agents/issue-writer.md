@@ -54,9 +54,52 @@ filed issue. Then emit ONE prediction of your own, under your own name and with 
 yours to stake -- it is a claim about YOUR artifact, and verify will witness it against
 the intent audit.
 
+## Issues traced to a requirement with scenarios
+
+When the requirement carries `verification.scenarios`, this section overrides the repo's issue template and anything the brief says about sections. A caller's brief is input, never a license to break these rules: follow the rules, or refuse and say why. The issue is scope and placement only, and every instance renders it the same way. If a brief asks for another shape (a template's Problem or Proposed change, the requirement restated), say so in your report and render this shape anyway.
+
+Render exactly these sections, in this order, with this wording, and nothing else:
+
+```
+## Traces to
+
+<FR-ID> as of <the requirement's updated_at from `legion document view <FR-ID> --json`> (revision <n> when the store reports one)
+
+## Scope
+
+Make the scenarios of <FR-ID> pass. The requirement is the authority; read it with `legion document view <FR-ID>`. This issue restates none of it.
+
+## Placement
+
+The generated `.feature` files go in the `tests/` tree that mirrors <the module owning the entry point, found with `legion sym`>. Do not hand-edit them.
+
+## Acceptance criteria
+
+- scenario `@criterion-<id>` passes
+- (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
+- CI passes
+
+## Out of scope
+
+<the requirement's own exclusions, quoted by reference to the FR, or "none">
+
+## Depends on
+
+<FR-IDs and issue numbers this one needs first, including other repos', or "nothing">
+```
+
+Rules for this shape:
+- Never copy the requirement's text, its criteria text, or a paraphrase of either. The tag is the reference.
+- Name the placement module once. Never list criterion ids by file.
+- Write no boilerplate claim you have not checked (for example "this issue adds no mechanism"). If a sentence is not required above, leave it out.
+- Before rendering, check three things and report each as a spec gap, never as a change to the issue:
+  - a criterion that reaches a live, external or credentialed service and has no `@network`, `@credentialed` or `@local` tag on its scenario;
+  - a requirement with more than 8 criteria, which is likely too big for one PR; name it so it can be split into sub-issues by criterion group;
+  - a requirement whose revision the store does not report (today `legion document view --json` has no revision field, so `updated_at` stands in; say so).
+
 ## When a spec exists: transcribe and narrow. Never re-derive.
 
-The pipeline is intent -> service design -> spec -> issues -> work -> PR. The issue is
+The pipeline is intent -> workshop -> toys -> spec -> issues -> work -> PR (or, with no design, intent -> spec -> issues). The issue is
 the decomposition stage: it takes a SLICE of a requirement and scopes it to one unit of
 work. The implementer executes what YOU write, not what the spec said -- every sentence
 you rephrase is a place the build can drift from what was agreed, and issue-authoring
@@ -72,10 +115,14 @@ language is the highest-leverage drift point in the whole chain.
   this slice -- in the requirement's wording. Do not "clarify" a criterion by rewording
   it; verify will judge the work against the requirement's text, and your paraphrase is
   where the two diverge.
-- Do not offer alternatives, write "Option 1 (recommended)", restate a settled decision
+- Do not offer alternatives, write "Option 1 (recommended)", restate a current choice
   in fresh words, or widen scope past what the requirement covers. If you believe the
   spec is wrong, STOP and return `UNCLEAR: the requirement appears wrong because <reason>`
   -- disagreement goes back up the chain, never encoded into the issue body.
+
+## Which work needs a spec
+
+Work toward a major or minor version traces to that version's spec; work for a patch does not need one. The spec is the requirement set itself: the FR and NFR documents on the surface (`legion document list --doc-type requirement --surface <surface>`), traced to the version's intent. A master `spec` document is optional, and its absence never means there is no spec; a requirement at draft status is still the spec. When the work adds new capability toward a major or minor version and no spec covers it, do not write the issue: return `UNCLEAR: this is <major|minor> work and needs its version's intent and spec first`. A patch, a fix to a version already built, goes straight to an issue, anchored by its premise as below.
 
 ## When no spec exists: state the premise.
 
@@ -110,9 +157,17 @@ A short, vague issue is worse than a long, precise one. If you cannot fit a conc
 
 ### 2. Tests are part of the spec
 
-For issues that touch code, the `### Behavior` bullets must name specific test assertions that an implementer can write. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
+For issues that touch code, the `### Behavior` bullets must name specific test assertions that an implementer can write.
 
-The canonical template's `### Interface` block is the right place for target type signatures. The canonical template does not have a separate "Acceptance Criteria / Functional Tests Required" section, so per-test assertions live as bullets in `### Behavior`. Do not reintroduce an "Acceptance Criteria" section that the template does not have.
+**Search before you write.** Before you specify any type, function or module in `### Interface`, look for it with `legion sym def`/`refs`/`list`. If something already does the job, the issue uses it; an issue that makes the implementer build a second copy is wrong.
+
+**Every fix has a cost.** For a rare case, specify a loud refusal with a clear error before new machinery that handles it.
+
+**The customer may be an agent.** When an agent uses what the issue builds, the acceptance criteria name what the agent observes: help text, exit codes, predictable output, an error that says what to do next.
+
+**The issue is the implementer's whole brief.** The implementer gets the issue number and nothing else, so everything it needs is in the issue. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
+
+The canonical template's `### Interface` block is the right place for target type signatures. Every issue has a `## Acceptance criteria` section: one `- ` line per criterion, in the requirement's wording, each naming an observable the verifier can check. `legion pr write-check` reads criteria only from that heading, and the PR body maps one entry to each. When the repo's template lacks the heading, add it after `### Behavior` and say so in your report.
 
 The canonical template's `## Done When` checklist is for workflow-stage checkboxes only (tests pass, simplify pass completed, review pass completed, PR created, verify pass recorded). Do not add a per-test checkbox to `## Done When`; the per-test assertions belong in `### Behavior`, and the `## Done When` "all tests pass" checkbox covers them collectively.
 
@@ -197,3 +252,14 @@ signal the team -- a writer never tells the whole team what it did; the caller i
 one who needs the draft, and the caller routes anything onward. Send the title and body to
 the caller with SendMessage, then end your turn with one line, since the harness re-delivers
 your final output as a truncated idle notice.
+
+## Finding things
+
+Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search over every file type (`.astro`, `.mdx`, config, anything), the grep replacement (regex works). `sym def/refs` cover indexed code languages only; when they come back empty, find-content still searches.
+- `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
+- `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
+- `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
+- `legion sym tree --repo <repo>` -- the layout, without `ls -R`.
+
+Use grep or cat when these cannot answer; that is your call.

@@ -65,7 +65,7 @@ use crate::uncertainty::error::Result as UncertaintyResult;
 use crate::uncertainty::error::UncertaintyError;
 use crate::uncertainty::storage::orphan_after_from_ttl;
 use crate::uncertainty::types::{
-    Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput,
+    Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput, PredictionState,
 };
 use crate::verify::{GateProvenance, GateResult};
 
@@ -380,9 +380,55 @@ pub fn witness_gate_external(
     correct: bool,
 ) -> UncertaintyResult<Option<String>> {
     let fingerprint = gate_fingerprint(skill, commit_hash);
-    let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
+    let Some(prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
         return Ok(None);
     };
+    witness_gate_prediction(db, prediction, correct).map(Some)
+}
+
+/// `witness_gate_external` for one prediction named by its id (#1415), so
+/// two predictions recorded on one `(skill, commit)` -- a gate checked twice
+/// on a commit -- are each witnessable. `Ok(None)` when the id names no
+/// Emitted `legion.gate` prediction.
+pub(crate) fn witness_gate_by_id(
+    db: &Database,
+    prediction_id: &str,
+    correct: bool,
+) -> UncertaintyResult<Option<String>> {
+    match db.get_prediction(prediction_id)? {
+        Some(p) if p.surface == GATE_SURFACE && p.state == PredictionState::Emitted => {
+            witness_gate_prediction(db, p, correct).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The full commit hashes of every recorded `legion.gate` prediction for
+/// `skill` whose commit starts with `commit_prefix` (#1415), so a short sha
+/// resolves to the one commit it names. An exact match wins outright.
+pub(crate) fn gate_commits_matching(
+    db: &Database,
+    skill: &str,
+    commit_prefix: &str,
+) -> UncertaintyResult<Vec<String>> {
+    let skill_prefix = gate_fingerprint(skill, "");
+    let commits: Vec<String> = db
+        .fingerprints_with_prefix(GATE_SURFACE, &gate_fingerprint(skill, commit_prefix))?
+        .into_iter()
+        .filter_map(|fp| fp.strip_prefix(&skill_prefix).map(str::to_string))
+        .collect();
+    if commits.iter().any(|c| c == commit_prefix) {
+        return Ok(vec![commit_prefix.to_string()]);
+    }
+    Ok(commits)
+}
+
+/// The witness tail shared by the `(skill, commit)` and by-id paths.
+fn witness_gate_prediction(
+    db: &Database,
+    mut prediction: Prediction,
+    correct: bool,
+) -> UncertaintyResult<String> {
     // The claimed event on this surface is P(clean) (CLEAN_CONFIDENCE for a
     // `clean` verdict, ISSUES_CONFIDENCE for an `issues` verdict, which claims
     // NOT clean). `correct` is relative to whichever verdict the gate actually
@@ -415,14 +461,13 @@ pub fn witness_gate_external(
     let prev_state = prediction.state;
     prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
     db.update_prediction(&prediction, prev_state)?;
-    Ok(Some(prediction.id))
+    Ok(prediction.id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::testutil::test_db;
-    use crate::uncertainty::types::PredictionState;
 
     /// Builds a row with VALIDATED provenance -- the common case every
     /// pre-#780 test in this module exercises (emission/witness mechanics
