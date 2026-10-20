@@ -1,5 +1,201 @@
 # Legion Changelog
 
+## 0.44.0
+
+The Discover-and-Design release. The plugin now ships the two stages that come before a
+build, each run by its own conductor skill. `/legion:discover` runs the first stage. Every
+concerned party, agent or person, writes notes on a board, and the stage ends with an
+accepted intent and a first design brief drawn from it. `/legion:design` takes the accepted
+intent's id and returns one package: a proven form, interface prototypes, a second design
+brief and a spec. The agents those skills dispatch ship with them: not-hotdog, shaper,
+brief-writer and spec-writer. The plugin also ships the document schemas they write, and
+each one is added to the store the first time it is used. The eight `sd-*` service-design
+skills of the old pipeline are removed. The removal list maps each one to what replaced it.
+Outside the design work, quality-gate findings are now keyed on the repo, so findings from
+one repo no longer block a PR in another with the same branch name. `legion statusline`
+prints the operator's line instead of the replay-band chip. The builder agents rusty and
+typey now ship in the plugin. The release also fixes the session lock, the `## Traces to`
+parser and the release bump.
+
+Minor release, for three reasons. First, there is new plugin surface: the `/legion:discover`,
+`/legion:design`, `/legion:intent` and `/legion:prototype` skills, and eight shipped
+document schemas. Second, a skill surface is removed: eight `sd-*` skills are gone. Third,
+the store has a schema migration. `SCHEMA_VERSION` goes from 2 to 3, which adds a nullable
+`repo` column to `quality_gate_findings` and the index
+`idx_quality_gate_findings_repo_branch_skill_status`. Existing rows are not backfilled: their
+`repo` stays NULL, and a NULL row matches every repo. An older binary opens a store stamped 3
+without migrating it, and the findings it writes carry a NULL repo. No wire-format change.
+
+### New
+
+- **`/legion:discover`, the first-stage conductor** (PR #1419, #1416). This skill handles a
+  new major or minor version; a patch needs no Discover. The skill first runs `/legion:intent`. It
+  runs cornerstone's `/workshop` if cornerstone is installed and skips it otherwise. Next, it
+  states the UI/UX goals when people will meet the service. It ends by writing a
+  `design-brief` document from the accepted intent, what the workshop closed with and those
+  goals. Before the brief lands, the skill asks the operator about anything those sources leave
+  open. It hands off to Design only after the operator and the repo agent both accept the
+  brief. The skill runs without stopping by default. Any party can ask to review a step, and
+  the conductor then waits there until that reviewer says go.
+- **`/legion:intent` and the not-hotdog agent** (PR #1394, #1386; PR #1419, #1416). The intent
+  skill runs a kickoff board with every concerned party. The board is a `board` document,
+  and each party adds its notes to it word for word, without names. not-hotdog takes `Board:
+  <id>` and writes the intent from the board alone. Each note goes to the why or the
+  not-why. A first-hand account of one event counts as the need it shows. Notes about the
+  team's own process or about how to build something are set aside for later, and the
+  speaker's standing adds no weight. A question the intent needs answered stays in the intent.
+  An unknown goes to research. A matter of taste or money goes to the operator. The intent is
+  saved as a draft, which `create`/`revise` check against the shipped intent schema. It becomes
+  final once every party has accepted it, and each acceptance is recorded as a reflection on
+  the intent's id. An intent belongs to one major or minor version. Once that version is
+  built, its intent is closed: the skill revises only the intent of a version not yet built,
+  and new capability starts the next version's intent. `rewind.py` copies the team's words
+  into a candidates file, keeps each `[n]` timestamp prefix, and keeps the file's order when
+  two timestamps are equal.
+- **`/legion:design` and the shaper agent** (PR #1419, #1416). `/legion:design` takes an
+  intent id and nothing else. It refuses an intent that is not final and stops when the
+  intent has no first design brief. It never revises the intent or restates it to the
+  agents: each agent gets a fixed template of ids and paths. The shaper works from the
+  intent, the design brief and what they cite, plus the code the form builds on. It writes
+  down the one form the operator's recorded choices describe and sketches how it is used. It
+  proves the form with toys whose predictions are written first, and every toy's measure must
+  quote the intent line it serves. It then draws the architecture: the crate map, the seams
+  and one owner for each concept. It records the results as RESEARCH documents. The shaper
+  never sweeps memory or the web, and every gap becomes a question for the operator. A form
+  the toys show to fail goes back to the operator. The conductor spawns a new sonnet reader
+  on `sketches-only.md` to critique the sketch. It sends back any part that no intent line or
+  recorded choice asks for. It ends by showing the team one package.
+- **`/legion:prototype` and the brief-writer agent** (PR #1396, #1387; PR #1392, #1388; PR
+  #1419, #1416). Each interface prototype is made on the Design canvas and saved as a
+  `prototype` document. That document is a pointer: it holds the intent the prototype was
+  made for, its canvas link and the part of the interface it explores. An agent-only service
+  gets no UX prototype and no brief, and its spec takes the form as its interface. If the
+  intent does not say who uses the service, the skill asks that first. If the canvas cannot
+  be reached, the step stops and no pointer is saved. brief-writer reads the intent's
+  prototype pointers and reviews and saves one `brief` document, the second design brief.
+  That brief covers per-part states and components, flows, and optional direction,
+  constraints and success. Every statement in it names the prototypes or reviews it came
+  from. A correction from a review takes priority over a prototype, and anything not yet
+  settled goes under `open`.
+- **The spec-writer agent** (PR #1395, #1389; PR #1399; PR #1419, #1416). spec-writer saves
+  FR, NFR and RESEARCH documents from the final intent, the shaper's form and RESEARCH, and
+  the briefs. It only writes down what those sources say: every part of the form becomes a
+  requirement and nothing else does. A number in the spec is a measured value. A claim the
+  proofs refuted stays refuted. Anything those sources leave unstated is reported to the
+  stage it belongs to as a finding, never filled in. A major or minor version with no intent
+  stops it. Every NFR acceptance line now carries a `verification.criteria` entry with an
+  `event` evidence kind. Before this, an NFR-only issue had no criterion ids, and `legion pr
+  write-check` refused it.
+- **Eight document schemas ship with the plugin and are added on first use** (PR #1393,
+  #1390; PR #1396, #1387; PR #1419, #1416). The schemas are `intent`, `design-brief`,
+  `brief`, `board`, `prototype`, `requirement`, `nfr` and `research`. They live in
+  `plugin/schemas/` and are compiled into the binary through `SHIPPED_SCHEMAS` in
+  `src/documents.rs`. The first `legion document create --doc-type <type>` for one of these
+  types adds its schema to the store, so the create is not refused for a missing schema.
+- **The Discover and Design process reference** (PR #1391, #1385). This is the file
+  `plugin/references/process.md`. The intent skill and not-hotdog find it through
+  `CLAUDE_PLUGIN_ROOT`, or through the newest cached legion plugin, and stop when they cannot
+  read it.
+- **The rusty and typey builder agents ship in the plugin, and the boot banner gives the
+  identity nudge** (PR #1406, #1405). rusty and typey are the agents that build one issue
+  each. They were proven on smugglr and the typey fixture. They replace the project-level
+  `rust` agent, which is removed together with the `wave2` workflow that dispatched it. Before
+  this release, the nudge to write an identity reflection came from the operator's own
+  SessionStart hook. Now a repo with no identity reflection gets that nudge from the identity
+  section of `plugin/hooks/lib/boot-sections.sh`, both at startup and after compaction.
+- **`legion uncertainty` shows a prediction's claim and can witness one by id** (PR #1418,
+  #1415). `legion uncertainty predictions` prints each prediction's payload on a line under
+  its row. `--json` gives the same payload as `prediction_payload`. `witness-gate` takes a new
+  `--id` flag, which cannot be combined with `--skill`/`--commit`. With it, two predictions on
+  the same skill and commit can each be witnessed. A short `--commit` now resolves to the one
+  recorded commit it is a prefix of. When the prefix matches several commits, the error names
+  each full sha. When it matches none, the error asks for the full sha.
+
+### Fixed
+
+- **Quality-gate findings are keyed on the repo, and a detached HEAD is refused** (PR #1413,
+  #1403). Findings used to be keyed on branch and skill only. A pending finding in one repo
+  could therefore block `legion pr create` in another repo on a branch with the same name.
+  `quality-gate record` and `check` now take the repo from the current directory's main
+  checkout and save it on every finding. `list_pending_findings`, `batch_ack_low_findings`
+  and the duplicate check in `persist_raw_findings` now each look only at findings for that
+  repo. Both commands refuse a detached HEAD before they reconcile, refuse or insert
+  anything, and the error says to run `git switch <branch>`. `finding-list` gains a `--repo`
+  flag and a REPO column, and `finding-ack` acts only on the current repo. This is the
+  schema 3 migration named above.
+- **The session lock records the session's pid when a live `sh` wrapper sits between them**
+  (PR #1412, #1400). On some hosts, Claude Code's `/bin/sh -c` hook wrapper does not `exec`
+  its last command. There, `$PPID` was the short-lived wrapper, so watch treated the lock as
+  stale and started a second agent. `legion_session_pid` in `plugin/hooks/session-lock.sh`
+  now goes up one process level, but only past an `sh`, `dash` or `bash` whose arguments name
+  `hooks/session-lock.sh`. If `ps` fails, it uses `$PPID`.
+- **A `## Traces to` bullet that names criteria without the bracket is refused** (PR #1411,
+  #1401). Take a requirement bullet with no bracket whose prose names criteria in another
+  spelling, such as `- FR-X (criteria a, b)`. It was read as covering the whole requirement,
+  and nothing refused it. `trace_bullet_bracket_defect` now catches this case. As a result,
+  `issue create`, `sub-issue create`, `verify --issue` and `pr write-check --issue` refuse
+  the bullet with an error that shows the `[criteria: id, id]` form.
+- **The release bump updates the version pins on Cargo path dependencies** (PR #1409, #1383).
+  For a `.toml` source, `bump_source_file` in `scripts/release.sh` still rewrites the first
+  `<leaf> = "<current>"` line. It now also rewrites `version = "<current>"` on every line
+  that contains `path = "`, so a workspace's internal pins move with the main version.
+  Registry dependencies are not touched.
+- **`legion verify --help` shows the spec verdict shape** (PR #1410, #1402). The long help
+  for `--verdicts-file` now shows both verdict shapes and says when each one applies. The
+  issue shape is for untraced issues, and the spec shape is for issues with a `## Traces to`
+  section. It also covers scoping, stale revisions and optional artifacts. The legion-verify
+  agent and skill docs show both shapes too. A test checks that every serde key of
+  `AcResult`, `SpecAcResult` and `VerdictArtifact` appears in the help.
+
+### Changed
+
+- **`legion statusline` prints the operator's line, and the replay-band chip is removed** (PR
+  #1407, #1404). The line shows the model, directory, branch, `ctx:`, `s:` and `w:`,
+  separated by two spaces, for example `Opus 5.5  legion  feat/x  ctx:42%  s:13%  w:61%`. A
+  part with no input is left out. The branch comes from `git symbolic-ref` with
+  `GIT_OPTIONAL_LOCKS=0`, so it never waits on a git lock or takes one. Every render prints
+  its own line, including when there is no `session_id`. The per-session stamp file now
+  only limits how often samples are saved. The chip, with its thresholds and glyphs, is
+  gone.
+- **Review effort matches the size of the diff, and review adds no work** (PR #1419, #1416).
+  A diff with only prose gets one pass from the reviewer itself. A small code change goes to
+  the harness's `/code-review` at its low setting, and the `legion-review` gate that
+  `legion pr create` requires is still recorded. A large diff gets reviewers only for the
+  dimensions it touches, and security review runs only when the diff handles input, shell,
+  secrets, files or the network. In every dimension, anything the scenarios and criteria do
+  not name is reported as a spec gap. It is never turned into work for the implementer.
+  Verify gives each criterion the verdict of its tagged scenario and adds no criteria of its
+  own.
+- **issue-writer writes issues traced to scenarios in one fixed shape** (PR #1419, #1416).
+  The shape is `Traces to`, Scope, Out of scope, Placement, Acceptance criteria as
+  `scenario @criterion-<id> passes` lines, and Depends on. It overrides the repo template
+  and any brief, and it copies no requirement text. A requirement with more than 8 criteria
+  is split. A missing revision is flagged. A major or minor version needs a spec, which is
+  the set of FR and NFR documents on the surface. A patch goes straight to an issue anchored
+  on what it assumes.
+
+### Removed
+
+- **The eight `sd-*` skills of the old service-design pipeline** (PR #1419, PR #1408, #1384).
+  The files were deleted in PR #1419. PR #1408 landed afterwards as an empty commit that
+  carries the issue reference. The plugin had kept shipping these skills after their
+  replacements arrived. Four of them had the same names as the cornerstone agents that
+  replaced them, so a session saw `legion:sd-write-persona` next to `sd-write-persona` and
+  could pick the old one. The old `sd-write-spec` also turned blueprint fail points and
+  ecosystem moments of truth straight into requirements, which the current design no longer
+  does. Each removed skill and what replaced it:
+  - `sd-service-design`: cornerstone's `/workshop` conductor.
+  - `sd-intent-review`: `/legion:intent`.
+  - `sd-discover`: `/legion:discover`.
+  - `sd-ecosystem-imagine`: cornerstone's `sd-ecosystem-imagine` agent.
+  - `sd-write-persona`: cornerstone's `sd-write-persona` agent.
+  - `sd-write-journey`: cornerstone's `sd-write-journey` agent.
+  - `sd-write-blueprint`: cornerstone's `sd-write-blueprint` agent.
+  - `sd-write-spec`: the spec-writer agent, which ships in this plugin.
+
+  The cornerstone replacements are only available when cornerstone is installed.
+  `/legion:discover` skips the workshop when it is not.
+
 ## 0.43.5
 
 The amendment-criteria release. `legion verify` now requires a verdict for every
