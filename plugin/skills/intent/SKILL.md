@@ -144,4 +144,4 @@ Then revise the intent with `meta.status: final`.
 
 ## Hand off
 
-Tell the team the intent id, and that the next step is Design. Design takes the intent id and nothing else, and works from the intent alone; what the intent does not say comes back as a question.
+Tell the team the intent id, and that Discover goes on from here: the workshop when cornerstone is installed, the UI/UX goals, and its close, which writes the first design brief. Design takes the intent id and nothing else, finds that brief by the intent id, and works from the intent and the brief; what they do not say comes back as a question.
