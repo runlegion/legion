@@ -268,17 +268,22 @@ pub(crate) enum UncertaintyAction {
     /// trustworthy in BOTH directions, not just the caught-by-review one.
     ///
     /// Looks the prediction up by the same `(skill, commit)` fingerprint
-    /// `legion quality-gate list` prints, so the operator never needs an
-    /// opaque prediction id. Errors if no Emitted `legion.gate` prediction
-    /// matches (never recorded, already witnessed, or orphaned).
+    /// `legion quality-gate list` prints, taking the latest Emitted one, or
+    /// by `--id` when one `(skill, commit)` carries more than one prediction
+    /// (#1415). Errors if no Emitted `legion.gate` prediction matches (never
+    /// recorded, already witnessed, or orphaned).
     WitnessGate {
+        /// Prediction id to witness, in place of `--skill` and `--commit`.
+        #[arg(long, conflicts_with_all = ["skill", "commit"])]
+        id: Option<String>,
         /// Gate skill name the verdict was recorded under (e.g.
         /// "legion-simplify", "legion-review").
-        #[arg(long)]
-        skill: String,
-        /// Commit hash the gate verdict was recorded against.
-        #[arg(long)]
-        commit: String,
+        #[arg(long, required_unless_present = "id")]
+        skill: Option<String>,
+        /// Commit hash the gate verdict was recorded against: the full sha,
+        /// or a prefix of it that names one recorded commit.
+        #[arg(long, required_unless_present = "id")]
+        commit: Option<String>,
         /// Whether the recorded verdict was actually correct, relative to
         /// WHICHEVER verdict the gate recorded (clean or issues) -- not a
         /// bare "was the diff clean" flag. For a clean verdict: true
@@ -679,29 +684,84 @@ fn run_uncertainty(action: UncertaintyAction) -> error::Result<()> {
         }
 
         UncertaintyAction::WitnessGate {
+            id,
             skill,
             commit,
             correct,
         } => {
-            let witnessed_id =
-                gate_trust::witness_gate_external(&database, &skill, &commit, correct)
-                    .map_err(|e| error::LegionError::WorkSource(format!("{e}")))?;
-            let Some(id) = witnessed_id else {
-                return Err(error::LegionError::WorkSource(format!(
-                    "no emitted legion.gate prediction for skill={skill} commit={commit} \
-                     (never recorded, already witnessed, or orphaned)"
-                )));
-            };
-            let out_json = serde_json::json!({
-                "id": id,
-                "skill": skill,
-                "commit": commit,
-                "correct": correct,
-            });
+            let out_json = witness_gate(
+                &database,
+                id.as_deref(),
+                skill.as_deref(),
+                commit.as_deref(),
+                correct,
+            )?;
             writeln!(out, "{}", serde_json::to_string(&out_json)?)?;
         }
     }
     Ok(())
+}
+
+/// Body of `legion uncertainty witness-gate`: witnesses by `--id` when one
+/// is given, else resolves `--commit` (a full sha or a prefix naming one
+/// recorded commit) and witnesses by `(skill, commit)` (#1415).
+fn witness_gate(
+    database: &crate::db::Database,
+    id: Option<&str>,
+    skill: Option<&str>,
+    commit: Option<&str>,
+    correct: bool,
+) -> error::Result<serde_json::Value> {
+    let wrap =
+        |e: uncertainty::error::UncertaintyError| error::LegionError::WorkSource(format!("{e}"));
+    if let Some(id) = id {
+        let witnessed = gate_trust::witness_gate_by_id(database, id, correct).map_err(wrap)?;
+        return match witnessed {
+            Some(id) => Ok(serde_json::json!({ "id": id, "correct": correct })),
+            None => Err(error::LegionError::WorkSource(format!(
+                "no emitted legion.gate prediction with id={id} \
+                 (no such id, another surface, already witnessed, or orphaned)"
+            ))),
+        };
+    }
+    // clap requires both when --id is absent.
+    let (Some(skill), Some(commit)) = (skill, commit) else {
+        return Err(error::LegionError::WorkSource(
+            "witness-gate needs --id, or both --skill and --commit".to_string(),
+        ));
+    };
+    let commits: Vec<String> =
+        gate_trust::gate_commits_matching(database, skill, commit).map_err(wrap)?;
+    let full: &str = match commits.as_slice() {
+        [one] => one,
+        [] => {
+            return Err(error::LegionError::WorkSource(format!(
+                "no legion.gate prediction recorded for skill={skill} on a commit \
+                 starting with {commit}: pass the full commit sha the gate was recorded against"
+            )));
+        }
+        many => {
+            return Err(error::LegionError::WorkSource(format!(
+                "commit {commit} matches more than one gated commit for skill={skill}: \
+                 pass the full sha, one of {}",
+                many.join(", ")
+            )));
+        }
+    };
+    let witnessed =
+        gate_trust::witness_gate_external(database, skill, full, correct).map_err(wrap)?;
+    match witnessed {
+        Some(id) => Ok(serde_json::json!({
+            "id": id,
+            "skill": skill,
+            "commit": full,
+            "correct": correct,
+        })),
+        None => Err(error::LegionError::WorkSource(format!(
+            "no emitted legion.gate prediction for skill={skill} commit={full} \
+             (already witnessed or orphaned)"
+        ))),
+    }
 }
 
 /// The `--state` values `legion uncertainty predictions` accepts, in
@@ -806,6 +866,7 @@ fn write_predictions(
                     "outcome_correctness": p.outcome_correctness.map(|c| c.value()),
                     "created_at": p.created_at,
                     "orphan_after": p.orphan_after,
+                    "prediction_payload": p.prediction_payload,
                 })
             })
             .collect();
@@ -857,6 +918,7 @@ fn write_predictions(
             p.created_at,
             p.orphan_after.as_deref().unwrap_or("-"),
         )?;
+        writeln!(out, "    claim: {}", p.prediction_payload)?;
     }
     Ok(())
 }
@@ -1608,6 +1670,95 @@ mod tests {
         assert!(row["outcome_correctness"].is_null());
         assert_eq!(row["created_at"], p.created_at.as_str());
         assert_eq!(row["orphan_after"], "2030-01-01T00:00:00+00:00");
+        assert_eq!(row["prediction_payload"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn predictions_show_each_claim_in_text_and_json() {
+        let db = test_db();
+        let mut i = input("legion.rust", None);
+        i.prediction_payload = serde_json::json!({"lines": 130, "deps": 0});
+        db.insert_prediction(&Prediction::new(i)).unwrap();
+
+        let json: String = run(&db, None, None, true, 50);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(rows[0]["prediction_payload"]["lines"], 130);
+
+        let text: String = run(&db, None, None, false, 50);
+        assert!(text.contains(r#"claim: {"lines":130,"deps":0}"#), "{text}");
+    }
+
+    /// An emitted `legion.gate` prediction on `(skill, commit)` claiming
+    /// `result`, inserted directly.
+    fn gate_prediction(
+        db: &crate::db::Database,
+        skill: &str,
+        commit: &str,
+        result: &str,
+    ) -> String {
+        let mut i = input(gate_trust::GATE_SURFACE, None);
+        i.input_fingerprint = gate_trust::gate_fingerprint(skill, commit);
+        i.prediction_payload = serde_json::json!({ "result": result });
+        let p = Prediction::new(i);
+        db.insert_prediction(&p).unwrap();
+        p.id
+    }
+
+    #[test]
+    fn witness_gate_by_id_witnesses_each_prediction_on_one_skill_and_commit() {
+        let db = test_db();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let failed = gate_prediction(&db, "legion-pr-write", sha, "issues");
+        let passed = gate_prediction(&db, "legion-pr-write", sha, "clean");
+
+        let out = witness_gate(&db, Some(&failed), None, None, true).unwrap();
+        assert_eq!(out["id"], failed.as_str());
+        let out = witness_gate(&db, Some(&passed), None, None, true).unwrap();
+        assert_eq!(out["id"], passed.as_str());
+
+        let f = db.get_prediction(&failed).unwrap().unwrap();
+        assert_eq!(f.outcome_label, Some(OutcomeLabel::Escalated));
+        let p = db.get_prediction(&passed).unwrap().unwrap();
+        assert_eq!(p.outcome_label, Some(OutcomeLabel::Shipped));
+
+        // Witnessed already: a second witness by id is refused.
+        assert!(witness_gate(&db, Some(&passed), None, None, true).is_err());
+        // An id on another surface is refused.
+        let other = Prediction::new(input("legion.task", None));
+        db.insert_prediction(&other).unwrap();
+        assert!(witness_gate(&db, Some(&other.id), None, None, true).is_err());
+    }
+
+    #[test]
+    fn witness_gate_resolves_a_short_sha_naming_one_commit() {
+        let db = test_db();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let id = gate_prediction(&db, "legion-review", sha, "clean");
+        let out = witness_gate(&db, None, Some("legion-review"), Some("0123456"), true).unwrap();
+        assert_eq!(out["id"], id.as_str());
+        assert_eq!(out["commit"], sha);
+    }
+
+    #[test]
+    fn witness_gate_names_the_full_shas_when_a_short_sha_is_ambiguous_or_unknown() {
+        let db = test_db();
+        let a = "abc1230000000000000000000000000000000000";
+        let b = "abc1239999999999999999999999999999999999";
+        gate_prediction(&db, "legion-review", a, "clean");
+        gate_prediction(&db, "legion-review", b, "clean");
+
+        let err = witness_gate(&db, None, Some("legion-review"), Some("abc123"), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(a) && err.contains(b), "{err}");
+
+        let err = witness_gate(&db, None, Some("legion-review"), Some("fff"), true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pass the full commit sha"), "{err}");
+
+        // The full sha still witnesses exactly.
+        assert!(witness_gate(&db, None, Some("legion-review"), Some(a), true).is_ok());
     }
 
     #[test]
