@@ -383,7 +383,25 @@ pub fn trace_bullet_bracket_defect(bullet: &TraceBullet) -> Option<String> {
              bracket for whole-requirement scope, or name at least one id"
         ));
     }
+    if criteria.is_none() && prose.as_deref().is_some_and(mentions_criteria) {
+        return Some(format!(
+            "requirement '{document_id}' bullet mentions criteria without a '[criteria: id, id]' \
+             bracket, so the mention scopes nothing and the bullet covers the whole requirement \
+             -- write '- {document_id} [criteria: id, id]' to name the serviced criteria, or \
+             remove the mention for whole-requirement scope"
+        ));
+    }
     None
+}
+
+/// True when `prose` contains `criteria` or `criterion` as a whole word,
+/// ignoring case, with word boundaries at any non-alphanumeric character
+/// (#1401): a bracketless bullet that names criteria in any other spelling
+/// would otherwise silently widen to whole-requirement scope.
+fn mentions_criteria(prose: &str) -> bool {
+    prose
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case("criteria") || word.eq_ignore_ascii_case("criterion"))
 }
 
 /// Truncate a string to at most `max` characters, appending `suffix` when
@@ -693,6 +711,36 @@ mod tests {
         assert!(trace_bullet_bracket_defect(bare).is_none());
         let none = &parse_issue_body("## Traces to\n\n- None -- reason\n").trace[0];
         assert!(trace_bullet_bracket_defect(none).is_none());
+    }
+
+    #[test]
+    fn bracket_defect_flags_criteria_mention_outside_bracket() {
+        let defect = |line: &str| {
+            let parsed = parse_issue_body(&format!("## Traces to\n\n- {line}\n"));
+            trace_bullet_bracket_defect(&parsed.trace[0])
+        };
+
+        assert!(
+            defect("FR-X (criteria a, b)").is_some_and(|m| m.contains("[criteria: id, id]")),
+            "parenthesised criteria mention must be flagged and name the bracket form"
+        );
+        assert!(
+            defect(
+                "FR-X (criteria 01a14be5-057d-7163-9138-905f19040133, \
+                 01a14be5-057d-7163-9138-9064dbf7fa68)"
+            )
+            .is_some(),
+            "the smugglr#499 spelling must be flagged"
+        );
+        assert!(defect("FR-X -- covers criterion a").is_some());
+        assert!(defect("FR-X -- CRITERIA a and b").is_some());
+
+        assert!(defect("FR-X [criteria: a, b]").is_none());
+        assert!(defect("FR-X [criteria: a] -- adds retry").is_none());
+        assert!(defect("FR-X [criteria: a] -- covers the hashing criterion").is_none());
+        assert!(defect("FR-X -- adds retry (native path)").is_none());
+        assert!(defect("FR-X").is_none());
+        assert!(defect("None -- criteria live in another repo").is_none());
     }
 
     // -- #961: acceptance/done-when merge, not clobber ----------------------

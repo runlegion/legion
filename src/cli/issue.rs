@@ -890,6 +890,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_trace_refuses_criteria_mention_outside_bracket() {
+        let db = test_db();
+        let ids = seed_requirement(&db, "FR-TRACE-PAREN", None);
+        let body = format!("## Traces to\n\n- FR-TRACE-PAREN (criteria {})\n", ids[0]);
+        let trace = card_parse::parse_issue_body(&body).trace;
+        let err = validate_trace(&db, &trace).unwrap_err();
+        let error::LegionError::WorkSource(msg) = &err else {
+            panic!("expected a WorkSource refusal, got: {err}");
+        };
+        assert!(
+            msg.starts_with("## Traces to:") && msg.contains("[criteria: id, id]"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
     fn validate_trace_refuses_nonexistent_document() {
         let db = test_db();
         let trace = vec![card_parse::TraceBullet::Requirement {

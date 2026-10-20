@@ -3877,13 +3877,20 @@ fn verify_issue_requires_amendment_done_when_criteria() {
 /// `doc_id`, with no `[criteria: ...]` bracket (whole requirement in scope).
 #[cfg(unix)]
 fn traced_issue_stub_plugin(doc_id: &str) -> String {
+    trace_bullet_stub_plugin(&format!("{doc_id} -- adds the retry path"))
+}
+
+/// A `view-issue` stub whose `## Traces to` section carries one bullet,
+/// `- {bullet}`, verbatim.
+#[cfg(unix)]
+fn trace_bullet_stub_plugin(bullet: &str) -> String {
     format!(
         r##"#!/bin/bash
 set -e
 case "${{1:-}}" in
   view-issue)
     cat <<BODY
-{{"url":"https://example.com/issues/9","number":9,"title":"traced issue","body":"Why it matters.\n\n## Traces to\n- {doc_id} -- adds the retry path\n","labels":[],"assignees":null,"state":"OPEN"}}
+{{"url":"https://example.com/issues/9","number":9,"title":"traced issue","body":"Why it matters.\n\n## Traces to\n- {bullet}\n","labels":[],"assignees":null,"state":"OPEN"}}
 BODY
     ;;
   *)
@@ -4008,6 +4015,73 @@ fn verify_issue_traced_requirement_refuses_nonexistent_document() {
     assert!(
         stderr.contains("FR-DOES-NOT-EXIST") && stderr.contains("does not exist"),
         "expected a missing-requirement refusal, got: {stderr}"
+    );
+}
+
+/// `verify --issue` refuses a bracketless trace bullet whose prose mentions
+/// criteria (`- FR-X (criteria <id>)`, the smugglr#499 spelling): the mention
+/// scopes nothing, so the bullet would silently widen to the whole
+/// requirement (#1401). The refusal returns before verdicts are read.
+#[cfg(unix)]
+#[test]
+fn verify_issue_traced_requirement_refuses_criteria_mention_outside_bracket() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+
+    let doc_id = "FR-TRACE-PAREN";
+    let doc_payload: String =
+        requirement_payload(serde_json::json!({"criteria": [{"text": "ships the retry path"}]}));
+    let doc_out = run_with_stdin(
+        legion_cmd(data_dir.path()).args([
+            "document",
+            "create",
+            "--doc-type",
+            "requirement",
+            "--owner",
+            "legion",
+            "--id",
+            doc_id,
+        ]),
+        doc_payload.as_bytes(),
+    );
+    assert!(
+        doc_out.status.success(),
+        "document create failed: {}",
+        String::from_utf8_lossy(&doc_out.stderr)
+    );
+    let view = run_ok(legion_cmd(data_dir.path()).args(["document", "view", doc_id, "--json"]));
+    let view_json: serde_json::Value = serde_json::from_str(view.trim()).unwrap();
+    let criterion_id = view_json["payload"]
+        .as_str()
+        .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        .and_then(|v| {
+            v["verification"]["criteria"][0]["id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("assigned criterion id");
+
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &trace_bullet_stub_plugin(&format!("{doc_id} (criteria {criterion_id})")),
+    );
+
+    let verdicts = data_dir.path().join("verdicts.json");
+    std::fs::write(&verdicts, "[]").unwrap();
+
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "9",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("[criteria: id, id]"),
+        "expected a criteria-mention refusal, got: {stderr}"
     );
 }
 
