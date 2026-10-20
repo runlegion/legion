@@ -966,8 +966,8 @@ impl Database {
     }
 
     /// First use (#1390): make sure the store holds exactly the shipped
-    /// schema for each of intent, brief, requirement, nfr, research,
-    /// prototype and board.
+    /// schema for each of intent, design-brief, brief, requirement, nfr,
+    /// research, prototype and board.
     ///
     /// A type with no schema gets the shipped one landed. A type with one
     /// schema whose content differs gets it revised in place, so the store

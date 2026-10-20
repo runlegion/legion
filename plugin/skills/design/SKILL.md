@@ -73,7 +73,7 @@ Keep the sprint's discipline: make it before you argue it, evidence over opinion
 
    For an agent-only service, leave out the `Brief:` line.
 
-   It reads back, asks what nothing answered, and lands the requirement set.
+   It carries the intent and Design's documents into the requirement set, lands it, and returns any defect it found in them as a finding; a finding goes back to the step that owns it.
 5. **Steps run in this order, and a later step can send you back.** A prototype that shows the form is wrong, or a spec question no proof answers, returns the work to step 1. The way back is the operator's words or the later agent's words, verbatim, never your summary of them.
 
 ## Optional reviews

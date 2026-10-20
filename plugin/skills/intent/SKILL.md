@@ -66,7 +66,7 @@ The intent forms in the conversation, across many messages, often before anyone 
 
 Put the board up early, in plain prose, and redraw it at each natural pause. Each sticky is short and says one thing, and each sits in one box. Place the operator's stickies; when you move one or read a terse answer, say where it went and why. Write your own stickies: what you know of the domain, what is true today, the people it serves, the risks you can see. Mark which stickies are your reading in the conversation so the operator can strike them, and put them on the board like any other. A board you only transcribe is a board nobody led.
 
-How it is used is part of the intent, and the intent is not done without it: who uses the service (agents, humans, or both), how agents reach it (CLI, JSON or MCP), how humans reach it (CLI or UI), and whether a UI is web or native. These answers decide what Design makes, so they are settled on the board, never left for later.
+How it is used is part of the intent, and the intent is not done without it: who uses the service (agents, humans, or both), how agents reach it (CLI, JSON, MCP, or only as a library inside another app), how humans reach it (CLI or UI), and whether a UI is web or native. These answers decide what Design makes, so they are settled on the board, never left for later.
 
 **Route every question.** Each question the board raises goes to exactly one place:
 

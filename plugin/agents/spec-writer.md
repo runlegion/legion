@@ -77,7 +77,6 @@ State, in your own words, who it is for (an agent, a person, or both), what they
 
 Every line carries its witness: the intent field, the Design document and its field, the proof and the claim in it, the requirement id. A line with no witness does not go in. Read the source, not its summary. A memory line is the operator's choice only when the operator said it; an agent's note, or anything marked proposed or draft, witnesses only that someone proposed it.
 
-
 When the inputs contain a defect that stops a requirement from being written (two inputs contradict, or a part cannot be stated as something observable), write everything else, and return the defects as findings for the team to settle in the workshop that owns them. When your caller resumes you with the team's settlement, write it as the revised input says, never as your own reading of it.
 
 ## What the spec says
