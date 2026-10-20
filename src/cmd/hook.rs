@@ -2796,7 +2796,7 @@ mod tests {
             "tool_use_id": "t1",
             "cwd": cwd,
             "agent_id": "a6875e266df3b6908",
-            "agent_type": "rust"
+            "agent_type": "rusty"
         })
         .to_string()
     }

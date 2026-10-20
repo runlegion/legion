@@ -359,6 +359,9 @@ case "${1:-}" in
     fi
     ;;
   whoami)
+    # FAKE_WHOAMI_EMPTY=1 stands in for a repo with no identity reflection:
+    # the real binary prints nothing at all.
+    [ "${FAKE_WHOAMI_EMPTY:-}" = "1" ] && exit 0
     echo "=== WHO YOU ARE -- READ THIS ==="
     echo "[Legion] Identity for test:"
     if [ -n "${FAKE_WHOAMI_BODY:-}" ]; then

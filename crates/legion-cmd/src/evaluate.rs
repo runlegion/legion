@@ -258,7 +258,7 @@ mod tests {
         let out = decide_fields(
             &policy(),
             ToolKind::Agent,
-            &json!({"subagent_type": "rust"}),
+            &json!({"subagent_type": "general-purpose"}),
             &Context::default(),
         );
         assert_eq!(out.decision, Decision::Allow { note: None });
