@@ -38,10 +38,50 @@ if [ -z "${REPO:-}" ]; then
   exit 0
 fi
 
-# $PPID is the Claude session process -- the long-lived pid the lock must
-# track. Passing it explicitly matters: without --pid the CLI falls back to
-# its own process id, which is this short-lived hook and is dead moments
-# later, so the lock would read as stale immediately.
-("$LEGION" watch session-start --repo "$REPO" --pid "$PPID" >/dev/null 2>&1 &)
+# legion_session_pid -- print the pid the lock must name: the long-lived
+# session process, never this short-lived hook. The hook's parent is not
+# always that process. Claude Code runs hooks as `/bin/sh -c "bash .../hooks/
+# session-lock.sh"`; where that shell execs its last command (macOS) $PPID is
+# the session, but where it does not (observed on Linux, #1400) $PPID is a
+# shell wrapper that exits with the hook, leaving a lock watch reads as stale.
+# So when $PPID is an sh/dash/bash whose command line names this hook, step
+# up exactly one level to its parent; otherwise keep $PPID. One level only,
+# so it can never overshoot to a terminal shell or a long-lived host. The
+# match is on the suffix because the wrapper's argv may still carry an
+# unexpanded ${CLAUDE_PLUGIN_ROOT}. Every failed or empty `ps` lookup falls
+# back to $PPID silently: this never fails and prints nothing but the pid.
+legion_session_pid() {
+  local name args parent
+  name=$(ps -o comm= -p "$PPID" 2>/dev/null) || name=""
+  name="${name##*/}"
+  case "${name#-}" in
+    sh | dash | bash) ;;
+    *)
+      printf '%s\n' "$PPID"
+      return 0
+      ;;
+  esac
+  args=$(ps -o args= -p "$PPID" 2>/dev/null) || args=""
+  case "$args" in
+    *hooks/session-lock.sh*) ;;
+    *)
+      printf '%s\n' "$PPID"
+      return 0
+      ;;
+  esac
+  parent=$(ps -o ppid= -p "$PPID" 2>/dev/null) || parent=""
+  parent="${parent//[[:space:]]/}"
+  case "$parent" in
+    '' | *[!0-9]*) printf '%s\n' "$PPID" ;;
+    *) printf '%s\n' "$parent" ;;
+  esac
+  return 0
+}
+
+# Passing the pid explicitly matters: without --pid the CLI falls back to its
+# own process id, which is this short-lived hook and is dead moments later,
+# so the lock would read as stale immediately.
+SESSION_PID=$(legion_session_pid)
+("$LEGION" watch session-start --repo "$REPO" --pid "$SESSION_PID" >/dev/null 2>&1 &)
 
 exit 0
