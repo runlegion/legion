@@ -9,7 +9,7 @@ description: |
   /legion:legion-verify.
 version: 1.0.0
 user-invocable: true
-allowed-tools: Bash, Read, Task
+allowed-tools: Bash, Read, Task, Skill
 ---
 
 # Legion Review
@@ -30,7 +30,14 @@ without guessing.
    branch; `legion issue view --repo <repo> --number <n>` for the linked issue's acceptance
    criteria. No linked issue is itself a finding (the workflow requires one).
 
-2. **Fan out review dimensions.** Spawn parallel review agents via the Task tool using
+2. **Weigh the change before you spend on it.** Read the diff's file list and size first; the review is sized to what changed, not run in full every time.
+   - **Prose only** (docs, changelog, comments, skill and agent text, README): review it yourself, in one pass, with no agents and no refuters. Check it against the issue, check that it does not contradict itself or the code, and that every command, path and link it names is real. Security applies only to a command the text tells someone to run.
+   - **Small code** (under ~100 changed lines, or config): check the diff against the issue yourself, in one pass, then run the harness review at its small setting (`/code-review low`) for correctness, with no agent of your own. Its findings pass the same scope line as every dimension: a case, test or hardening the spec and the issue do not name is a spec gap, never a finding. You still decide and record the gate (steps 4 and 5); the harness review records nothing. Grade its findings yourself: a correctness bug inside the spec's scope is HIGH, a cleanup is LOW. They skip the refuters in step 3, because the small setting already reports only what it is confident of. Say so in the report.
+   - **Everything else:** fan out, below, with only the dimensions the diff touches. `security` runs when the diff handles input, shell, secrets, files or the network; a diff that touches none of those skips it and says so.
+
+   Tests, builds and lints are verify's and CI's work, not review's: never run the suite to review prose.
+
+   **Fan out review dimensions.** Spawn parallel review agents via the Task tool using
    subagent_type `legion:legion-review` (plugin agents register namespaced; the bare
    `legion-review` form exists only if a repo also carries a local .claude/agents copy --
    check the available-agents list if the namespaced form does not resolve), one per
@@ -38,11 +45,14 @@ without guessing.
    - `spec`: acceptance-criteria-vs-diff, scope creep, claims the diff does not implement
    - `correctness`: error handling, silent failures, and edge cases the issue names or the
      change introduces
-   - `quality`: repo CLAUDE.md invariants, idioms, test coverage and quality
+   - `quality`: repo CLAUDE.md invariants, idioms, and whether the tests that exist check what they claim (not tests you would add)
    - `security`: injection, unchecked input, secrets, shell quoting -- in code the diff adds
 
-   For a small PR (docs-only, or under ~100 changed lines), one combined agent covering all
-   dimensions is acceptable -- say so in the report.
+   Every dimension prompt carries the same scope line, verbatim: "The authority is the spec's
+   scenarios and the issue's acceptance criteria. A case, test, field, abstraction or hardening
+   they do not name is not a finding: report it as a spec gap, one line, never as work for the
+   implementer." A dimension that returns invented work has over-claimed; drop it at
+   verification.
 
    **Delegation discipline.** Spawn count is the cost of this stage, not the depth of any
    one agent, so keep it deliberate. Use one agent where one will do and fan out only when
@@ -54,7 +64,7 @@ without guessing.
    spawns it unless its definition pins one, so a fan-out multiplies whatever model this
    skill is running on.
 
-3. **Adversarial verification.** For every HIGH and MED finding the dimensions return, spawn
+3. **Adversarial verification.** Prose-only reviews skip this step. For every HIGH and MED finding the dimensions return, spawn
    one refuter agent (subagent_type `legion:legion-review`) prompted to REFUTE the finding: read
    the cited code and argue it is wrong, mitigated elsewhere, or out of the PR's scope.
    Findings the refuter kills are dropped; findings that survive are reported. Record the
@@ -120,8 +130,8 @@ Inherited from the legion-review agent definition and non-negotiable: every find
 file:line; claims the diff does not implement are HIGH; a finding is only what the agent
 definition lists -- the issue unmet, a false PR claim, broken existing behavior, a hard-rule
 violation, or a demonstrated defect in a case the issue covers or the change introduces;
-a constructed case outside the issue is a one-line note, never a finding, never a HIGH, and
-never a new issue; no style arguments beyond the repo's own CLAUDE.md and lint gates; no
+a constructed case outside the issue or its scenarios is a one-line spec gap, never a
+finding, never a HIGH, and never a new issue; no style arguments beyond the repo's own CLAUDE.md and lint gates; no
 code is written or fixed by this skill -- the fix loop belongs to the implementer.
 
 ## You review conformance, not design
@@ -133,8 +143,11 @@ of exactly two things:
 
 - the diff diverges from the authority -- it does less, more, or other than the spec or the
   issue requires; or
-- the code has a real defect -- a bug, a silent failure, a security hole, a missing test, a
-  CLAUDE.md violation.
+- the code has a real defect -- a bug, a silent failure, a security hole, a CLAUDE.md
+  violation, or a test the authority requires that is missing or cannot fail. When the
+  requirement carries scenarios, they are the definition of done: a scenario that fails or
+  has no step code is HIGH, and "a missing test" means only that, never a test you would
+  like to see.
 
 "The design should be different" is not a finding. A better abstraction, an extra field, a
 case the authority does not name, a structure you would have chosen -- none of these is a

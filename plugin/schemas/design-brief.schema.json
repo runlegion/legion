@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "design-brief",
+  "title": "Design brief",
+  "description": "The first design brief for one intent, written when Discover closes and accepted before Design starts. It is the direction prototyping starts from and the benchmark the prototypes, the form and the spec are judged against. It is drawn from what Discover produced -- the accepted intent, the workshop's close when cornerstone ran, and the UI/UX goals -- and every statement names the line it comes from. What those documents do not answer is an open question for the operator, never a filled-in guess. The second design brief (doc type brief) is drawn from the prototypes afterwards.",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "intent": { "type": "string", "minLength": 1, "description": "Id of the intent document the brief serves" },
+        "date": { "type": "string", "minLength": 1 },
+        "author": { "type": "string", "minLength": 1, "description": "Who wrote the brief" },
+        "owner": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["draft", "accepted"], "description": "accepted once the operator and the repo agent accept it; Design starts only from an accepted brief" },
+        "accepted_by": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "Each party who accepted it" }
+      },
+      "required": ["title", "intent", "date", "author", "owner", "status"],
+      "additionalProperties": false
+    },
+    "overview": {
+      "type": "object",
+      "description": "What this version is, and what it covers and leaves out",
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "in_scope": { "type": "array", "items": { "$ref": "#/definitions/sourced" } },
+        "out_of_scope": { "type": "array", "items": { "$ref": "#/definitions/sourced" } },
+        "from": { "type": "string", "minLength": 1 }
+      },
+      "required": ["text", "in_scope", "out_of_scope", "from"],
+      "additionalProperties": false
+    },
+    "problem": { "$ref": "#/definitions/sourced", "description": "The problem worth solving, in the intent's words" },
+    "objectives": {
+      "type": "array",
+      "minItems": 1,
+      "description": "In priority order, first is highest",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "minLength": 1 },
+          "measure": { "type": "string", "minLength": 1, "description": "How the team will know it was met" },
+          "from": { "type": "string", "minLength": 1 }
+        },
+        "required": ["text", "measure", "from"],
+        "additionalProperties": false
+      }
+    },
+    "audiences": {
+      "type": "array",
+      "minItems": 1,
+      "description": "In priority order, first is highest; agents and people alike",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "why": { "type": "string", "minLength": 1 },
+          "from": { "type": "string", "minLength": 1 }
+        },
+        "required": ["name", "why", "from"],
+        "additionalProperties": false
+      }
+    },
+    "context": { "type": "array", "items": { "$ref": "#/definitions/sourced" }, "description": "What exists today and what the work sits inside" },
+    "constraints": { "type": "array", "items": { "$ref": "#/definitions/sourced" } },
+    "ui_ux_goals": { "type": "array", "items": { "$ref": "#/definitions/sourced" }, "description": "What the experience must achieve; empty for an agent-only service" },
+    "deliverables": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/sourced" } },
+    "open": {
+      "type": "array",
+      "description": "What Discover's documents do not answer, for the operator",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": { "type": "string", "minLength": 1 },
+          "why_it_matters": { "type": "string", "minLength": 1 },
+          "answer": { "type": "string", "description": "The operator's words, verbatim, once answered" }
+        },
+        "required": ["question", "why_it_matters"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["meta", "overview", "problem", "objectives", "audiences", "context", "constraints", "ui_ux_goals", "deliverables", "open"],
+  "additionalProperties": false,
+  "definitions": {
+    "sourced": {
+      "type": "object",
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "from": { "type": "string", "minLength": 1, "description": "The intent field, workshop document id or goal it comes from" }
+      },
+      "required": ["text", "from"],
+      "additionalProperties": false
+    }
+  }
+}

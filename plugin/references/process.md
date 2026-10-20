@@ -7,7 +7,7 @@ stages, in this order: Discover, then Design, then Work, then Archive.
 ## Discover
 
 Discover produces the intent: why this exists, for whom, and what happens to them
-today. Free legion has no separate research step, so the intent itself carries what
+today. `/legion:discover` conducts it; `/legion:design` conducts Design. Free legion has no separate research step, so the intent itself carries what
 exists today, what is broken, and what the team has seen. Nothing else is gathered
 before the intent; if the intent cannot say it, the team has not yet seen it.
 

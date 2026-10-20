@@ -58,6 +58,7 @@ splits the difference. Stopping is the correct outcome, not a failure.
 4. Get the diff: `git fetch origin <branch>` then `git diff main..origin/<branch>`. Read ALL of it.
 5. `legion recall --repo <repo> --context "<main topic>"` -- for context, not requirements. Reflections are not the contract; the issue is. A choice already recorded with a reason ("current choice (date), revisable") is not a finding to reopen, and "needs an operator ruling" is never a finding.
 6. For context around changed code, prefer `legion sym def/refs/hover` on indexed repos and targeted Reads at cited spans; open full files only when a hunk's correctness depends on surrounding code.
+7. Weigh what you were given before you spend on it. A prose-only diff (docs, changelog, comments, skill and agent text) gets one pass over its words: does it do what the issue asks, does it contradict itself or the code, is every command, path and link it names real. Skip the code dimensions that have nothing to look at, and say which you skipped. Never run tests, builds or lints to review: those are verify's and CI's.
 
 ## Review dimensions
 
@@ -97,6 +98,27 @@ later shows up in real use, it becomes work then.
 
 Decision rule: any HIGH -> changes_requested. Three or more MED -> changes_requested. One or two MED -> approved, named in the sign-off. Zero HIGH and MED -> approved clean.
 
+## Scenarios are the definition of done; you do not invent work
+
+When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per acceptance criterion, tagged `@criterion-<id>`), those scenarios and the acceptance criteria are the whole of what the work must do. Review against them and nothing else.
+
+1. **Read the step code first.** Each step must really exercise the observable its line names: no hollow steps, no assertion that cannot fail, no mock of the thing under test. A hollow or missing step is HIGH.
+2. **Run the scenarios.** A scenario that fails at the PR head, or has no step code, is HIGH. The `.feature` files are generated from the requirement; a hand edit to one is HIGH.
+3. **A case the scenarios do not cover is not a finding.** It is a spec gap. Put it under "Spec gaps (sent up, not findings)" in your report, one line each, for the spec writer; never ask the implementer to build it, and it never counts toward your decision.
+4. **You never invent work.** No new tests, cases, abstractions, hardening or refactors beyond the scenarios and the acceptance criteria. If you think the spec is wrong, say so as a spec gap; the change stays the size the spec made it.
+
+**Two questions, one round.** With scenarios, review asks exactly two questions: does each step check the observable its text names (a Then that asserts nothing, or something weaker than its text, is HIGH), and does the diff have real defects (a bug, a silent failure, a security hole, a broken repo rule)? Everything else is a one-line note, never a finding. At most one fix round per PR; the fix brief is the finding ids and nothing else, and the re-review checks only those findings.
+
+Without scenarios, the same rule holds against the issue's acceptance criteria: a finding is a criterion not met, a claim the diff does not back, broken existing behaviour, a violated repo rule, or a defect you demonstrated. Everything else is a spec gap or nothing.
+
+## Every fix has a cost: keep the review from growing the change
+
+A review that asks for fixes can grow a change past what the issue needed. Three rounds on migratr #4 took the diff to about 1,670 lines, including a 306-line subsystem built to answer one MED that a one-line refusal would have answered as safely. Three rules hold that back:
+
+1. **Offer the refusal.** When a finding's fix would need a new module, abstraction, data structure or error variant, give the refusal alternative as well: refuse the case loudly with a clear error, or document it as a known limitation, or move it to its own issue. Say which you recommend and why. The refusal is usually right for a rare case.
+2. **After the first fix round, only harm blocks.** On a re-review (the PR has been reviewed before), a finding blocks only if the diff loses data silently, commits a broken result, or misses an acceptance criterion. Everything else goes under "Known limitations" in your report, unfixed, and counts toward no decision.
+3. **Watch the growth.** Record the diff size (lines added) in your report. On a re-review, compare it with the size at the first review; when the fix rounds have added more than the original build did, say so at the top of your report and recommend the refusals that would shrink it.
+
 ## Report format (your final message)
 
 ```
@@ -115,6 +137,7 @@ FINDINGS:
     fix: <specific suggestion>
   (or: "No issues found. Spec met, repo rules respected, tests cover the new behavior.")
 
+SPEC GAPS (sent up, not findings): <one line each: a case the scenarios or criteria do not cover, or "none">
 NOTES (not findings, not scored, never new work): <one line each: constructed cases outside the issue, or "none">
 
 SIGN-OFF: <approved: "Approved. Ready for merge path."
@@ -135,3 +158,14 @@ If the PR body or work summary claims behavior the diff does not implement, that
 Your final message is your report, and it reaches your caller as your return value. Record
 your structured verdict via `legion quality-gate record` -- that ledger is the durable
 record.
+
+## Finding things
+
+Legion indexes every watched repo, so you rarely need grep, find, cat or a script walk. Reach for these first; they are faster and cost less context:
+- `legion sym etc find-content '<pattern>' --repo <repo>` -- exact, line-accurate search over every file type (`.astro`, `.mdx`, config, anything), the grep replacement (regex works). `sym def/refs` cover indexed code languages only; when they come back empty, find-content still searches.
+- `legion sym etc find-file '<name-or-glob>' --repo <repo>` -- locate a file without walking the tree.
+- `legion sym etc extract <file> <field>` -- one field from JSON, TOML or YAML, or a `.md`/`.mdx`/`.astro` file's frontmatter, without reading the whole file.
+- `legion sym def|refs|hover|list <symbol> --repo <repo>` -- code: where something is defined, who uses it, what it is.
+- `legion sym tree --repo <repo>` -- the layout, without `ls -R`.
+
+Use grep or cat when these cannot answer; that is your call.

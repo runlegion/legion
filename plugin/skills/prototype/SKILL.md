@@ -31,7 +31,7 @@ When that prints nothing, the reference cannot be read: tell the team so, and st
 
 ## Who the interface is for
 
-The intent decides whether there is anything to prototype. Read it with `legion document view <intent id> --json` and look at who uses the service, under `interface.users`.
+The intent decides whether there is anything to prototype. Read it with `legion document view <intent id> --json` and look at who uses the service, under `interface.users`. Read its first design brief too (`legion document list --doc-type design-brief --json`, the one whose `meta.intent` is the intent id): its scope says which surfaces this version prototypes, its audiences say whom each screen is for first, and its UI/UX goals are what each prototype has to achieve. Prototype nothing outside its scope.
 
 A prototype here is a UX prototype: it exists to show a person what they will see and do. When the intent says only agents use the service, there is no person to show, so Design makes no prototype. Say so to the team, say that this is why, and stop.
 
