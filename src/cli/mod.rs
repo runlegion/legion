@@ -1187,14 +1187,15 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    /// Claude Code statusLine subcommand: ingest rate-limit + usage, render chip
+    /// Claude Code statusLine subcommand: ingest rate-limit + usage, print the line
     ///
     /// Reads the Claude Code statusLine JSON on stdin, persists a
     /// `rate_limit_samples` row (and a `usage_samples` row when the
-    /// transcript is readable), then prints a single-line chip on stdout.
-    /// Wire via `statusLine.command` in settings.json.
+    /// transcript is readable), then prints the status line on stdout:
+    /// model, directory, branch, `ctx:`, `s:` and `w:` percentages. Set
+    /// `statusLine.command` in settings.json to `legion statusline`.
     Statusline {
-        /// Print the parsed sample state as JSON instead of the chip
+        /// Print the parsed sample state as JSON instead of the line
         #[arg(long)]
         json: bool,
     },
