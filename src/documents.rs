@@ -878,14 +878,19 @@ impl Database {
     }
 }
 
-/// The seven document types whose schemas ship with the plugin (#1390, #1387),
+/// The eight document types whose schemas ship with the plugin (#1390, #1387, #1416),
 /// each embedded at build time from `plugin/schemas/`. The name is the
 /// shipped file, kept so a refusal can name it.
-const SHIPPED_SCHEMAS: [(&str, &str, &str); 7] = [
+const SHIPPED_SCHEMAS: [(&str, &str, &str); 8] = [
     (
         "intent",
         "plugin/schemas/intent.schema.json",
         include_str!("../plugin/schemas/intent.schema.json"),
+    ),
+    (
+        "design-brief",
+        "plugin/schemas/design-brief.schema.json",
+        include_str!("../plugin/schemas/design-brief.schema.json"),
     ),
     (
         "brief",
@@ -919,7 +924,7 @@ const SHIPPED_SCHEMAS: [(&str, &str, &str); 7] = [
     ),
 ];
 
-/// Whether `doc_type` is one of the seven types whose schema ships with the
+/// Whether `doc_type` is one of the eight types whose schema ships with the
 /// plugin, so a caller knows when first use applies.
 pub(crate) fn is_shipped_schema_type(doc_type: &str) -> bool {
     SHIPPED_SCHEMAS.iter().any(|(t, _, _)| *t == doc_type)
@@ -2116,7 +2121,7 @@ mod tests {
 
     // -- first use: shipped schemas (#1390) ----------------------------------
 
-    const SHIPPED_TYPES: [&str; 7] = [
+    const SHIPPED_TYPES: [&str; 8] = [
         "intent",
         "brief",
         "requirement",
@@ -2124,10 +2129,11 @@ mod tests {
         "research",
         "prototype",
         "board",
+        "design-brief",
     ];
 
     #[test]
-    fn first_use_lands_seven_schemas_in_empty_store() {
+    fn first_use_lands_every_shipped_schema_in_empty_store() {
         let db = test_db();
         db.ensure_shipped_schemas().expect("first use");
         for doc_type in SHIPPED_TYPES {
