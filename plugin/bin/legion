@@ -43,6 +43,11 @@ version_lt() {
   return 1
 }
 
+# binary_version BIN -- the version BIN reports, or nothing.
+binary_version() {
+  "$1" --version 2>/dev/null | awk '{print $2}' || true
+}
+
 # self_heal BIN -- bring BIN up to this plugin's version. Never fails the
 # call: on any miss it returns and the caller execs the binary it has.
 self_heal() {
@@ -62,7 +67,7 @@ self_heal() {
     read -r installed < "$stamp" || true
   fi
   if [ -z "$installed" ]; then
-    installed=$("$bin" --version 2>/dev/null | awk '{print $2}' || true)
+    installed=$(binary_version "$bin")
     [ -n "$installed" ] && printf '%s\n' "$installed" > "$stamp" 2>/dev/null || true
   fi
   # Upgrade only. A session still on an older plugin copy must not pull the
@@ -94,7 +99,7 @@ self_heal() {
     CLAUDE_PLUGIN_ROOT="${SELF_DIR}/.." CLAUDE_PLUGIN_DATA="$DATA_DIR" \
     bash "${SELF_DIR}/../hooks/setup-binary.sh" >&2 || true
 
-  installed=$("$bin" --version 2>/dev/null | awk '{print $2}' || true)
+  installed=$(binary_version "$bin")
   if [ -z "$installed" ] || version_lt "$installed" "$expected"; then
     echo "[legion] update to ${expected} failed; running ${installed:-the installed binary}" >&2
     touch "$failed" 2>/dev/null || true
