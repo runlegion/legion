@@ -8,7 +8,7 @@
 # older binary is updated once, the daemon restarted, and the command's
 # stdout kept clean; a failed update warns, runs the old binary and backs off
 # ten minutes; an older plugin copy never pulls the binary down; versions
-# compare numerically; a held lock skips the update and a stale one is
+# compare numerically, and one that is not plain numbers runs as is; a held lock skips the update and a stale one is
 # cleared; LEGION_NO_DAEMON and LEGION_SELF_HEAL=0 are honoured.
 #
 # Then against the real setup-binary.sh, with a fake curl serving a fixture
@@ -141,6 +141,23 @@ reset; plugin_version 0.44.10; fake_binary 0.44.9
 export FAKE_NEW_VERSION=0.44.10
 run status >/dev/null
 assert_eq "0.44.9 < 0.44.10 triggers setup" "$(count setup)" "1"
+
+echo "==> a version that is not plain dotted numbers runs the binary as is"
+for v in 0.44.1-dev 0.45.0-rc1 garbage; do
+  reset; plugin_version 0.44.1; fake_binary "$v"
+  out=$(run status)
+  assert_rc "binary $v: call succeeds" 0 "$?"
+  assert_eq "binary $v: it ran" "$out" "ran $v: status"
+  assert_eq "binary $v: no setup call" "$(count setup)" "0"
+done
+reset; plugin_version 0.44.1; fake_binary 0.44.1
+run status >/dev/null
+# shellcheck disable=SC2016
+printf '%s\n' 'a[$(touch "$WORK/pwned")]' > "$DATA/.version"
+out=$(run status)
+assert_rc "garbled stamp: call succeeds" 0 "$?"
+assert_eq "garbled stamp: the binary ran" "$out" "ran 0.44.1: status"
+assert_eq "garbled stamp: nothing in it ran" "$([ -e "$WORK/pwned" ] && echo ran || echo inert)" "inert"
 
 echo "==> a held lock skips the update"
 reset; plugin_version 0.44.1; fake_binary 0.43.5
