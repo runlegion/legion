@@ -56,7 +56,7 @@ binary_version() {
 # self_heal BIN -- bring BIN up to this plugin's version. Never fails the
 # call: on any miss it returns and the caller execs the binary it has.
 self_heal() {
-  local bin="$1" plugin_json expected="" line installed="" lock
+  local bin="$1" plugin_json expected="" line installed=""
   plugin_json="${BIN_DIR}/../.claude-plugin/plugin.json"
   [ -f "$plugin_json" ] || return 0
   while IFS= read -r line; do
@@ -73,7 +73,9 @@ self_heal() {
   fi
   if [ -z "$installed" ]; then
     installed=$(binary_version "$bin")
-    [ -n "$installed" ] && printf '%s\n' "$installed" > "$stamp" 2>/dev/null || true
+    if [ -n "$installed" ]; then
+      { printf '%s\n' "$installed" > "$stamp"; } 2>/dev/null || true
+    fi
   fi
   # Upgrade only. A session still on an older plugin copy must not pull the
   # binary back down under a session on the newer one.
@@ -88,13 +90,14 @@ self_heal() {
 
   # One installer at a time; a concurrent call runs the binary it has. A lock
   # older than two minutes is left over from a killed install.
-  lock="${DATA_DIR}/.setup.lock"
-  if [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
-    rmdir "$lock" 2>/dev/null || true
+  # SETUP_LOCK is global so the EXIT trap still sees it after this
+  # function's locals are gone.
+  SETUP_LOCK="${DATA_DIR}/.setup.lock"
+  if [ -n "$(find "$SETUP_LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+    rmdir "$SETUP_LOCK" 2>/dev/null || true
   fi
-  mkdir "$lock" 2>/dev/null || return 0
-  # shellcheck disable=SC2064
-  trap "rmdir '$lock' 2>/dev/null || true" EXIT
+  mkdir "$SETUP_LOCK" 2>/dev/null || return 0
+  trap 'rmdir "$SETUP_LOCK" 2>/dev/null || true' EXIT
 
   # setup-binary.sh calls `legion` itself, which may resolve to this wrapper.
   # LEGION_SELF_HEAL=0 keeps those nested calls out of this branch. The
@@ -110,13 +113,13 @@ self_heal() {
     touch "$failed" 2>/dev/null || true
   else
     rm -f "$failed"
-    printf '%s\n' "$installed" > "$stamp" 2>/dev/null || true
+    { printf '%s\n' "$installed" > "$stamp"; } 2>/dev/null || true
     # A running daemon keeps the build it started with.
     if [ "${LEGION_NO_DAEMON:-}" != "1" ]; then
       LEGION_SELF_HEAL=0 "$bin" daemon-restart >/dev/null 2>>/tmp/legion-hook-errors.log || true
     fi
   fi
-  rmdir "$lock" 2>/dev/null || true
+  rmdir "$SETUP_LOCK" 2>/dev/null || true
   trap - EXIT
 }
 
