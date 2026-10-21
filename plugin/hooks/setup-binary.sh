@@ -29,6 +29,8 @@ if [ -x "$BINARY_PATH" ]; then
   INSTALLED=$("$BINARY_PATH" --version 2>/dev/null | awk '{print $2}' || echo "")
   if [ "$INSTALLED" = "$EXPECTED_VERSION" ]; then
     NEED_BINARY=false
+    # Prime the version stamp bin/legion reads on every call.
+    printf '%s\n' "$INSTALLED" > "${DATA_DIR}/.version" 2>/dev/null || true
   fi
 fi
 
@@ -117,9 +119,16 @@ install_binary() {
 
   mkdir -p "$DATA_DIR"
   tar xzf "${tmpdir}/${artifact}.tar.gz" -C "$tmpdir"
-  mv "${tmpdir}/${BINARY_NAME}" "$BINARY_PATH"
-  chmod +x "$BINARY_PATH"
+  # Stage inside DATA_DIR so the final mv is a rename on one filesystem: a
+  # concurrent `legion` call sees the old binary or the new one, never half
+  # of it. touch drops the archive's mtime, which would read as older than
+  # the wrapper's version stamp.
+  cp "${tmpdir}/${BINARY_NAME}" "${BINARY_PATH}.new"
+  chmod +x "${BINARY_PATH}.new"
+  touch "${BINARY_PATH}.new"
+  mv "${BINARY_PATH}.new" "$BINARY_PATH"
   rm -rf "$tmpdir"
+  printf '%s\n' "$EXPECTED_VERSION" > "${DATA_DIR}/.version" 2>/dev/null || true
 
   echo "[legion] installed ${BINARY_NAME} ${version_tag} to ${BINARY_PATH}" >&2
 }
