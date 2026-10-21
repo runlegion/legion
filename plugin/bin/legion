@@ -28,7 +28,12 @@ if [ -z "$DATA_DIR" ] && [ -n "${HOME:-}" ]; then
   DATA_DIR="${HOME}/.claude/plugins/data/legion-legion"
 fi
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# This wrapper's directory, by parameter expansion: dirname would start a
+# process on every call.
+case "$0" in
+  */*) BIN_DIR="${0%/*}" ;;
+  *) BIN_DIR=. ;;
+esac
 
 # version_lt A B -- true when dotted version A sorts before B. Bash builtins
 # only: the wrapper runs on every call, statusline included.
@@ -52,7 +57,7 @@ binary_version() {
 # call: on any miss it returns and the caller execs the binary it has.
 self_heal() {
   local bin="$1" plugin_json expected="" line installed="" lock
-  plugin_json="${SELF_DIR}/../.claude-plugin/plugin.json"
+  plugin_json="${BIN_DIR}/../.claude-plugin/plugin.json"
   [ -f "$plugin_json" ] || return 0
   while IFS= read -r line; do
     if [[ $line =~ \"version\"[[:space:]]*:[[:space:]]*\"([0-9][0-9.]*)\" ]]; then
@@ -96,8 +101,8 @@ self_heal() {
   # daemon restart happens below, after the version is verified.
   echo "[legion] binary ${installed:-unknown} is older than plugin ${expected}; updating" >&2
   LEGION_SELF_HEAL=0 LEGION_NO_DAEMON=1 \
-    CLAUDE_PLUGIN_ROOT="${SELF_DIR}/.." CLAUDE_PLUGIN_DATA="$DATA_DIR" \
-    bash "${SELF_DIR}/../hooks/setup-binary.sh" >&2 || true
+    CLAUDE_PLUGIN_ROOT="${BIN_DIR}/.." CLAUDE_PLUGIN_DATA="$DATA_DIR" \
+    bash "${BIN_DIR}/../hooks/setup-binary.sh" >&2 || true
 
   installed=$(binary_version "$bin")
   if [ -z "$installed" ] || version_lt "$installed" "$expected"; then
@@ -124,6 +129,7 @@ fi
 
 # Fall back to system-installed legion (cargo install).
 # Exclude our own directory from PATH to avoid infinite recursion.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 SEARCH_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | tr '\n' ':')
 SYSTEM_LEGION=$(PATH="$SEARCH_PATH" command -v legion 2>/dev/null || true)
 if [ -n "$SYSTEM_LEGION" ] && [ -x "$SYSTEM_LEGION" ]; then
