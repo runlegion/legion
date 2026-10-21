@@ -39,7 +39,9 @@ pub use cmd_confirmations::CmdConfirmation;
 pub use reflections::{Reflection, ReflectionMeta};
 pub use schedules::validate_hhmm;
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -73,11 +75,13 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Schema stamp written to `PRAGMA user_version` once [`Database::open`]
 /// has run the full create-and-migrate chain (#1289). An open that finds
-/// this value (or newer) skips the chain and its write lock entirely.
+/// this value (or newer) and every table and column the schema has skips
+/// the chain and its write lock entirely (#1431).
 ///
 /// Bump this whenever a `create_tables` or `migrate` step changes the
-/// schema: an already-stamped store only re-runs the chain when its stamp
-/// is below this value, so a new step without a bump never reaches it.
+/// schema: a missing table or column re-runs the chain whatever the stamp,
+/// but a new index or backfill on a stamped store only runs when its
+/// stamp is below this value.
 /// `schema_fingerprint_is_pinned_to_schema_version` fails on a schema
 /// change until this is bumped and the fingerprint re-pinned.
 const SCHEMA_VERSION: i32 = 3;
@@ -157,66 +161,102 @@ impl Database {
         Ok(names.iter().any(|n| n == column))
     }
 
+    /// Every `(table, column)` pair in the store, read without a lock.
+    fn table_columns(conn: &Connection) -> Result<BTreeSet<(String, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT m.name, p.name FROM sqlite_master m \
+             JOIN pragma_table_info(m.name) p WHERE m.type = 'table'",
+        )?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(LegionError::Database)
+    }
+
+    /// Whether the store is stamped current and carries every table and
+    /// column this binary's schema has (#1431). The stamp alone is not
+    /// enough: another build can write the same stamp for a different
+    /// schema. The expected columns come from building the schema once
+    /// per process in memory, so no hand-kept list can drift from it.
+    fn schema_is_current(conn: &Connection) -> Result<bool> {
+        static EXPECTED: OnceLock<BTreeSet<(String, String)>> = OnceLock::new();
+        if Self::schema_version(conn)? < SCHEMA_VERSION {
+            return Ok(false);
+        }
+        let expected = if let Some(expected) = EXPECTED.get() {
+            expected
+        } else {
+            let reference = Connection::open_in_memory()?;
+            Self::build_schema(&reference)?;
+            let columns = Self::table_columns(&reference)?;
+            EXPECTED.get_or_init(|| columns)
+        };
+        Ok(expected.is_subset(&Self::table_columns(conn)?))
+    }
+
     /// Create every table and index, then run the column migrations,
     /// serialized across every connection opening this store (#1289).
     ///
-    /// A store stamped with [`SCHEMA_VERSION`] (or newer) returns after
-    /// one `user_version` read, taking no lock. Otherwise the whole chain
-    /// runs inside one `BEGIN IMMEDIATE` transaction: the write lock is
-    /// taken up front (waiting out [`DEFAULT_BUSY_TIMEOUT`] behind another
-    /// opener), the stamp is re-read under the lock so an opener that
-    /// lost the race to a finished migration does nothing, and the stamp
-    /// is written in the same commit as the schema. Two opens of a fresh
-    /// store therefore never interleave has_column checks and ALTERs.
+    /// A current store ([`Self::schema_is_current`]) returns after
+    /// reading its stamp and columns, taking no lock. Otherwise the whole
+    /// chain runs inside one `BEGIN IMMEDIATE` transaction: the write lock
+    /// is taken up front (waiting out [`DEFAULT_BUSY_TIMEOUT`] behind
+    /// another opener), the check is re-run under the lock so an opener
+    /// that lost the race to a finished migration does nothing, and the
+    /// stamp is written in the same commit as the schema. Two opens of a
+    /// fresh store therefore never interleave has_column checks and ALTERs.
+    fn init_schema(conn: &mut Connection) -> Result<()> {
+        if Self::schema_is_current(conn)? {
+            return Ok(());
+        }
+
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if Self::schema_is_current(&tx)? {
+            return Ok(());
+        }
+        Self::build_schema(&tx)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Run every domain's DDL, then its migrations.
     ///
     /// Each domain file owns its DDL: the per-domain `create_tables`
     /// functions run the CREATE TABLE / CREATE INDEX statements for the
     /// base shape, and the `migrate` steps (has_column-guarded ALTERs,
     /// their backfills, and indexes over migrated columns) run after, in
     /// the same relative order they held in the single-file init_schema.
-    fn init_schema(conn: &mut Connection) -> Result<()> {
-        if Self::schema_version(conn)? >= SCHEMA_VERSION {
-            return Ok(());
-        }
+    fn build_schema(tx: &Connection) -> Result<()> {
+        reflections::create_tables(tx)?;
+        board::create_tables(tx)?;
+        kanban::create_tables(tx)?;
+        defer::create_tables(tx)?;
+        schedules::create_tables(tx)?;
+        health::create_tables(tx)?;
+        audit::create_tables(tx)?;
+        quality_gates::create_tables(tx)?;
+        findings::create_tables(tx)?;
+        statusline_samples::create_tables(tx)?;
+        wake::create_tables(tx)?;
+        scip::create_tables(tx)?;
+        sessions::create_tables(tx)?;
+        documents::create_tables(tx)?;
+        uncertainty::create_tables(tx)?;
+        autonomy::create_tables(tx)?;
+        heartbeat::create_tables(tx)?;
+        inventory::create_tables(tx)?;
+        module_edges::create_tables(tx)?;
+        css_symbols::create_tables(tx)?;
+        cmd_confirmations::create_tables(tx)?;
 
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if Self::schema_version(&tx)? >= SCHEMA_VERSION {
-            return Ok(());
-        }
-
-        reflections::create_tables(&tx)?;
-        board::create_tables(&tx)?;
-        kanban::create_tables(&tx)?;
-        defer::create_tables(&tx)?;
-        schedules::create_tables(&tx)?;
-        health::create_tables(&tx)?;
-        audit::create_tables(&tx)?;
-        quality_gates::create_tables(&tx)?;
-        findings::create_tables(&tx)?;
-        statusline_samples::create_tables(&tx)?;
-        wake::create_tables(&tx)?;
-        scip::create_tables(&tx)?;
-        sessions::create_tables(&tx)?;
-        documents::create_tables(&tx)?;
-        uncertainty::create_tables(&tx)?;
-        autonomy::create_tables(&tx)?;
-        heartbeat::create_tables(&tx)?;
-        inventory::create_tables(&tx)?;
-        module_edges::create_tables(&tx)?;
-        css_symbols::create_tables(&tx)?;
-        cmd_confirmations::create_tables(&tx)?;
-
-        reflections::migrate(&tx)?;
-        board::migrate(&tx)?;
-        kanban::migrate(&tx)?;
-        schedules::migrate(&tx)?;
-        wake::migrate(&tx)?;
-        quality_gates::migrate(&tx)?;
-        findings::migrate(&tx)?;
-        documents::migrate(&tx)?;
-
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        tx.commit()?;
+        reflections::migrate(tx)?;
+        board::migrate(tx)?;
+        kanban::migrate(tx)?;
+        schedules::migrate(tx)?;
+        wake::migrate(tx)?;
+        quality_gates::migrate(tx)?;
+        findings::migrate(tx)?;
+        documents::migrate(tx)?;
         Ok(())
     }
 
@@ -665,6 +705,56 @@ mod tests {
             "the fresh schema changed: bump SCHEMA_VERSION in src/db/mod.rs and \
              re-pin PINNED_SCHEMA_FINGERPRINT to (new version, new fingerprint)"
         );
+    }
+
+    #[test]
+    fn a_store_stamped_current_but_missing_a_column_gains_it_on_open() {
+        // #1431: another build stamped the store with this SCHEMA_VERSION
+        // without the migration that adds quality_gate_findings.repo, so
+        // the stamp alone must not skip the chain.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foreign-stamp.db");
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_quality_gate_findings_repo_branch_skill_status;
+                 ALTER TABLE quality_gate_findings DROP COLUMN repo;",
+            )
+            .unwrap();
+            assert_eq!(Database::schema_version(&conn).unwrap(), SCHEMA_VERSION);
+            assert!(!Database::has_column(&conn, "quality_gate_findings", "repo").unwrap());
+        }
+
+        let db = Database::open(&path).unwrap();
+        assert!(Database::has_column(&db.conn, "quality_gate_findings", "repo").unwrap());
+        db.list_findings(&findings::FindingFilter {
+            repo: Some("legion".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        drop(db);
+        assert_full_schema(&path, &reference_schema());
+    }
+
+    #[test]
+    fn opening_a_complete_store_changes_nothing_however_it_was_stamped() {
+        // #1431: a store that already has every column gets no ALTER and
+        // no error, whatever its stamp.
+        let reference = reference_schema();
+        for stamp in [0, SCHEMA_VERSION, SCHEMA_VERSION + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("complete.db");
+            drop(Database::open(&path).unwrap());
+            Connection::open(&path)
+                .unwrap()
+                .pragma_update(None, "user_version", stamp)
+                .unwrap();
+
+            drop(Database::open(&path).unwrap());
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(schema_snapshot(&conn), reference, "stamp {stamp}");
+        }
     }
 
     #[test]

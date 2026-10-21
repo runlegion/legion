@@ -1111,6 +1111,37 @@ fn quality_gate_record_issues_result_with_malformed_details_json_is_refused() {
     );
 }
 
+/// #1431: a store another build stamped with the current schema version,
+/// but without the migration that adds `quality_gate_findings.repo`, gains
+/// the column on open, and `finding-list` answers instead of failing with
+/// `no such column: repo`.
+#[test]
+fn finding_list_succeeds_on_a_store_stamped_current_but_missing_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    run_ok(legion_cmd(dir.path()).args(["quality-gate", "finding-list", "--json"]));
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("legion.db")).unwrap();
+        let stamp: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        conn.execute_batch(
+            "DROP INDEX idx_quality_gate_findings_repo_branch_skill_status;
+             ALTER TABLE quality_gate_findings DROP COLUMN repo;",
+        )
+        .unwrap();
+        let after: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, stamp, "the stamp must stay current");
+    }
+
+    let findings_json =
+        run_ok(legion_cmd(dir.path()).args(["quality-gate", "finding-list", "--json"]));
+    let findings: Vec<serde_json::Value> =
+        serde_json::from_str(&findings_json).expect("expected a JSON array");
+    assert!(findings.is_empty(), "got: {findings:?}");
+}
+
 /// #1008: the conforming counterpart -- a well-formed `--details-json` whose
 /// `findings` array matches `--findings-count` records the gate and persists
 /// exactly N finding rows, queryable via `finding-list` (status `pending`)
