@@ -1,5 +1,44 @@
 # Legion Changelog
 
+## 0.44.1
+
+The schema-stamp release. On 0.44.0, `legion quality-gate finding-list` and every other
+findings query could fail with `database error: no such column: repo`. The store's open
+trusted the `PRAGMA user_version` stamp alone: a store stamped at the current schema
+version skipped the migrations. A binary built from a local branch had stamped one live
+store 3, the same number 0.44.0 uses, but its schema did not have the migration that adds
+`quality_gate_findings.repo`. 0.44.0 then opened that store, saw the stamp, ran nothing,
+and every query against the missing column failed. The open now also checks that every
+table and column the schema has is present, and runs the migrations when one is missing,
+so such a store is repaired the first time 0.44.1 opens it. Mesh still needs smugglr 0.6.1
+or later; see Known issues.
+
+Patch release: a fix within the existing store-open path. No CLI change, no wire-format
+change and no schema migration; `SCHEMA_VERSION` stays 3.
+
+### Fixed
+
+- **A store stamped current but missing a column re-runs the migrations** (PR #1432,
+  #1431). `Database::init_schema` in `src/db/mod.rs` used to return as soon as the stamp
+  was at or above `SCHEMA_VERSION`. It now asks `schema_is_current`, which also requires
+  every `(table, column)` pair of this binary's schema to be in the store. The expected
+  set is built once per process by running the full create-and-migrate chain on an
+  in-memory connection, so there is no hand-kept list that can drift from the migrations.
+  The same check is re-run under the `BEGIN IMMEDIATE` write lock, so an opener that lost
+  the race to a finished migration still does nothing. A store missing a column gets the
+  whole chain, whose `has_column`-guarded ALTERs add only what is absent, and is restamped
+  in the same commit. A store that already has every column gets no ALTER and no error at
+  any stamp (0, current or newer), and a complete store stamped current or newer still
+  opens without taking the write lock. A new index or backfill on an already-stamped
+  store still needs a `SCHEMA_VERSION` bump to reach it; a missing table or column no
+  longer does. A unit test and an integration test drop `quality_gate_findings.repo` from a
+  store stamped current and check that the open restores it and `finding-list` answers.
+
+### Known issues
+
+- **Mesh does not work until smugglr 0.6.1 or later** (#1433). On this release, mesh
+  does not work with a smugglr earlier than 0.6.1.
+
 ## 0.44.0
 
 The Discover-and-Design release. The plugin now ships the two stages that come before a
