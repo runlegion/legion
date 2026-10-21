@@ -10,6 +10,14 @@
 #    subagents and plain-terminal invocations work without configuration.
 # 3. PATH lookup for a system-installed legion (cargo install), with the
 #    wrapper's own directory excluded to avoid infinite recursion.
+#
+# Self-heal: setup-binary.sh downloads the binary only on SessionStart
+# "startup", and /reload-plugins fires no hook, so a mid-session plugin update
+# leaves the binary one version behind. Before exec, the wrapper compares the
+# binary with this plugin's plugin.json and runs setup-binary.sh when the
+# binary is older. The common path reads two small files and starts no
+# process: $DATA_DIR/.version caches the binary's verified version and is
+# trusted while the binary is not newer than it.
 set -euo pipefail
 
 DATA_DIR="${CLAUDE_PLUGIN_DATA:-}"
@@ -20,7 +28,109 @@ if [ -z "$DATA_DIR" ] && [ -n "${HOME:-}" ]; then
   DATA_DIR="${HOME}/.claude/plugins/data/legion-legion"
 fi
 
+# This wrapper's directory, by parameter expansion: dirname would start a
+# process on every call.
+case "$0" in
+  */*) BIN_DIR="${0%/*}" ;;
+  *) BIN_DIR=. ;;
+esac
+
+# version_lt A B -- true when dotted version A sorts before B. Bash builtins
+# only: the wrapper runs on every call, statusline included. A version that
+# is not plain dotted numbers (0.45.0-rc1, a garbled stamp) compares as not
+# older, so the wrapper runs the binary it has: bash arithmetic on such a
+# string would abort the wrapper before exec.
+version_lt() {
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)*$ && $2 =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  local IFS=.
+  # shellcheck disable=SC2206
+  local a=($1) b=($2) i
+  for i in 0 1 2; do
+    if [ "$((10#${a[i]:-0}))" -lt "$((10#${b[i]:-0}))" ]; then return 0; fi
+    if [ "$((10#${a[i]:-0}))" -gt "$((10#${b[i]:-0}))" ]; then return 1; fi
+  done
+  return 1
+}
+
+# binary_version BIN -- the version BIN reports, or nothing.
+binary_version() {
+  "$1" --version 2>/dev/null | awk '{print $2}' || true
+}
+
+# self_heal BIN -- bring BIN up to this plugin's version. Never fails the
+# call: on any miss it returns and the caller execs the binary it has.
+self_heal() {
+  local bin="$1" plugin_json expected="" line installed=""
+  plugin_json="${BIN_DIR}/../.claude-plugin/plugin.json"
+  [ -f "$plugin_json" ] || return 0
+  while IFS= read -r line; do
+    if [[ $line =~ \"version\"[[:space:]]*:[[:space:]]*\"([0-9][0-9.]*)\" ]]; then
+      expected="${BASH_REMATCH[1]}"
+      break
+    fi
+  done < "$plugin_json"
+  [ -n "$expected" ] || return 0
+
+  local stamp="${DATA_DIR}/.version"
+  if [ -f "$stamp" ] && ! [ "$bin" -nt "$stamp" ]; then
+    read -r installed < "$stamp" || true
+  fi
+  if [ -z "$installed" ]; then
+    installed=$(binary_version "$bin")
+    if [ -n "$installed" ]; then
+      { printf '%s\n' "$installed" > "$stamp"; } 2>/dev/null || true
+    fi
+  fi
+  # Upgrade only. A session still on an older plugin copy must not pull the
+  # binary back down under a session on the newer one.
+  [ -n "$installed" ] && ! version_lt "$installed" "$expected" && return 0
+
+  # After a failed update (offline, say), wait ten minutes before the next
+  # try rather than retrying on every call.
+  local failed="${DATA_DIR}/.setup.failed"
+  if [ -n "$(find "$failed" -maxdepth 0 -mmin -10 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  # One installer at a time; a concurrent call runs the binary it has. A lock
+  # older than two minutes is left over from a killed install.
+  # SETUP_LOCK is global so the EXIT trap still sees it after this
+  # function's locals are gone.
+  SETUP_LOCK="${DATA_DIR}/.setup.lock"
+  if [ -n "$(find "$SETUP_LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+    rmdir "$SETUP_LOCK" 2>/dev/null || true
+  fi
+  mkdir "$SETUP_LOCK" 2>/dev/null || return 0
+  trap 'rmdir "$SETUP_LOCK" 2>/dev/null || true' EXIT
+
+  # setup-binary.sh calls `legion` itself, which may resolve to this wrapper.
+  # LEGION_SELF_HEAL=0 keeps those nested calls out of this branch. The
+  # daemon restart happens below, after the version is verified.
+  echo "[legion] binary ${installed:-unknown} is older than plugin ${expected}; updating" >&2
+  LEGION_SELF_HEAL=0 LEGION_NO_DAEMON=1 \
+    CLAUDE_PLUGIN_ROOT="${BIN_DIR}/.." CLAUDE_PLUGIN_DATA="$DATA_DIR" \
+    bash "${BIN_DIR}/../hooks/setup-binary.sh" >&2 || true
+
+  installed=$(binary_version "$bin")
+  if [ -z "$installed" ] || version_lt "$installed" "$expected"; then
+    echo "[legion] update to ${expected} failed; running ${installed:-the installed binary}" >&2
+    touch "$failed" 2>/dev/null || true
+  else
+    rm -f "$failed"
+    { printf '%s\n' "$installed" > "$stamp"; } 2>/dev/null || true
+    # A running daemon keeps the build it started with.
+    if [ "${LEGION_NO_DAEMON:-}" != "1" ]; then
+      LEGION_SELF_HEAL=0 "$bin" daemon-restart >/dev/null 2>>/tmp/legion-hook-errors.log || true
+    fi
+  fi
+  rmdir "$SETUP_LOCK" 2>/dev/null || true
+  trap - EXIT
+}
+
 if [ -n "$DATA_DIR" ] && [ -x "${DATA_DIR}/legion" ]; then
+  if [ "${LEGION_SELF_HEAL:-1}" != "0" ]; then
+    self_heal "${DATA_DIR}/legion" || true
+  fi
   exec "${DATA_DIR}/legion" "$@"
 fi
 
