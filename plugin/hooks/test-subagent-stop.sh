@@ -1,14 +1,12 @@
 #!/bin/bash
-# Test runner for the SubagentStop hook (#570).
+# Test runner for the SubagentStop hook (#570, #1441).
 #
-# subagent-stop.sh persists a finished subagent's transcript tail as a
-# domain=checkpoint reflection (tagged subagent,auto) and injects a nudge via
-# hookSpecificOutput.additionalContext that continues the SUBAGENT's own turn.
-# That continuation message is what the Task tool actually returns to the
-# parent, so the nudge must order the subagent to restate its complete
-# deliverable first and append the checkpoint note only after (#752) --
-# never a bare acknowledgment that references a prior message. Every failure
-# path must exit 0 (never block the parent).
+# subagent-stop.sh injects a nudge via hookSpecificOutput.additionalContext
+# that continues the SUBAGENT's own turn. That continuation message is what
+# the Task tool actually returns to the parent, so the nudge must order the
+# subagent to restate its complete deliverable (#752) -- never a bare
+# acknowledgment that references a prior message. It stores no reflection
+# (#1441). Every failure path must exit 0 (never block the parent).
 #
 # Run from anywhere:
 #   bash plugin/hooks/test-subagent-stop.sh
@@ -35,25 +33,22 @@ TRANSCRIPT="$WORK/agent-transcript.jsonl"
   echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Root cause: cookie SameSite=Strict drops the refresh on cross-site nav."}]}}'
 } > "$TRANSCRIPT"
 
-echo "==> persists a subagent checkpoint + nudges the subagent's own turn"
+echo "==> stores nothing, nudges the subagent's own turn"
 : > "$STUB_LOG"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
   | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
-assert_contains "reflect called with domain=checkpoint" "$(cat "$STUB_LOG")" 'reflect --repo legion-subagent-test --domain checkpoint'
-assert_contains "tagged subagent,auto" "$(cat "$STUB_LOG")" 'subagent,auto'
-assert_contains "checkpoint text names the agent_type" "$(cat "$STUB_LOG")" 'SUBAGENT CHECKPOINT] Explore'
-assert_contains "scraped the transcript summary" "$(cat "$STUB_LOG")" 'token refresh bug'
+assert_not_contains "no reflect call" "$(cat "$STUB_LOG")" 'reflect'
 assert_contains "nudge is additionalContext continuing the subagent's turn" "$out" '"hookEventName": "SubagentStop"'
-assert_contains "checkpoint note names recall" "$out" 'legion recall --repo legion-subagent-test --domain checkpoint'
+assert_not_contains "nudge names no checkpoint recall" "$out" 'domain checkpoint'
 assert_contains "prompt orders a full restatement" "$out" 'RESTATE your complete deliverable in full'
 assert_contains "prompt names the next message as the only channel" "$out" 'Your NEXT message is the ONLY message the orchestrator that spawned you will ever receive'
 # The needle's ".." stand in for the JSON-escaped \" quotes jq wraps each
 # phrase in (grep BRE has no lookaround, so a literal quote is unreliable
 # across escaped/unescaped output; "." as a single-char wildcard is not).
 assert_contains "prompt forbids referencing a prior message" "$out" 'Never write ..see above.., ..already delivered.., or any other reference to a prior message'
-assert_contains "restatement instruction precedes the checkpoint note (not just present)" "$out" 'exactly as if reporting it for the first time.*Only after the full restatement, append one line'
+assert_contains "restatement is ordered before the ban on pointing back" "$out" 'exactly as if reporting it for the first time.*Never write'
 
-echo "==> missing transcript: skip reflect, still nudge the subagent, exit 0"
+echo "==> missing transcript: still nudge the subagent, exit 0"
 : > "$STUB_LOG"
 out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"/no/such/file.jsonl\"}" \
   | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
@@ -69,12 +64,12 @@ out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_pa
   | CLAUDE_PLUGIN_ROOT="/no/such/plugin" bash "$HOOK")
 assert_empty "missing plugin root produces no output" "$out"
 
-echo "==> missing legion binary: exit 0, no output"
-out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${TRANSCRIPT}\"}" \
+echo "==> missing legion binary: the nudge needs no binary, still nudges"
+out=$(echo "{\"cwd\":\"${CWD}\",\"agent_type\":\"Explore\",\"agent_transcript_path\":\"${WORK}/nobin.jsonl\"}" \
   | LEGION_BIN="/no/such/legion" bash "$HOOK")
-assert_empty "missing binary produces no output" "$out"
+assert_contains "subagent nudged without a binary" "$out" '"hookEventName": "SubagentStop"'
 
-echo "==> re-delivered SubagentStop is deduped: second fire silent, no double reflect (#584)"
+echo "==> re-delivered SubagentStop is deduped: second fire silent (#584)"
 DEDUP_TRANSCRIPT="$WORK/dedup-transcript.jsonl"
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Deduped subagent run summary."}]}}' > "$DEDUP_TRANSCRIPT"
 : > "$STUB_LOG"
@@ -83,8 +78,7 @@ out1=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 out2=$(echo "$dedup_in" | LEGION_STUB_LOG="$STUB_LOG" bash "$HOOK")
 assert_contains "first fire nudges the subagent" "$out1" '"hookEventName": "SubagentStop"'
 assert_empty "second (re-delivered) fire is silent" "$out2"
-reflect_count=$(grep -c 'reflect' "$STUB_LOG" 2>/dev/null || echo 0)
-assert_eq "reflect called exactly once across two fires" "$reflect_count" "1"
+assert_not_contains "no reflect across two fires" "$(cat "$STUB_LOG")" 'reflect'
 
 echo "==> stop_hook_active=true short-circuits (loop guard, #584)"
 : > "$STUB_LOG"

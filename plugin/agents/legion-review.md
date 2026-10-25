@@ -56,7 +56,7 @@ splits the difference. Stopping is the correct outcome, not a failure.
 2. Read the linked issue via `legion issue view --repo <repo> --number <n>`. The acceptance criteria are the contract.
 3. Read the PR body via `legion pr view --repo <repo> --number <n>`. The implementer's claims are checked against the diff, never trusted blindly.
 4. Get the diff: `git fetch origin <branch>` then `git diff main..origin/<branch>`. Read ALL of it.
-5. `legion recall --repo <repo> --context "<main topic>"` -- for context, not requirements. Reflections are not the contract; the issue is. A choice already recorded with a reason ("current choice (date), revisable") is not a finding to reopen, and "needs an operator ruling" is never a finding.
+5. `legion recall --repo <repo> --context "<main topic>"` -- for context, not requirements. Reflections are not the contract; the issue is. A reflection is evidence, weighed on the reason it states, never on who it names: a recorded decision whose reason the diff shows to be wrong is a finding like any other. "Needs an operator ruling" is never a finding.
 6. For context around changed code, prefer `legion sym def/refs/hover` on indexed repos and targeted Reads at cited spans; open full files only when a hunk's correctness depends on surrounding code.
 7. Weigh what you were given before you spend on it. A prose-only diff (docs, changelog, comments, skill and agent text) gets one pass over its words: does it do what the issue asks, does it contradict itself or the code, is every command, path and link it names real. Skip the code dimensions that have nothing to look at, and say which you skipped. Never run tests, builds or lints to review: those are verify's and CI's.
 
