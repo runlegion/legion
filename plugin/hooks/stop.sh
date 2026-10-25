@@ -270,7 +270,7 @@ fi
 
 touch "$MARKER"
 
-REASON="Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up."
+REASON="Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. A finding is never a record of what a person said or decided, nor a status. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up."
 
 # Budget reminder (#524) -- the "on stop" half of surfacing the autonomy
 # budget. Tells the agent, as it wraps up, that it has sanctioned units left
