@@ -1,5 +1,68 @@
 # Legion Changelog
 
+## 0.44.2
+
+The plugin-hooks release. Two fixes, both in the plugin's shell layer. First, a plugin
+update taken mid-session left the binary behind. `setup-binary.sh` downloads the binary
+only on SessionStart "startup", and `/reload-plugins` fires no hook, so after a reload
+the plugin's skills and hooks were on the new version while every `legion` call still ran
+the old binary until the next fresh session. The `bin/legion` wrapper now notices that
+the binary is older than its plugin and updates it before running the command. Second,
+legion memory was collecting noise that the agents then read back as rulings. The
+SubagentStop hook stored the last 1500 characters of every subagent transcript as a
+checkpoint reflection, and most of those were fragments like "Now write tests." It no
+longer stores anything. The review agent and the stop-hook prompt also stop treating a
+recorded decision as settled because of who it names. Mesh still needs smugglr 0.6.1 or
+later; see Known issues.
+
+Patch release: fixes within the existing plugin wrapper and hooks. No CLI change, no
+wire-format change and no schema migration; `SCHEMA_VERSION` stays 3.
+
+### Fixed
+
+- **`bin/legion` updates a binary left behind by a mid-session plugin update** (PR #1438,
+  #1437). Before it execs the binary in the plugin data dir, the wrapper reads the
+  version from its own `.claude-plugin/plugin.json` and compares it with the binary's.
+  When the binary is older, it runs `setup-binary.sh` and then restarts the daemon, since
+  a running daemon keeps the build it started with. It writes the update notice to
+  stderr, so the command's stdout stays clean. The common call starts no extra process.
+  A stamp at `$DATA_DIR/.version` caches the binary's verified version and is trusted
+  while the binary is not newer than the stamp. The plugin root is found by parameter
+  expansion rather than `dirname`, which matters because the wrapper runs on every call,
+  statusline included. The update only ever goes up: a session still on an older plugin
+  copy never pulls the binary down under a session on the newer one. One installer runs
+  at a time under a `.setup.lock` directory. A concurrent call runs the binary it has,
+  and a lock older than two minutes is cleared as left over from a killed install. A
+  failed update (offline, say) prints a warning, runs the old binary and waits ten
+  minutes before trying again. A version that is not plain dotted numbers, such as
+  `0.44.1-dev` or a garbled stamp, counts as not older, so the binary runs instead of the
+  wrapper aborting on shell arithmetic. `setup-binary.sh` now stages the download inside
+  the data dir under a per-process name and installs it with a rename. A concurrent call
+  sees the old binary or the new one, never half of one, and a failed copy, chmod or
+  touch leaves the working binary in place. It writes the version stamp on install and
+  when it finds the binary already current. A new `plugin/hooks/test-bin-wrapper.sh`
+  tests the wrapper against a stub installer, and then against the real
+  `setup-binary.sh` with a fake `curl` serving a fixture release, including a checksum
+  mismatch that must leave the old binary alone.
+- **Memory stores findings, not transcript tails or recorded rulings** (PR #1442, #1441).
+  `plugin/hooks/subagent-stop.sh` used to save the last 1500 characters of every
+  subagent's transcript as a `domain=checkpoint` reflection tagged `subagent,auto`. Those
+  rows were mostly fragments. They buried real reflections, and the newest of them took
+  the place of the session's own checkpoint at boot (#1440). The hook no longer writes to
+  legion memory. It still sends the restatement nudge from #752, which makes the
+  subagent's final message carry its full deliverable back to the parent, but that nudge
+  no longer appends a checkpoint line. Rows the old hook already wrote stay in the store.
+  Step 5 of the `legion-review` agent used to say a choice recorded with a reason was
+  not a finding to reopen. It now says a reflection is evidence, weighed on the reason it
+  states and never on who it names, so a recorded decision whose reason the diff shows to
+  be wrong is a finding like any other. The stop hook's reflect prompt now adds that a
+  finding is never a record of what a person said or decided, and never a status.
+
+### Known issues
+
+- **Mesh does not work until smugglr 0.6.1 or later** (#1433). Carried over from 0.44.1:
+  nothing in this release changes it.
+
 ## 0.44.1
 
 The schema-stamp release. On 0.44.0, `legion quality-gate finding-list` and every other
