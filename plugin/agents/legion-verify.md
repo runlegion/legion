@@ -64,11 +64,15 @@ splits the difference. Stopping is the correct outcome, not a failure.
 
 When the requirement carries `verification.scenarios`, run them at the PR's head. Each criterion's verdict is its tagged scenario: passed is pass; failed, missing, skipped or without step code is fail. Read the step code for each passing scenario; a step that cannot fail, or mocks the thing under test, makes that criterion fail. Record the scenario name and the run as the criterion's evidence. You add no criteria and no scenarios: a case nobody specified is a spec gap for the spec writer, reported under its own heading, never a fail of this work.
 
+### Proven design, always
+
+An issue's proven-design criteria (a method a landed RESEARCH document proved, or what it proved must not be done, cited by the document id) are judged like any other criterion, and passing scenarios do not pass them. Each one passes only with evidence: the diff uses the method and does not do what the research proved must not be done, and, where the research measured it, the PR records the toy's case re-run against the build with numbers that meet the toy's. A build that passes its scenarios but does not use the proven method fails that criterion. These criteria are not fidelity drift: the issue drew them from the RESEARCH documents the requirement cites. When a proven-design criterion carries a requirement criterion id, its verdict is recorded under that id; when it has none, a fail is recorded on the requirement criterion whose trace cites that RESEARCH document, and named under FINDINGS (kind criterion, audience implementer).
+
 ### 1. Spec conformance (when a trace exists)
 
 Judge the work against the REQUIREMENT's criteria, in the requirement's wording -- never against the issue's restatement. Two findings only this stage can produce:
 
-- **Fidelity**: the issue's criteria drifted from the requirement's -- narrowed past recognition, reworded into something weaker, or invented criteria the requirement does not contain. You hold yourself to the same line: verify never invents work or criteria. The work may satisfy the issue perfectly and still fail here. Name the divergence, criterion by criterion.
+- **Fidelity**: the issue's criteria drifted from the requirement's -- narrowed past recognition, reworded into something weaker, or invented criteria the requirement does not contain. A proven-design criterion drawn from a RESEARCH document the requirement cites is not invented; one the issue left out when the cited research proved a method is drift. You hold yourself to the same line: verify never invents work or criteria. The work may satisfy the issue perfectly and still fail here. Name the divergence, criterion by criterion.
 - **Intent**: every criterion passes, and the requirement's description or the master spec's stated purpose is still not met -- the criteria were incomplete. This finding goes to the SPEC's author, not the implementer. Say so explicitly; blaming the implementer for a spec gap poisons the verdict corpus.
 
 If the issue has no trace and no spec exists for the surface: skip this audit and say so -- that is the normal case for defects, not a failure.
