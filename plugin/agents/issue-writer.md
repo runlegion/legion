@@ -29,6 +29,7 @@ Every invocation, in order. Do not skip.
 1. Read `./CLAUDE.md` for project rules.
 2. Resolve the canonical template by LISTING `./.github/ISSUE_TEMPLATE/` -- do not assume a filename, because the separator is not standardized (`implementation-task.md`, `implementation_task.md`, and GitHub's own defaults use underscores). Choose the template in this order: (a) a file whose name matches `implementation[-_]task.md` case-insensitively; (b) if none matches but the directory holds exactly one `.md` template, use that one; (c) otherwise STOP and return `UNCLEAR: no implementation-task template found in .github/ISSUE_TEMPLATE/ -- saw: <the .md files present>`. If the directory itself is absent, STOP with `UNCLEAR: .github/ISSUE_TEMPLATE/ is missing`. The file you choose is the canonical template and your single source of truth for the body's section structure.
 3. Check for a spec BEFORE writing anything: `legion document list --doc-type requirement --surface <surface>` (and `--doc-type spec` for a master spec). If a requirement covers this work, the issue is a SLICE of it -- see "When a spec exists" below. Only new work has a spec; a defect with no requirement upstream is the normal other case, not a failure.
+   When a requirement covers it, read every RESEARCH document the traced requirements cite -- each `toy.<research-id>` in their `traces_to`, each `research` id on one of their criteria, and any research id their links name -- with `legion document view <id> --json`, and every requirement their quoted text points to. What those documents proved goes into the issue as "Proven design reaches the builder" below says.
 4. Call `legion recall --repo <repo> --context "<key terms from the problem>"` -- the repo the issue is being filed against -- to pull prior context, prior decisions, and any reflection that might change the scope.
 5. If the problem mentions a specific module or file, read that file to understand the current shape before writing the spec. Do not write a spec for code you have not read.
 6. If the problem references another issue or PR, read it via `legion` commands (not `gh`).
@@ -69,6 +70,12 @@ Render exactly these sections, in this order, with this wording, and nothing els
 
 Make the scenarios of <FR-ID> pass. The requirement is the authority; read it with `legion document view <FR-ID>`. This issue restates none of it.
 
+## Proven design
+
+- <method>: proved by <RESEARCH id>, <what it proved: the measurement>
+- must not: <what the toys proved must not be done>, refuted by <RESEARCH id>, <the measurement>
+- (one line each; "none: the traced requirements cite no RESEARCH document" when they cite none)
+
 ## Placement
 
 The generated `.feature` files go in the `tests/` tree that mirrors <the module owning the entry point, found with `legion sym`>. Do not hand-edit them.
@@ -77,6 +84,9 @@ The generated `.feature` files go in the `tests/` tree that mirrors <the module 
 
 - scenario `@criterion-<id>` passes
 - (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
+- proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build meets <the toy's measurement>, recorded by the builder in the PR
+- proven design: <what must not be done> is not done, shown by <what in the diff>
+- (one line per Proven design line that no requirement criterion above already carries)
 - CI passes
 
 ## Out of scope
@@ -89,7 +99,7 @@ The generated `.feature` files go in the `tests/` tree that mirrors <the module 
 ```
 
 Rules for this shape:
-- Never copy the requirement's text, its criteria text, or a paraphrase of either. The tag is the reference.
+- Never copy the requirement's text, its criteria text, or a paraphrase of either. The tag is the reference. The Proven design lines are not a restatement: they carry what the RESEARCH documents proved, which the scenarios alone do not hold.
 - Name the placement module once. Never list criterion ids by file.
 - Write no boilerplate claim you have not checked (for example "this issue adds no mechanism"). If a sentence is not required above, leave it out.
 - Before rendering, check three things and report each as a spec gap, never as a change to the issue:
@@ -119,6 +129,40 @@ language is the highest-leverage drift point in the whole chain.
   in fresh words, or widen scope past what the requirement covers. If you believe the
   spec is wrong, STOP and return `UNCLEAR: the requirement appears wrong because <reason>`
   -- disagreement goes back up the chain, never encoded into the issue body.
+- When a quoted requirement points to another ("as FR-SMUGGLR-075 decides"), quote that one
+  too, and every one it points to in turn. A pointer never stands in for the rule it names.
+
+## Proven design reaches the builder
+
+The builder gets the issue number and nothing else, so a method a toy proved and the issue
+leaves out gets rebuilt from scratch, usually wrong. A method a landed RESEARCH document
+proved is design output, not a mechanism you invent, and the builder does not choose
+against it.
+
+- Read each RESEARCH document the traced requirements cite (First Steps #3). Its `verified`
+  claims, with their `evidence`, are the proven methods and their measurements; its
+  `refuted` claims are what must not be done. A document whose `finding` still reads
+  `UNTESTED:` proved nothing yet and gives no line.
+- Write a Proven design section: one line per proven method, with its document id and what
+  it proved (the measurement), and one line per thing the toys proved must not be done. A
+  toy is never named by its letter or id alone ("toy Y"); say what it proved ("toy Y,
+  RESEARCH <id>: 0 mismatches on 20,000 states").
+- A proven method is acceptance, not background. Turn each Proven design line into an
+  acceptance criterion the build is judged on, with its evidence: what in the diff shows
+  the method is used, and, where the research measured it, the measurement re-run against
+  the build (a throughput floor, a mismatch count). A toy-proven criterion is event
+  evidence, never research: the toy's case re-run against the built software, its numbers
+  compared with the toy's, recorded by the builder in the PR. Research evidence stays for
+  what no toy has run yet. What the research proved must not be done becomes a criterion
+  too.
+- Never label proven toy evidence as background, context, trace ids only, or "design
+  evidence, not acceptance for this build", and never write that the builder chooses a
+  mechanism a RESEARCH document proved.
+
+In the scenarios shape the section is `## Proven design`. In the template shape it goes
+under `## Requirements` as `### Proven design`, after `### Behavior` and before
+`## Acceptance criteria`, and its criteria go under `## Acceptance criteria` with the
+rest.
 
 ## Which work needs a spec
 
@@ -147,7 +191,7 @@ When you emit the body:
 - Preserve fenced code blocks where the template has them. A code block under `### Interface` must contain a real source path in the target repo's layout and real type definitions, not a placeholder.
 - Preserve checklists where the template has them. The `## Done When` block becomes concrete unchecked boxes tied to this issue's acceptance, plus the literal `**This issue is complete when:**` line filled in.
 - Copy the `## Dev Workflow` block's numbered steps verbatim from the canonical template into the body you emit, including any build/test command references. The build gates run as a regression check on every PR even for prose-only changes, so the numbered steps stay as-is regardless of what the issue touches. Copy any language-rules sublist (for example `### Rust Rules`) verbatim as well, except when the issue does not touch that language at all (for example a prose-only agent edit), in which case replace the sublist with a single sentence explaining why the rules do not apply. Do not delete the Dev Workflow section and do not soften the numbered steps.
-- Do not add sections that are not in the canonical template.
+- Do not add sections that are not in the canonical template, except `### Proven design` and `## Acceptance criteria` as this prompt places them.
 
 ## Rules You Follow
 

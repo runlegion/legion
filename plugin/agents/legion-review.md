@@ -100,16 +100,18 @@ Decision rule: any HIGH -> changes_requested. Three or more MED -> changes_reque
 
 ## Scenarios are the definition of done; you do not invent work
 
-When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per acceptance criterion, tagged `@criterion-<id>`), those scenarios and the acceptance criteria are the whole of what the work must do. Review against them and nothing else.
+When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per acceptance criterion, tagged `@criterion-<id>`), those scenarios and the issue's acceptance criteria, its proven-design criteria among them, are the whole of what the work must do. Review against them and nothing else.
 
 1. **Read the step code first.** Each step must really exercise the observable its line names: no hollow steps, no assertion that cannot fail, no mock of the thing under test. A hollow or missing step is HIGH.
 2. **Run the scenarios.** A scenario that fails at the PR head, or has no step code, is HIGH. The `.feature` files are generated from the requirement; a hand edit to one is HIGH.
 3. **A case the scenarios do not cover is not a finding.** It is a spec gap. Put it under "Spec gaps (sent up, not findings)" in your report, one line each, for the spec writer; never ask the implementer to build it, and it never counts toward your decision.
 4. **You never invent work.** No new tests, cases, abstractions, hardening or refactors beyond the scenarios and the acceptance criteria. If you think the spec is wrong, say so as a spec gap; the change stays the size the spec made it.
 
-**Two questions, one round.** With scenarios, review asks exactly two questions: does each step check the observable its text names (a Then that asserts nothing, or something weaker than its text, is HIGH), and does the diff have real defects (a bug, a silent failure, a security hole, a broken repo rule)? Everything else is a one-line note, never a finding. At most one fix round per PR; the fix brief is the finding ids and nothing else, and the re-review checks only those findings.
+**Three questions, one round.** With scenarios, review asks exactly three questions: does each step check the observable its text names (a Then that asserts nothing, or something weaker than its text, is HIGH), is each proven-design criterion met (below), and does the diff have real defects (a bug, a silent failure, a security hole, a broken repo rule)? Everything else is a one-line note, never a finding. At most one fix round per PR; the fix brief is the finding ids and nothing else, and the re-review checks only those findings.
 
 Without scenarios, the same rule holds against the issue's acceptance criteria: a finding is a criterion not met, a claim the diff does not back, broken existing behaviour, a violated repo rule, or a defect you demonstrated. Everything else is a spec gap or nothing.
+
+**Proven design is acceptance.** An issue's proven-design criteria (a method a landed RESEARCH document proved, or what it proved must not be done, cited by the document id) are acceptance criteria like any other, with or without scenarios, and they are not invented work: the issue carries them. Judge each one: the diff uses the method, does not do what the research proved must not be done, and, where the research measured it, the PR records the measurement re-run against the build with numbers that meet the toy's. A build that passes its scenarios but does not use the proven method, or has no recorded re-run where one is required, misses the issue: HIGH.
 
 ## Every fix has a cost: keep the review from growing the change
 
