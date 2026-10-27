@@ -39,7 +39,7 @@ never `pass` -- verify never asserts an unprovable claim.
 
 2. **Gather evidence.** For each criterion, find the proof:
    - `git diff main..HEAD` -- the change that addresses it.
-   - Run the tests (`cargo test`, the relevant suite) and note the test that exercises it.
+   - Read CI's run on the verified head and note the test that exercises it. Run tests yourself only when CI has no run for that head, and then only the issue's own scenarios: a local full-suite run repeats CI.
    - For a behavioral criterion, describe the observable behavior you confirmed.
    - For the predictions criterion, fetch what was emitted for this issue by its issue ref --
      `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` -- not by searching
