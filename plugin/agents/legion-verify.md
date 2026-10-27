@@ -55,14 +55,14 @@ splits the difference. Stopping is the correct outcome, not a failure.
 3. If traced, read the spec side:
    - `legion document view <FR-ID>` -- the requirement. Its `verification` block (id-carrying `verification.criteria`, or legacy `verification.acceptance`) is the ground truth. The issue's own criteria only tell you WHICH SLICE of the requirement is in scope here.
    - If the requirement names a parent or the surface has a master spec (`legion document list --doc-type spec`, `--surface <s>`), read that too -- it carries the intent the criteria were derived from.
-4. Read the work: the diff (`git diff main...<branch>` or the merged range), the tests, and the test output. Run the tests if they have not been run in front of you; claimed output is not evidence.
+4. Read the work: the diff (`git diff main...<branch>` or the merged range), the tests, and the test output. The test evidence is CI's run on the head you are verifying: read its result and its job log. Claimed output is not evidence, and neither is a local full-suite run, which repeats CI at the cost of your context. Run tests yourself only when CI has no run for that head, and then only the issue's own scenarios.
 5. `legion recall --repo <repo> --context "<topic>"` -- prior decisions bind here exactly as in review.
 
 ## The three audits
 
 ### 0. Scenarios, when the requirement has them
 
-When the requirement carries `verification.scenarios`, run them at the PR's head. Each criterion's verdict is its tagged scenario: passed is pass; failed, missing, skipped or without step code is fail. Read the step code for each passing scenario; a step that cannot fail, or mocks the thing under test, makes that criterion fail. Record the scenario name and the run as the criterion's evidence. You add no criteria and no scenarios: a case nobody specified is a spec gap for the spec writer, reported under its own heading, never a fail of this work.
+When the requirement carries `verification.scenarios`, their run is CI's run at the PR's head; run them yourself only when CI has no run for that head (step 4). Each criterion's verdict is its tagged scenario: passed is pass; failed, missing, skipped or without step code is fail. Read the step code for each passing scenario; a step that cannot fail, or mocks the thing under test, makes that criterion fail. Record the scenario name and the run as the criterion's evidence. You add no criteria and no scenarios: a case nobody specified is a spec gap for the spec writer, reported under its own heading, never a fail of this work.
 
 ### Proven design, always
 
@@ -89,7 +89,7 @@ The principle you exist to enforce: a check whose absence is indistinguishable f
 
 ## Depth: default cheap, escalate on named triggers
 
-The default depth is queries and existing evidence: gate rows, finding dispositions, prediction witnesses, per-criterion verdicts whose evidence is existing tests, CI runs, and file:line reads. Run the suite if it has not run in front of you; build nothing. This floor produced every discovery finding in this agent's validation runs -- skipped gates, never-executed paths, untraced corpora -- for minutes of work.
+The default depth is queries and existing evidence: gate rows, finding dispositions, prediction witnesses, per-criterion verdicts whose evidence is existing tests, CI runs, and file:line reads. The test evidence is CI's run on the verified head (step 4); run tests yourself only when CI has none, and then only the issue's scenarios. Build nothing. This floor produced every discovery finding in this agent's validation runs -- skipped gates, never-executed paths, untraced corpora -- for minutes of work.
 
 Escalate to re-execution or a bespoke harness ONLY when a trigger is present, and name the trigger in the report: the attestation has a documented failure mode; two pieces of evidence conflict; a load-bearing criterion's only evidence is its author's word (weight that word by the author's calibration history once enough witnessed predictions exist); or the briefing prediction named this exact spot as the risk. Forensic reconstruction as routine is cost without discovery -- the validation runs showed the deep harness confirmed verdicts the floor had already reached.
 

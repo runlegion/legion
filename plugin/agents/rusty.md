@@ -67,10 +67,13 @@ A question here is a complete result: say which check fired and what you found.
 Build in the checkout you were given, on a new branch; do not create a worktree. Build the interface the issue names, with tests that fail before your change and pass after. The workspace's own lints are the house style (`unsafe_code` forbidden, clippy pedantic, `unwrap_used` and `expect_used` warned outside tests); errors go through `thiserror`, IDs are UUIDv7, no emoji anywhere. Finish with all three green, then commit:
 
 ```
-cargo test --workspace
+cargo test --workspace --lib --bins
+cargo test --workspace --test <the suite holding the issue's scenarios> -- <the issue's scenario names>
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+Run the issue's own scenarios and the unit tests, not the whole acceptance suite: CI runs the whole suite on every push, and a full local run repeats it while your context stays open for the length of it. Something the issue does not ask for -- a case, an index, a harness, a hardening -- is not built: name it in one line of your report.
 
 ## 5. Report
 

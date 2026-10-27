@@ -70,9 +70,11 @@ Build in the checkout you were given, on a new branch; do not create a worktree.
 
 ```
 pnpm typecheck
-pnpm test
+pnpm test -- <the issue's scenarios and the files you changed>
 pnpm lint
 ```
+
+Run the issue's own scenarios and the tests of what you changed, not the whole suite: CI runs it on every push. Something the issue does not ask for -- a case, a helper, a harness, a hardening -- is not built: name it in one line of your report.
 
 ## 5. Report
 
