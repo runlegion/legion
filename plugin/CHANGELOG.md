@@ -1,5 +1,51 @@
 # Legion Changelog
 
+## 0.44.3
+
+The plugin-agents release. Four fixes, all in the markdown the plugin ships to agents; no
+binary behavior changes. Builders and the verifier stop rerunning the full test suite that
+CI already runs on the same head, and builders stop building what the issue does not ask
+for. A method a landed RESEARCH document proved now reaches the builder as binding
+acceptance instead of being dropped as background. The agents and the intent skill stop
+teaching the dated, attributed, "revisable" phrasing for choices, which agents had been
+copying into requirements, code comments and public docs.
+
+Patch release: instruction changes within existing plugin agents and skills. No CLI
+change, no wire-format change and no schema migration; `SCHEMA_VERSION` stays 3.
+
+### Fixed
+
+- **Builders and verify leave the full suite to CI** (PR #1456, #1455). Delivering a
+  release on 2026-10-26, rusty and legion-verify each ran the full acceptance suite
+  locally (about 37 minutes) while CI ran it on the same head, holding a large context
+  open for every run. rusty's gate block now runs the unit tests (including a binary
+  crate's, not `--lib` alone) and the issue's own scenarios; typey runs the issue's
+  scenarios and the changed files' tests. Both builders name, in one line of their report,
+  anything beyond the issue instead of building it. legion-verify takes CI's run on the
+  verified head as its test evidence and runs only the issue's scenarios when CI has no
+  run for that head; its default-depth paragraph and scenario audit say the same.
+- **The legion-verify skill reads CI's run instead of rerunning the suite** (PR #1458,
+  #1457). Step 2 of `plugin/skills/legion-verify/SKILL.md` still said to run the tests
+  after the agent had changed. It now follows the same rule as the agent: CI's run on the
+  head is the evidence, and a local run is limited to the issue's scenarios when CI has
+  none.
+- **Methods a toy proved reach the builder as binding acceptance** (PR #1446, #1445).
+  build-to-spec rule 2 keeps invented mechanisms out of briefs and issues, and now says a
+  method a landed RESEARCH document proved is design output: it goes into the issue as
+  binding, cited by document id with its measurement. A quoted requirement's pointers are
+  quoted too, recursively. The issue-writer reads every cited RESEARCH document and writes
+  a Proven design section whose lines, must-not lines included, become acceptance
+  criteria with diff and re-run evidence. The spec-writer states what each cited toy
+  proved and types toy-proven criteria as event evidence, never research. legion-review
+  and legion-verify judge proven-design criteria like any other.
+- **Agents and the intent skill stop teaching the dated, revisable choice phrasing**
+  (PR #1454, #1453). spec-writer told every spec to write choices as "current choice
+  (date): X, because Y; revisable", and the intent skill recorded the operator's words in
+  the same attributed form. Agents copied it into requirements, code comments and public
+  docs. spec-writer, the intent skill, not-hotdog, issue-writer, rusty and typey now ask
+  for a plain statement of what the software does and why, and spec-writer and the intent
+  skill tell writers never to mark a choice revisable.
+
 ## 0.44.2
 
 The plugin-hooks release. Two fixes, both in the plugin's shell layer. First, a plugin
