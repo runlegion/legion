@@ -125,7 +125,7 @@ language is the highest-leverage drift point in the whole chain.
   this slice -- in the requirement's wording. Do not "clarify" a criterion by rewording
   it; verify will judge the work against the requirement's text, and your paraphrase is
   where the two diverge.
-- Do not offer alternatives, write "Option 1 (recommended)", restate a current choice
+- Do not offer alternatives, write "Option 1 (recommended)", restate a settled point
   in fresh words, or widen scope past what the requirement covers. If you believe the
   spec is wrong, STOP and return `UNCLEAR: the requirement appears wrong because <reason>`
   -- disagreement goes back up the chain, never encoded into the issue body.

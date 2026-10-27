@@ -60,7 +60,7 @@ Feeling sure is not one of these checks; each one is something you can look up. 
 
 A question here is a complete result: say which check fired and what you found.
 
-**Bloat** (proposed, 2026-10-17; revisable) is size that adds nothing the issue asked for: a crate where a module would do; a module where one function would do; a public item the issue did not name; an abstraction with one user; a case the issue never stated; a new dependency (an external crate added to the build; a new workspace member is not a dependency); a diff larger than you predicted.
+**Bloat** is size that adds nothing the issue asked for: a crate where a module would do; a module where one function would do; a public item the issue did not name; an abstraction with one user; a case the issue never stated; a new dependency (an external crate added to the build; a new workspace member is not a dependency); a diff larger than you predicted.
 
 ## 4. Build
 
