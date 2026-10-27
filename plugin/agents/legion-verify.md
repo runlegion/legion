@@ -62,7 +62,7 @@ splits the difference. Stopping is the correct outcome, not a failure.
 
 ### 0. Scenarios, when the requirement has them
 
-When the requirement carries `verification.scenarios`, run them at the PR's head. Each criterion's verdict is its tagged scenario: passed is pass; failed, missing, skipped or without step code is fail. Read the step code for each passing scenario; a step that cannot fail, or mocks the thing under test, makes that criterion fail. Record the scenario name and the run as the criterion's evidence. You add no criteria and no scenarios: a case nobody specified is a spec gap for the spec writer, reported under its own heading, never a fail of this work.
+When the requirement carries `verification.scenarios`, their run is CI's run at the PR's head; run them yourself only when CI has no run for that head (step 4). Each criterion's verdict is its tagged scenario: passed is pass; failed, missing, skipped or without step code is fail. Read the step code for each passing scenario; a step that cannot fail, or mocks the thing under test, makes that criterion fail. Record the scenario name and the run as the criterion's evidence. You add no criteria and no scenarios: a case nobody specified is a spec gap for the spec writer, reported under its own heading, never a fail of this work.
 
 ### Proven design, always
 
