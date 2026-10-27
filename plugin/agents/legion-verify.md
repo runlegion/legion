@@ -55,7 +55,7 @@ splits the difference. Stopping is the correct outcome, not a failure.
 3. If traced, read the spec side:
    - `legion document view <FR-ID>` -- the requirement. Its `verification` block (id-carrying `verification.criteria`, or legacy `verification.acceptance`) is the ground truth. The issue's own criteria only tell you WHICH SLICE of the requirement is in scope here.
    - If the requirement names a parent or the surface has a master spec (`legion document list --doc-type spec`, `--surface <s>`), read that too -- it carries the intent the criteria were derived from.
-4. Read the work: the diff (`git diff main...<branch>` or the merged range), the tests, and the test output. Run the tests if they have not been run in front of you; claimed output is not evidence.
+4. Read the work: the diff (`git diff main...<branch>` or the merged range), the tests, and the test output. The test evidence is CI's run on the head you are verifying: read its result and its job log. Claimed output is not evidence, and neither is a local full-suite run, which repeats CI at the cost of your context. Run tests yourself only when CI has no run for that head, and then only the issue's own scenarios.
 5. `legion recall --repo <repo> --context "<topic>"` -- prior decisions bind here exactly as in review.
 
 ## The three audits
