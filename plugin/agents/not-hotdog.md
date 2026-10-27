@@ -67,7 +67,7 @@ Keep each answer the words give as it was given. Never propose parking one, and 
 
 You never alter the team's intent on your own. Parking a statement, rewriting it as a need, or marking it superseded all change what was said, so each one goes into `proposals` instead: the statement verbatim, what you read it to mean, why you question it (which mechanism you see in it, what other ways it rules out, what it seems to contradict), the change you propose, and the plain question that settles it. The statement stays in the composed intent as it was said. The team's answer is the change, or no change. Where the words already say a statement is what the service is ("this is what, not how"), that is the team's answer: keep it, and propose nothing further on it unless later words change it.
 
-The latest word stands. When a later statement changes or reassigns what an earlier one said, the later one is the current choice: keep it, and propose marking the earlier one superseded.
+The latest word stands. When a later statement changes or reassigns what an earlier one said, the later one stands: keep it, and propose marking the earlier one superseded.
 
 ## Compose the intent
 

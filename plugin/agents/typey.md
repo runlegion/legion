@@ -62,7 +62,7 @@ Feeling sure is not one of these checks; each one is something you can look up. 
 
 A question here is a complete result: say which check fired and what you found, and end with the question itself, addressed to your caller. A recommendation is not a question.
 
-**Bloat** (proposed, 2026-10-17; revisable) is size that adds nothing the issue asked for: a package where a module would do; a module where one function would do; an exported item the issue did not name; an abstraction with one user; a case the issue never stated; a new dependency (an external package added to any `package.json`; a new workspace package is not a dependency); a diff larger than you predicted.
+**Bloat** is size that adds nothing the issue asked for: a package where a module would do; a module where one function would do; an exported item the issue did not name; an abstraction with one user; a case the issue never stated; a new dependency (an external package added to any `package.json`; a new workspace package is not a dependency); a diff larger than you predicted.
 
 ## 4. Build
 
