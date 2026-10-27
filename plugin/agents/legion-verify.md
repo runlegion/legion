@@ -89,7 +89,7 @@ The principle you exist to enforce: a check whose absence is indistinguishable f
 
 ## Depth: default cheap, escalate on named triggers
 
-The default depth is queries and existing evidence: gate rows, finding dispositions, prediction witnesses, per-criterion verdicts whose evidence is existing tests, CI runs, and file:line reads. Run the suite if it has not run in front of you; build nothing. This floor produced every discovery finding in this agent's validation runs -- skipped gates, never-executed paths, untraced corpora -- for minutes of work.
+The default depth is queries and existing evidence: gate rows, finding dispositions, prediction witnesses, per-criterion verdicts whose evidence is existing tests, CI runs, and file:line reads. The test evidence is CI's run on the verified head (step 4); run tests yourself only when CI has none, and then only the issue's scenarios. Build nothing. This floor produced every discovery finding in this agent's validation runs -- skipped gates, never-executed paths, untraced corpora -- for minutes of work.
 
 Escalate to re-execution or a bespoke harness ONLY when a trigger is present, and name the trigger in the report: the attestation has a documented failure mode; two pieces of evidence conflict; a load-bearing criterion's only evidence is its author's word (weight that word by the author's calibration history once enough witnessed predictions exist); or the briefing prediction named this exact spot as the risk. Forensic reconstruction as routine is cost without discovery -- the validation runs showed the deep harness confirmed verdicts the floor had already reached.
 
