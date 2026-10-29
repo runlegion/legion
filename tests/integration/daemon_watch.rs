@@ -122,9 +122,9 @@ fn daemon_spawn_preflight_refuses_held_port() {
     let data_dir = tempfile::tempdir().unwrap();
 
     // Hold a port for the duration of the test -- this is the "foreign
-    // process" the preflight must detect. Bind 0.0.0.0 to mirror the
-    // production `port_available` probe.
-    let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+    // process" the preflight must detect. Bind 127.0.0.1, the address the
+    // daemon binds by default (#1463).
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
 
     let (_stdout, stderr) =

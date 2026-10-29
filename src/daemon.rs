@@ -4,15 +4,20 @@
 /// 2. Watch          -- signal polling + auto-wake (the existing watch.rs loop)
 ///
 /// The daemon starts all tasks and shuts down cleanly on SIGINT/SIGTERM.
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::channel;
+use crate::cluster::ClusterConfig;
 use crate::error::{LegionError, Result};
 use crate::watch;
 
 /// PID lock file name for the daemon process (separate from watch.pid).
 const DAEMON_PID_FILE: &str = "daemon.pid";
+
+/// Where the channel server listens unless cluster.toml opts in to the LAN (#1463).
+const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// Return the platform-appropriate log file path for the daemon.
 ///
@@ -53,6 +58,7 @@ pub fn daemon_log_path() -> Result<PathBuf> {
 /// retains control.
 pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     let pid_path = data_dir.join(DAEMON_PID_FILE);
+    let ip = bind_addr(data_dir);
 
     // Check whether a daemon is already running.
     if pid_path.exists() {
@@ -74,7 +80,7 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     // Spawning anyway forks a child that dies on bind ("Address already in
     // use") while we falsely report "daemon started (pid N)" and leave the
     // pidfile pointing at a corpse. Fail loud and name the holder instead.
-    if !port_available(port) {
+    if !port_available(ip, port) {
         let holders = port_listener_pids(port);
         let (who, hint) = match holders.first() {
             Some(pid) => (
@@ -138,15 +144,33 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Whether `port` can be bound right now (i.e. it is free).
+/// The address the daemon's HTTP channel server listens on: `daemon_bind`
+/// from cluster.toml, else 127.0.0.1 (#1463). A cluster.toml that does not
+/// parse falls back to 127.0.0.1 with a warning, so a broken file never opens
+/// the server to the LAN and never stops the daemon.
+fn bind_addr(data_dir: &Path) -> IpAddr {
+    match ClusterConfig::load(data_dir) {
+        Ok(config) => config.daemon_bind,
+        Err(e) => {
+            eprintln!("[legion daemon] {e}; channel server binds 127.0.0.1");
+            None
+        }
+    }
+    .unwrap_or(DEFAULT_BIND)
+}
+
+/// Whether `port` is free on `ip`, the address the daemon will bind.
 ///
-/// Binds and immediately drops a listener on `0.0.0.0:port`. A momentary
-/// TOCTOU gap exists between this probe and the daemon child's own bind, but it
-/// converts the common "another process already owns the port" case from a
-/// silent fork-then-die into a clear up-front error. The same race already
-/// existed before this check, so it adds safety without removing any.
-fn port_available(port: u16) -> bool {
-    std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+/// Binds and immediately drops a listener on `ip:port`, and asks lsof whether
+/// anything listens on `port` at all. The bind alone is not enough: with
+/// `SO_REUSEADDR`, which std sets on Unix, macOS lets `127.0.0.1:port` bind
+/// while another socket holds `0.0.0.0:port`, and the reverse, so an older
+/// daemon on the wildcard would read as free. A momentary TOCTOU gap exists
+/// between this probe and the daemon child's own bind, but it converts the
+/// common "another process already owns the port" case from a silent
+/// fork-then-die into a clear up-front error.
+fn port_available(ip: IpAddr, port: u16) -> bool {
+    std::net::TcpListener::bind((ip, port)).is_ok() && port_listener_pids(port).is_empty()
 }
 
 /// Best-effort: the PID(s) listening on `port`, for naming the holder in the
@@ -477,7 +501,8 @@ fn restart_detached_with(
     // FIX 3: after the pidfile-based stop, check whether the port is still
     // held. If so, the pidfile was stale/missing (orphaned daemon). Attempt
     // to identify and kill the holder if it is a legion daemon process.
-    if !port_available(port) {
+    let ip = bind_addr(data_dir);
+    if !port_available(ip, port) {
         eprintln!(
             "[legion] daemon-restart: port {port} still held after pidfile-based stop; \
              checking for orphaned daemon"
@@ -485,7 +510,7 @@ fn restart_detached_with(
         kill_orphaned_daemon_on_port_with(port, list_pids, read_cmdline);
 
         // Give the OS a moment to release the port after the kill.
-        if !port_available(port) {
+        if !port_available(ip, port) {
             // Port is still held -- either the kill failed or the holder was
             // not a legion daemon. spawn_detached will produce a clear error.
             eprintln!(
@@ -546,13 +571,15 @@ async fn run_daemon_async(config: DaemonConfig) -> Result<()> {
     };
     let app = channel::router(channel_state);
 
-    // Bind the TCP listener.
-    let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
+    // Bind the TCP listener: this host only unless cluster.toml opts in to
+    // the LAN (#1463).
+    let addr = std::net::SocketAddr::new(bind_addr(&data_dir), port);
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| LegionError::Server(format!("failed to bind {addr}: {e}")))?;
+    let bound = listener.local_addr().map_err(LegionError::Io)?;
 
-    eprintln!("[legion daemon] channel server at http://localhost:{port}");
+    eprintln!("[legion daemon] channel server at http://{bound}");
 
     // Schedules fire under the daemon too (#613 decision): the daemon is
     // the long-lived server on a watch node, so cron posts must not depend
@@ -749,18 +776,60 @@ mod tests {
 
     #[test]
     fn port_available_false_for_bound_port() {
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
+        let port = listener.local_addr().expect("addr").port();
+        assert!(
+            !port_available(DEFAULT_BIND, port),
+            "a held port must read as unavailable"
+        );
+    }
+
+    /// #1463: on macOS, `SO_REUSEADDR` lets `127.0.0.1:port` bind while an
+    /// older daemon holds `0.0.0.0:port`. The probe must still read it as held.
+    /// Unix only: the lsof check is what catches it, and Windows has no lsof.
+    #[cfg(unix)]
+    #[test]
+    fn port_available_false_when_wildcard_holds_the_port() {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         assert!(
-            !port_available(port),
-            "a held port must read as unavailable"
+            !port_available(DEFAULT_BIND, port),
+            "a wildcard listener must make the loopback port read as held"
         );
+    }
+
+    #[test]
+    fn bind_addr_is_loopback_without_cluster_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(bind_addr(dir.path()), DEFAULT_BIND);
+    }
+
+    #[test]
+    fn bind_addr_reads_the_lan_opt_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("cluster.toml"),
+            "enabled = true\nport = 31337\ndaemon_bind = \"0.0.0.0\"\n",
+        )
+        .expect("write cluster.toml");
+        assert_eq!(bind_addr(dir.path()), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn bind_addr_is_loopback_when_cluster_toml_is_broken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("cluster.toml"),
+            "daemon_bind = \"not an ip\"\n",
+        )
+        .expect("write cluster.toml");
+        assert_eq!(bind_addr(dir.path()), DEFAULT_BIND);
     }
 
     #[test]
     fn spawn_detached_refuses_when_port_held() {
         // Hold the port the way a stray `legion serve` or orphaned daemon would.
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -979,7 +1048,7 @@ mod tests {
         // Hold a real port -- the "orphan" the wedge-recovery path is asked
         // to look at -- but never actually spawn a killable process; the
         // injected closures fully control what the kill decision sees.
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         // Maximum valid POSIX PID -- almost never a live process on any real
         // system (same convention as `daemon_auto_spawn_clears_stale_pid`).
@@ -999,7 +1068,7 @@ mod tests {
             "a holder whose cmdline is not a legion daemon must never be killed"
         );
         assert!(
-            !port_available(port),
+            !port_available(DEFAULT_BIND, port),
             "the real listener must still hold the port -- nothing was signaled"
         );
         drop(listener);
@@ -1038,7 +1107,7 @@ mod tests {
     /// regardless of whether the kill step succeeded.
     #[test]
     fn restart_detached_refuses_to_kill_non_legion_holder_but_still_attempts_spawn() {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         let dir = tempfile::tempdir().expect("tempdir");
         let fake_holder_pid = (i32::MAX - 2) as u32;
@@ -1067,7 +1136,7 @@ mod tests {
             "cmdline lookup must run exactly once for the one reported pid"
         );
         assert!(
-            !port_available(port),
+            !port_available(DEFAULT_BIND, port),
             "the real (non-legion) listener must still hold the port -- it was never killed"
         );
         assert!(
