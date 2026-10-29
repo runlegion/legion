@@ -1,5 +1,46 @@
 # Legion Changelog
 
+## 0.44.4
+
+The localhost-daemon release. `legion daemon` bound its HTTP channel server to
+`0.0.0.0:3131`, so every machine on the network could reach a channel that has no
+authentication. rzr reached it from across the LAN and got an HTTP 404 back. The daemon
+now listens on `127.0.0.1` unless `cluster.toml` opts in to the LAN, and it logs the
+address it bound. LAN sync does not use this server, since it has its own UDP ports, so
+sync between nodes works the same with the new default. Anyone who used the channel from
+another host has to set the new `daemon_bind` key and restart the daemon.
+
+Patch release: a fix within the existing daemon surface, plus one optional `cluster.toml`
+key. No CLI change, no wire-format change and no schema migration; `SCHEMA_VERSION` stays
+3.
+
+### Fixed
+
+- **The daemon's channel server listens on 127.0.0.1 by default** (PR #1464, #1463).
+  `run_daemon_async` bound `0.0.0.0:{port}` with no way to choose. It now binds the
+  address that `bind_addr` returns: `daemon_bind` from `cluster.toml`, else the
+  `DEFAULT_BIND` constant `127.0.0.1`. A `cluster.toml` that does not parse falls back to
+  `127.0.0.1` with a warning, so a broken file never opens the server to the LAN and never
+  stops the daemon. The startup line now prints the bound socket
+  (`channel server at http://127.0.0.1:3131`) instead of always saying `localhost`. The
+  port probe that `spawn_detached` and `daemon-restart` run before spawning,
+  `port_available`, now binds the same address and also asks lsof for any listener on the
+  port. The bind alone is not enough: with `SO_REUSEADDR`, macOS lets `127.0.0.1:N` bind
+  while `0.0.0.0:N` is held, and the reverse. Without the lsof check, an older daemon
+  still on the wildcard during an upgrade would read as a free port, `daemon-restart`
+  would skip its orphan-kill step, and the old daemon would stay reachable from the LAN
+  alongside the new loopback one.
+
+### Config
+
+- **`daemon_bind` in `cluster.toml`** (PR #1464, #1463). This optional IP address sets
+  where the daemon's HTTP channel server listens. When unset, the server listens on
+  `127.0.0.1` and serves this host only. Set it to `"0.0.0.0"`, or to one interface's
+  address, to serve the channel to the LAN, then restart the daemon. Anyone who can reach
+  the port can use the channel, which has no authentication, so set it only on a network
+  you trust. Cluster sync ignores this key. `docs/site/getting-started.md` documents it
+  next to the pre-shared-secret guidance.
+
 ## 0.44.3
 
 The plugin-agents release. Four fixes, all in the markdown the plugin ships to agents; no
