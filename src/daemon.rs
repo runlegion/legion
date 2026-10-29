@@ -16,6 +16,9 @@ use crate::watch;
 /// PID lock file name for the daemon process (separate from watch.pid).
 const DAEMON_PID_FILE: &str = "daemon.pid";
 
+/// Where the channel server listens unless cluster.toml opts in to the LAN (#1463).
+const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
 /// Return the platform-appropriate log file path for the daemon.
 ///
 /// - macOS: `~/Library/Logs/legion/daemon.log`
@@ -145,7 +148,7 @@ pub fn spawn_detached(data_dir: &Path, port: u16) -> Result<()> {
 /// from cluster.toml, else 127.0.0.1 (#1463). A cluster.toml that does not
 /// parse falls back to 127.0.0.1 with a warning, so a broken file never opens
 /// the server to the LAN and never stops the daemon.
-pub(crate) fn bind_addr(data_dir: &Path) -> IpAddr {
+fn bind_addr(data_dir: &Path) -> IpAddr {
     match ClusterConfig::load(data_dir) {
         Ok(config) => config.daemon_bind,
         Err(e) => {
@@ -153,7 +156,7 @@ pub(crate) fn bind_addr(data_dir: &Path) -> IpAddr {
             None
         }
     }
-    .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    .unwrap_or(DEFAULT_BIND)
 }
 
 /// Whether `port` is free on `ip`, the address the daemon will bind.
@@ -776,7 +779,7 @@ mod tests {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         assert!(
-            !port_available(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            !port_available(DEFAULT_BIND, port),
             "a held port must read as unavailable"
         );
     }
@@ -788,7 +791,7 @@ mod tests {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         assert!(
-            !port_available(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            !port_available(DEFAULT_BIND, port),
             "a wildcard listener must make the loopback port read as held"
         );
     }
@@ -796,7 +799,7 @@ mod tests {
     #[test]
     fn bind_addr_is_loopback_without_cluster_toml() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(bind_addr(dir.path()), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(bind_addr(dir.path()), DEFAULT_BIND);
     }
 
     #[test]
@@ -818,7 +821,7 @@ mod tests {
             "daemon_bind = \"not an ip\"\n",
         )
         .expect("write cluster.toml");
-        assert_eq!(bind_addr(dir.path()), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(bind_addr(dir.path()), DEFAULT_BIND);
     }
 
     #[test]
@@ -1063,7 +1066,7 @@ mod tests {
             "a holder whose cmdline is not a legion daemon must never be killed"
         );
         assert!(
-            !port_available(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            !port_available(DEFAULT_BIND, port),
             "the real listener must still hold the port -- nothing was signaled"
         );
         drop(listener);
@@ -1131,7 +1134,7 @@ mod tests {
             "cmdline lookup must run exactly once for the one reported pid"
         );
         assert!(
-            !port_available(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            !port_available(DEFAULT_BIND, port),
             "the real (non-legion) listener must still hold the port -- it was never killed"
         );
         assert!(
