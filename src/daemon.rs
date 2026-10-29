@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn port_available_false_for_bound_port() {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         assert!(
             !port_available(DEFAULT_BIND, port),
@@ -786,6 +786,8 @@ mod tests {
 
     /// #1463: on macOS, `SO_REUSEADDR` lets `127.0.0.1:port` bind while an
     /// older daemon holds `0.0.0.0:port`. The probe must still read it as held.
+    /// Unix only: the lsof check is what catches it, and Windows has no lsof.
+    #[cfg(unix)]
     #[test]
     fn port_available_false_when_wildcard_holds_the_port() {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
@@ -827,7 +829,7 @@ mod tests {
     #[test]
     fn spawn_detached_refuses_when_port_held() {
         // Hold the port the way a stray `legion serve` or orphaned daemon would.
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         let dir = tempfile::tempdir().expect("tempdir");
 
@@ -1046,7 +1048,7 @@ mod tests {
         // Hold a real port -- the "orphan" the wedge-recovery path is asked
         // to look at -- but never actually spawn a killable process; the
         // injected closures fully control what the kill decision sees.
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         // Maximum valid POSIX PID -- almost never a live process on any real
         // system (same convention as `daemon_auto_spawn_clears_stale_pid`).
@@ -1105,7 +1107,7 @@ mod tests {
     /// regardless of whether the kill step succeeded.
     #[test]
     fn restart_detached_refuses_to_kill_non_legion_holder_but_still_attempts_spawn() {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind ephemeral");
+        let listener = std::net::TcpListener::bind((DEFAULT_BIND, 0)).expect("bind ephemeral");
         let port = listener.local_addr().expect("addr").port();
         let dir = tempfile::tempdir().expect("tempdir");
         let fake_holder_pid = (i32::MAX - 2) as u32;
