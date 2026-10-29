@@ -19,6 +19,8 @@
 //! port = 31337
 //! instance_id = "hostname"
 //! last_sync = "2026-04-15T00:00:00Z"
+//! # The daemon's HTTP server: 127.0.0.1 when unset; "0.0.0.0" serves the LAN.
+//! daemon_bind = "127.0.0.1"
 //! ```
 
 use crate::error::{LegionError, Result};
@@ -47,6 +49,12 @@ pub struct ClusterConfig {
     /// Last successful sync timestamp
     pub last_sync: Option<String>,
 
+    /// Address the daemon's HTTP channel server listens on. Unset means
+    /// 127.0.0.1, this host only; set `"0.0.0.0"` (or one interface's
+    /// address) to opt in to serving the LAN (#1463). Cluster sync does not
+    /// use this server: it has its own UDP ports.
+    pub daemon_bind: Option<std::net::IpAddr>,
+
     /// Preserve unknown fields on round-trip
     #[serde(flatten)]
     pub extra: toml::Table,
@@ -64,6 +72,7 @@ impl Default for ClusterConfig {
             port: default_port(),
             instance_id: None,
             last_sync: None,
+            daemon_bind: None,
             extra: toml::Table::new(),
         }
     }

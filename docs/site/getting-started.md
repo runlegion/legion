@@ -546,6 +546,8 @@ The delta format is shipped (ReflectionDelta, ScheduleDelta). Broadcast transpor
 
 `cluster.toml` contains the pre-shared secret and is written with `0o600` on Unix. Do not commit it. A leaked key lets an attacker on the same subnet read and write to your database.
 
+The daemon's HTTP channel server (port 3131) listens on `127.0.0.1` only. Sync does not need it: sync uses its own UDP ports. To serve the channel to the LAN, set `daemon_bind = "0.0.0.0"` (or one interface's address) in `cluster.toml` and restart the daemon. Anyone who can reach the port can then use the channel, which has no authentication.
+
 ## Boost and learning chains
 
 ### Boost a useful reflection
