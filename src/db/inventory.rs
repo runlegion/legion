@@ -214,7 +214,7 @@ fn is_entry(entry: &FileInventoryEntry) -> bool {
 /// near-miss name. This version tracks at most one "last `*`" backtrack
 /// point (`star_idx`/`match_idx`) and never re-explores a branch, so it's
 /// linear in `pattern.len() + name.len()` for any input.
-fn glob_match(pattern: &[char], name: &[char]) -> bool {
+pub(crate) fn glob_match(pattern: &[char], name: &[char]) -> bool {
     let (mut pi, mut ni) = (0usize, 0usize);
     let mut star_idx: Option<usize> = None;
     let mut match_idx = 0usize;

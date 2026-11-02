@@ -3,7 +3,8 @@
     "git",
     "gh",
     "grep",
-    "rg"
+    "rg",
+    "find"
   ],
   "worktree_agent_passthrough": [
     "git",

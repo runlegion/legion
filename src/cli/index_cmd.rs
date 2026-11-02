@@ -908,9 +908,9 @@ fn run_sym_importers(
 /// deliberately dropped -- `sym tree` answers "what/where", not "when did
 /// it last change".
 #[derive(Debug, serde::Serialize)]
-struct SymTreeEntry {
+pub(crate) struct SymTreeEntry {
     repo: String,
-    path: String,
+    pub(crate) path: String,
     ext: Option<String>,
     lang: Option<String>,
     size: u64,
@@ -1450,8 +1450,8 @@ fn run_sym_tree(
 /// Result of a `sym tree` scan: the filtered, sorted entries plus an
 /// optional human-facing note for the empty case (either "never indexed"
 /// or "filter matched nothing", distinguished by `compute_uncovered_message`).
-struct TreeScan {
-    entries: Vec<SymTreeEntry>,
+pub(crate) struct TreeScan {
+    pub(crate) entries: Vec<SymTreeEntry>,
     message: Option<String>,
 }
 
@@ -1460,7 +1460,7 @@ struct TreeScan {
 /// (server-side `--ext`/`--repo` filter), then narrow by `--under`/`--depth`
 /// in-process. Cross-repo (`repo: None`) never touches watch.toml -- the
 /// inventory table is the source of truth once `legion index` has run.
-fn scan_tree(
+pub(crate) fn scan_tree(
     database: &db::Database,
     repo: Option<&str>,
     ext: Option<&str>,
@@ -1516,7 +1516,7 @@ fn filter_and_scope(
 
 /// True when `path` is `under` itself or lives inside it. Boundary-checked
 /// so `src/db` matches `src/db/x.rs` but not the sibling `src/dbfoo.rs`.
-fn under_matches(path: &str, under: &str) -> bool {
+pub(crate) fn under_matches(path: &str, under: &str) -> bool {
     let u = under.trim_end_matches('/');
     if u.is_empty() {
         return true;
@@ -1662,8 +1662,8 @@ fn run_etc_find_file(
 /// an optional human-facing note for the empty case (either "never
 /// indexed" or "name/role matched nothing").
 #[derive(Debug)]
-struct FindFileScan {
-    entries: Vec<db::inventory::FileInventoryEntry>,
+pub(crate) struct FindFileScan {
+    pub(crate) entries: Vec<db::inventory::FileInventoryEntry>,
     message: Option<String>,
 }
 
@@ -1677,7 +1677,7 @@ struct FindFileScan {
 /// query has no server-side name/role filter to begin with -- so `raw`
 /// emptiness *is* the "never indexed" baseline, and no second query is
 /// needed to compute it.
-fn scan_find_file(
+pub(crate) fn scan_find_file(
     database: &db::Database,
     repo: Option<&str>,
     query: &str,

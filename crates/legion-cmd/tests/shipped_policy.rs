@@ -42,13 +42,13 @@ fn the_shipped_file_has_exactly_the_four_lists_the_passthrough_list_and_tools() 
 }
 
 #[test]
-fn the_proxy_list_is_git_gh_grep_and_rg() {
-    assert_eq!(shipped().proxy, vec!["git", "gh", "grep", "rg"]);
+fn the_proxy_list_is_git_gh_grep_rg_and_find() {
+    assert_eq!(shipped().proxy, vec!["git", "gh", "grep", "rg", "find"]);
 }
 
 #[test]
 fn a_worktree_isolated_agent_runs_git_and_gh_as_typed() {
-    // #1358: grep and rg stay proxied in every agent.
+    // #1358: grep, rg and find stay proxied in every agent.
     assert_eq!(shipped().worktree_agent_passthrough, vec!["git", "gh"]);
 }
 

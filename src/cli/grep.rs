@@ -724,7 +724,7 @@ fn set_once(slot: &mut Option<String>, value: &str) -> Option<()> {
 /// matched (grep `-c` prints zero counts and still exits 1). A closed pipe
 /// (`legion grep ... | head -1`) ends quietly with the status a
 /// SIGPIPE-killed tool reports, instead of an error.
-fn print_answer(lines: &[String], matched: bool) -> Result<()> {
+pub(crate) fn print_answer(lines: &[String], matched: bool) -> Result<()> {
     let written: std::io::Result<()> = (|| {
         let mut out = std::io::stdout().lock();
         for line in lines {

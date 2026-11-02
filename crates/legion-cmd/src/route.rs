@@ -3,7 +3,7 @@
 //! [`route`] takes a tool call and context. A Bash command is parsed once
 //! and put through four lists: a command on the never-run list is denied; a
 //! command on the ask list, or one whose rewritten form uses a power switch,
-//! is asked about; each `git`, `gh`, `grep` and `rg` (the proxy list) gets
+//! is asked about; each `git`, `gh`, `grep`, `rg` and `find` (the proxy list) gets
 //! `legion ` inserted before its name, except the `worktree_agent_passthrough`
 //! names in a worktree-isolated agent (#1358); everything else runs as typed. A
 //! command matching more than one gets the strictest outcome: deny, then
@@ -697,6 +697,17 @@ mod tests {
                 .rewritten
                 .as_deref(),
             Some("git status && legion grep -rn foo src | legion rg bar")
+        );
+    }
+
+    #[test]
+    fn a_worktree_isolated_agent_still_gets_legion_find() {
+        assert_eq!(
+            decide_isolated("git status && find . -name '*.rs' | wc -l")
+                .facts
+                .rewritten
+                .as_deref(),
+            Some("git status && legion find . -name '*.rs' | wc -l")
         );
     }
 

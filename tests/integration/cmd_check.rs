@@ -112,9 +112,38 @@ fn the_shipped_policy_denies_inserts_and_passes_through_the_real_binary() {
         })
     );
 
+    // #1472: find too, and the rest of a compound command runs.
+    let found = hook_output(
+        dir.path(),
+        &policy,
+        &payload("cd x && find . -name '*.rs' | wc -l"),
+    );
+    assert_eq!(
+        found["updatedInput"]["command"],
+        "cd x && legion find . -name '*.rs' | wc -l"
+    );
+    assert!(found.get("permissionDecision").is_none(), "{found}");
+
     // A command matching no rule runs byte for byte, with nothing added.
     let passed = hook_output(dir.path(), &policy, &payload("echo hi"));
     assert_eq!(passed, serde_json::json!({"hookEventName": "PreToolUse"}));
+}
+
+#[test]
+fn cmd_check_answers_rewrite_to_legion_find_for_a_typed_find() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = legion_cmd(dir.path())
+        .args(["cmd-check", "--", "find . -name \"*.toml\""])
+        .env("LEGION_CMD_POLICY", shipped_policy_path())
+        .env("XDG_STATE_HOME", dir.path())
+        .output()
+        .expect("spawn legion");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("rewrite"), "got: {stdout}");
+    assert!(
+        stdout.contains("legion find . -name \"*.toml\""),
+        "got: {stdout}"
+    );
 }
 
 #[test]

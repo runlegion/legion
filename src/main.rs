@@ -111,12 +111,15 @@ fn run() -> error::Result<()> {
     raise_fd_limit();
     // Proxies whose argv belongs to another tool are dispatched before clap,
     // whose global -v and `--` handling would alter it: git (#1335), grep and
-    // rg (#1334).
+    // rg (#1334), find (#1472).
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if argv.get(1).is_some_and(|first| first == "git") {
         return cli::git::handle_git(argv.get(2..).unwrap_or(&[]).to_vec());
     }
     if let Some(result) = cli::grep::run_from_argv(&argv) {
+        return result;
+    }
+    if let Some(result) = cli::find::run_from_argv(&argv) {
         return result;
     }
     let cli = Cli::parse();
@@ -386,6 +389,7 @@ fn run() -> error::Result<()> {
         Commands::Cmd { action } => cli::cmd_confirm::handle_cmd(action)?,
         Commands::Grep { args } => cli::grep::handle_grep(args)?,
         Commands::Rg { args } => cli::grep::handle_rg(args)?,
+        Commands::Find { args } => cli::find::handle_find(args)?,
     }
 
     Ok(())

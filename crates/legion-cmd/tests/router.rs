@@ -35,7 +35,7 @@ fn rewritten(command: &str) -> Option<String> {
     }
 }
 
-// -- 1. legion before git, gh, grep and rg at every position ----------------
+// -- 1. legion before git, gh, grep, rg and find at every position ----------
 
 #[test]
 fn proxied_names_get_legion_at_every_position() {
@@ -87,6 +87,26 @@ fn proxied_names_get_legion_at_every_position() {
             "git log \\\n  --oneline -3 && \\\n  rg x",
             "legion git log \\\n  --oneline -3 && \\\n  legion rg x",
         ),
+        // #1472: find, the way grep is, and the rest of the command runs.
+        ("find . -name \"*.toml\"", "legion find . -name \"*.toml\""),
+        (
+            "find src -type f 2>/dev/null | wc -l",
+            "legion find src -type f 2>/dev/null | wc -l",
+        ),
+        (
+            "cd a && find . -name x; echo done",
+            "cd a && legion find . -name x; echo done",
+        ),
+        (
+            "for f in $(find . -name '*.toml'); do wc -l \"$f\"; done",
+            "for f in $(legion find . -name '*.toml'); do wc -l \"$f\"; done",
+        ),
+        // `-exec`'s payload is find's argument, so the grep in it stays as
+        // typed; `legion find` is what says it cannot run it.
+        (
+            "find . -name x -exec grep -l y {} +",
+            "legion find . -name x -exec grep -l y {} +",
+        ),
         // The two moved false positives: `git stash push` is git's own verb,
         // and `pnpm grep` runs pnpm, not grep.
         (
@@ -106,7 +126,8 @@ fn paths_arguments_legion_forms_quotes_heredocs_and_bodies_are_not_changed() {
         "/usr/bin/git status",
         "./rg foo",
         "xargs grep foo",
-        "find . -name x -exec grep -l y {} +",
+        "/usr/bin/find . -name x",
+        "xargs find",
         "echo git",
         "pnpm grep",
         "legion git status",

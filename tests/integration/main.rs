@@ -14,6 +14,9 @@ mod css_symbols;
 mod daemon_watch;
 mod documents;
 mod etc;
+// Unix only: the tests drive real find and sh stubs on PATH.
+#[cfg(unix)]
+mod find;
 mod find_file;
 mod gh_proxy;
 mod git;

@@ -7,6 +7,7 @@ pub(crate) mod cmd_confirm;
 pub(crate) mod commit;
 pub(crate) mod datadir;
 pub(crate) mod document;
+pub(crate) mod find;
 pub(crate) mod gh;
 pub(crate) mod git;
 pub(crate) mod grep;
@@ -1334,6 +1335,16 @@ pub(crate) enum Commands {
     #[command(disable_help_flag = true)]
     Rg {
         /// rg's arguments, exactly as typed for rg.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<OsString>,
+    },
+
+    /// find, answered from sym's file inventory (#1472). Takes find's own
+    /// arguments. It never runs find: a form sym cannot answer says what to
+    /// use instead and exits 1.
+    #[command(disable_help_flag = true)]
+    Find {
+        /// find's arguments, exactly as typed for find.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<OsString>,
     },
