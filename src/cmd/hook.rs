@@ -167,6 +167,12 @@ const FALLBACK_DENY_JSON: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreT
 /// It bounds the pre-decision store open and the witness pass too.
 pub(crate) const ROUTE_DEADLINE: Duration = Duration::from_millis(7000);
 
+/// The decision deadline for tests of wiring and rule decisions (#1470): far
+/// past what a loaded CI runner needs, so only a test that means to overrun
+/// a deadline ever sees one.
+#[cfg(test)]
+pub(crate) const TEST_DEADLINE: Duration = Duration::from_secs(120);
+
 /// The PreToolUse payload fields the adapter acts on. Unknown fields are
 /// ignored, not rejected: the harness may add fields. `session_id` binds the
 /// confirmations the adapter reads and the incident records it writes to the
@@ -427,6 +433,7 @@ fn respond(input: &str, after: &mut AfterResponse) -> Value {
                 decision_store,
                 legion_repo,
                 Arc::new(LocalAnswers),
+                deadline,
             )
         },
         move || match session_input {
@@ -630,7 +637,9 @@ pub(crate) struct SessionWork {
 /// The adapter over injected sources, so a test drives every branch without
 /// touching the environment or the store. A Grep or Glob call the router
 /// lets run with nothing added is offered to `answers` after the decision
-/// (#1338).
+/// (#1338). `deadline` bounds the decision; production passes
+/// [`ROUTE_DEADLINE`], and tests pass a longer one so runner load cannot
+/// turn a rule's decision into a deadline deny (#1470).
 fn respond_with(
     input: &str,
     policy_text: Result<String, AdapterError>,
@@ -638,6 +647,7 @@ fn respond_with(
     store: Arc<dyn CmdStore>,
     legion_repo: Option<String>,
     answers: Arc<dyn Answerer>,
+    deadline: Duration,
 ) -> Applied {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(payload) => payload,
@@ -669,6 +679,7 @@ fn respond_with(
         payload.cwd.clone(),
         payload.worktree_isolated(),
         Some(session),
+        deadline,
     ) {
         Ok(routed) => match answered(&routed, &payload, legion_repo, answers) {
             Some(answer) => answer_response(answer).into(),
@@ -717,12 +728,16 @@ fn answer_response(answer: Answer) -> Value {
 /// The decision core both modes run (FR-CMD-017). Parses the policy first
 /// (the text is a local file, read outside the deadline), then runs repo
 /// derivation, the lookup pre-pass, and route on a worker thread under
-/// [`ROUTE_DEADLINE`]. Returns route's result. Every failure is an [`AdapterError`], which each mode turns into a deny
+/// `deadline` ([`ROUTE_DEADLINE`] in both modes; a test passes its own).
+/// Returns route's result. Every failure is an [`AdapterError`], which each mode turns into a deny
 /// (FR-CMD-009, FR-CMD-016). `worktree_isolated` is whether the call comes
 /// from a worktree-isolated agent (#1358), which only the hook payload can
 /// say; the operator mode passes `false`. `session` is the hook mode's
 /// [`SessionWork`], run inside the same deadline; the operator mode passes
 /// `None`.
+// Eight independent inputs since #1470 made the deadline one of them; a
+// struct holding them would exist only to quiet this lint.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn route_call(
     policy_text: Result<String, AdapterError>,
     call: ToolCall,
@@ -731,6 +746,7 @@ pub(crate) fn route_call(
     cwd: Option<String>,
     worktree_isolated: bool,
     session: Option<SessionWork>,
+    deadline: Duration,
 ) -> Result<Routed, AdapterError> {
     // A policy file that cannot be read still leaves the built-in no-go list
     // in force (FR-CMD-025): route runs over an empty policy, so a no-go
@@ -747,7 +763,7 @@ pub(crate) fn route_call(
         }
     };
     let worker_policy: Arc<Policy> = Arc::clone(&policy);
-    let routed: Routed = decide(ROUTE_DEADLINE, move || {
+    let routed: Routed = decide(deadline, move || {
         let repo: Option<String> = repo_for(legion_repo.as_deref(), cwd.as_deref());
         let now: DateTime<Utc> = Utc::now();
         // The hook's confirmation and incident-record work (#1237). Pending
@@ -1520,6 +1536,7 @@ mod tests {
             temp_store(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
     }
 
@@ -1608,6 +1625,7 @@ mod tests {
             temp_store(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -1916,6 +1934,7 @@ mod tests {
             store.clone(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response
     }
@@ -2016,6 +2035,7 @@ mod tests {
             store.clone(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -2037,6 +2057,7 @@ mod tests {
             store.clone(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -2065,6 +2086,7 @@ mod tests {
                 store.clone(),
                 None,
                 no_answers(),
+                TEST_DEADLINE,
             )
             .response;
             assert_denied(&response);
@@ -2237,6 +2259,7 @@ mod tests {
             })),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -2283,6 +2306,7 @@ mod tests {
             temp_store(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -2323,6 +2347,7 @@ mod tests {
             temp_store(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -2348,6 +2373,7 @@ mod tests {
             temp_store(),
             Some("other-repo".to_string()),
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_eq!(lookups.calls()[0].0, "recall:other-repo");
@@ -2369,6 +2395,30 @@ mod tests {
         let response = deny_for_error(&err);
         assert_denied(&response);
         assert!(reason(&response).contains("deadline exceeded: no decision within 10 ms"));
+    }
+
+    #[test]
+    fn a_lookup_slower_than_the_production_deadline_gets_the_deadline_deny() {
+        // #1470: every other decision test runs under TEST_DEADLINE; this one
+        // holds the production deadline itself. The lookup sleeps well past
+        // it, so load can only make the overrun later, never avoid it.
+        let lookups = RecordingLookups::new(ROUTE_DEADLINE + Duration::from_secs(5));
+        let response = respond_with(
+            &fetch_payload("https://example.com", Some(REPO_CWD)),
+            Ok(POLICY.to_string()),
+            lookups,
+            temp_store(),
+            None,
+            no_answers(),
+            ROUTE_DEADLINE,
+        )
+        .response;
+        assert_denied(&response);
+        assert!(
+            reason(&response).contains("deadline exceeded: no decision within 7000 ms"),
+            "got {}",
+            reason(&response)
+        );
     }
 
     #[test]
@@ -2435,6 +2485,7 @@ mod tests {
             temp_store(),
             None,
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         assert_denied(&response);
@@ -2625,6 +2676,7 @@ mod tests {
                     store,
                     None,
                     no_answers(),
+                    TEST_DEADLINE,
                 )
             },
             move || {
@@ -2689,6 +2741,7 @@ mod tests {
                         temp_store(),
                         None,
                         no_answers(),
+                        TEST_DEADLINE,
                     )
                 },
                 || Ok(()),
@@ -2780,6 +2833,7 @@ mod tests {
             temp_store(),
             Some("legion".to_string()),
             no_answers(),
+            TEST_DEADLINE,
         )
         .response
     }
@@ -2862,6 +2916,7 @@ mod tests {
             store,
             Some("legion".to_string()),
             no_answers(),
+            TEST_DEADLINE,
         )
         .response;
         let out = output(&confirmed);
@@ -2924,6 +2979,7 @@ mod tests {
             temp_store(),
             Some("legion".to_string()),
             no_answers(),
+            TEST_DEADLINE,
         )
         .response
     }
@@ -3046,6 +3102,7 @@ mod tests {
             temp_store(),
             None,
             answers,
+            TEST_DEADLINE,
         )
         .response
     }
@@ -3179,6 +3236,7 @@ mod tests {
                 temp_store(),
                 None,
                 no_answers(),
+                TEST_DEADLINE,
             )
             .response;
             let from_store = respond_with(
@@ -3188,6 +3246,7 @@ mod tests {
                 Arc::new(Unopenable),
                 None,
                 no_answers(),
+                TEST_DEADLINE,
             )
             .response;
             let from_panic = guarded(&tool_payload(tool, input), || panic!("adapter bug"));

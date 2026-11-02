@@ -30,8 +30,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::cmd::hook::{
-    AdapterError, LEGION_REPO_ENV, LookupRunner, StoreLookups, error_deny_reason, panic_message,
-    read_policy_text, replacement_for, route_call, run_hook,
+    AdapterError, LEGION_REPO_ENV, LookupRunner, ROUTE_DEADLINE, StoreLookups, error_deny_reason,
+    panic_message, read_policy_text, replacement_for, route_call, run_hook,
 };
 use crate::cmd::replacement::rewritable_field;
 use crate::error;
@@ -68,18 +68,27 @@ pub fn check(call: ToolCall, opts: CheckOpts) -> CheckReport {
         .ok()
         .and_then(|dir| dir.to_str().map(str::to_string));
     let policy_text = read_policy_text(opts.policy.as_deref());
-    check_with(call, policy_text, Arc::new(StoreLookups), legion_repo, cwd)
+    check_with(
+        call,
+        policy_text,
+        Arc::new(StoreLookups),
+        legion_repo,
+        cwd,
+        ROUTE_DEADLINE,
+    )
 }
 
 /// [`check`] over injected sources, so a test drives every branch without
 /// the environment or the store. A panic anywhere in the core is caught and
-/// reported as a deny naming it, as the hook mode does.
+/// reported as a deny naming it, as the hook mode does. `deadline` bounds
+/// the decision: [`check`] passes [`ROUTE_DEADLINE`], a test its own (#1470).
 fn check_with(
     call: ToolCall,
     policy_text: Result<String, AdapterError>,
     lookups: Arc<dyn LookupRunner>,
     legion_repo: Option<String>,
     cwd: Option<String>,
+    deadline: Duration,
 ) -> CheckReport {
     let started = Instant::now();
     let original: Value = call.input.clone();
@@ -87,7 +96,16 @@ fn check_with(
         // No session work: a dry run never records, notifies, or uses up a
         // confirmation (#1237).
         // An operator's dry run comes from no agent, so no worktree isolation.
-        let routed = route_call(policy_text, call, lookups, legion_repo, cwd, false, None)?;
+        let routed = route_call(
+            policy_text,
+            call,
+            lookups,
+            legion_repo,
+            cwd,
+            false,
+            None,
+            deadline,
+        )?;
         let replacement = replacement_for(&routed, &original)?;
         Ok((routed, replacement))
     }))
@@ -262,6 +280,7 @@ fn replaced_value(replacement: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::hook::TEST_DEADLINE;
     use legion_cmd::Lookup;
     use std::path::Path;
     use std::sync::Mutex;
@@ -372,6 +391,7 @@ mod tests {
             Lookups::new(Duration::ZERO),
             Some("legion".to_string()),
             None,
+            TEST_DEADLINE,
         )
     }
 
@@ -490,6 +510,7 @@ mod tests {
             lookups.clone(),
             Some("other-repo".to_string()),
             None,
+            TEST_DEADLINE,
         );
         assert_eq!(
             lookups.calls.lock().expect("calls lock").clone(),
@@ -508,6 +529,7 @@ mod tests {
             Arc::new(FailingLookups),
             Some("legion".to_string()),
             None,
+            TEST_DEADLINE,
         );
         assert!(deny_reason(&report).contains("lookup: search index error: db unavailable"));
         assert_eq!(report.facts, Facts::default());
@@ -522,6 +544,7 @@ mod tests {
             Arc::new(PanickingLookups),
             Some("legion".to_string()),
             None,
+            TEST_DEADLINE,
         );
         assert!(deny_reason(&report).contains("simulated lookup bug"));
     }
@@ -534,6 +557,7 @@ mod tests {
             Lookups::new(Duration::ZERO),
             None,
             None,
+            TEST_DEADLINE,
         );
         let reason = deny_reason(&report);
         assert!(reason.contains("policy: /nowhere/policy.json"), "{reason}");
