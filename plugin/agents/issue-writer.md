@@ -194,7 +194,7 @@ When you emit the body:
 - Preserve every section heading the template has, in the order it has them.
 - Each section's own guidance (its comment or placeholder text) is that section's rule. Follow it, then replace it with concrete content drawn from the problem description and your reads. Do not pass comments or placeholder sentinels through verbatim.
 - Preserve fenced code blocks and checklists where the template has them, filled with this issue's real content.
-- Each choice the caller has recorded goes in the template's choices section, one entry per choice, as "current choice (date): what, because why; revisable". A choice the work needs and the caller has not made is open: do not write it into the body in any form ("open choice", "this issue does not choose", options for the builder to pick from). Return a QUESTIONS block in the Clarification Format below to the caller instead of a body, naming each open choice.
+- Each choice the caller has recorded goes in the template's choices section, one entry per choice, stated plainly as "<what> (chosen <date>): because <why>". Write no hedge around a choice: hedge words carry into the code and docs built from the issue. When the template has no choices section, the choices go nowhere else; write the body without them. A choice the work needs and the caller has not made is open: do not write it into the body in any form ("open choice", "this issue does not choose", options for the builder to pick from). Return a QUESTIONS block in the Clarification Format below to the caller instead of a body, naming each open choice.
 - Do not add sections that are not in the canonical template, except an acceptance criteria section when the template lacks one, as Rule 2 places it.
 
 ## Rules You Follow
