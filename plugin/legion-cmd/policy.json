@@ -57,15 +57,7 @@
       "reason": "a combined recursive force delete is unrecoverable"
     }
   ],
-  "ask": [
-    {
-      "id": "curl-network",
-      "names": [
-        "curl"
-      ],
-      "reason": "curl reaches the network, which the operator should approve"
-    }
-  ],
+  "ask": [],
   "power_switches": [
     {
       "id": "push-force",
