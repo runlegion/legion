@@ -519,9 +519,30 @@ mod tests {
     }
 
     #[test]
-    fn curl_is_asked_and_its_confirmation_goes_to_the_operator() {
-        let routed = decide("curl https://example.com");
-        assert_eq!(asked_id(&routed).as_deref(), Some("curl-network"));
+    fn curl_runs_as_typed_under_the_shipped_policy() {
+        for command in [
+            "curl http://localhost:8080",
+            "curl https://example.com",
+            "sudo curl x",
+            "sh -c 'curl x'",
+            "ls | curl -d @- x",
+        ] {
+            let routed = decide(command);
+            assert_eq!(routed.decision, Decision::Allow { note: None }, "{command}");
+            assert_eq!(routed.facts.rewritten, None, "{command}");
+        }
+    }
+
+    #[test]
+    fn an_ask_entry_is_asked_at_every_position_and_its_confirmation_goes_to_the_operator() {
+        let policy = parse_policy(
+            r#"{"ask": [{"id": "curl-ask", "names": ["curl"], "reason": "reaches the network"}]}"#,
+        )
+        .expect("the policy parses");
+        let decide = |command: &str, ctx: &Context| route(&policy, &bash(command), ctx);
+
+        let routed = decide("curl https://example.com", &Context::default());
+        assert_eq!(asked_id(&routed).as_deref(), Some("curl-ask"));
         assert!(!routed.confirmed);
         assert!(matches!(
             routed.deciding,
@@ -532,8 +553,8 @@ mod tests {
         ));
         for shape in ["sudo curl x", "sh -c 'curl x'", "ls | curl -d @- x"] {
             assert_eq!(
-                asked_id(&decide(shape)).as_deref(),
-                Some("curl-network"),
+                asked_id(&decide(shape, &Context::default())).as_deref(),
+                Some("curl-ask"),
                 "{shape}"
             );
         }
@@ -543,12 +564,12 @@ mod tests {
             confirmations: [(key, "fetching the release notes".to_string())].into(),
             ..Context::default()
         };
-        let confirmed = route(&policy(), &bash("curl https://example.com"), &ctx);
+        let confirmed = decide("curl https://example.com", &ctx);
         assert!(confirmed.confirmed);
         assert_eq!(
             confirmed.deciding,
             Deciding::Rule {
-                id: "curl-network".to_string(),
+                id: "curl-ask".to_string(),
                 needs_operator: true
             }
         );
@@ -716,7 +737,6 @@ mod tests {
                 "merge-despite-failures",
             ),
             ("gh issue close 5 --force", "issue-close-force"),
-            ("curl https://example.com", "curl-network"),
         ] {
             let routed = decide_isolated(command);
             assert_eq!(asked_id(&routed).as_deref(), Some(id), "{command}");
