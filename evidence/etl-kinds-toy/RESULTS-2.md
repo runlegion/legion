@@ -15,7 +15,7 @@ Run 2026-11-03. Two blind readers applied one closed list to the same 300 fresh 
 
 ## What it shows
 
-**`noise` is not a kind.** It answers a different question, whether anyone needs a row again, and it is where readers split: `noise` against `state` is 16 of the 36 disagreements, and both said `noise` on only 16 of the 32 rows where either did. On machine tails, one reader judged the transcript useless and the other judged it a record of progress, and each is a fair reading of the same row.
+**`noise` depends on who is reading.** (Operator, 2026-11-03: noise is a class. Each agent files its own, so the split below is expected and does not disqualify it.) It answers a different question, whether anyone needs a row again, and it is where readers split: `noise` against `state` is 16 of the 36 disagreements, and both said `noise` on only 16 of the 32 rows where either did. On machine tails, one reader judged the transcript useless and the other judged it a record of progress, and each is a fair reading of the same row.
 
 **Machine tails need no reader.** Their prefix identifies them. They are hook output, so what to do with them is one decision about all of them and not a judgement per row.
 
