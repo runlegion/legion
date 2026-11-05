@@ -265,7 +265,7 @@ impl VerifyDecision {
 ///    - observable-behavior language ("returns", "panics", "output", "exits",
 ///      "prints", "emits", "displays")
 ///
-/// A no-warnings criterion (#1481) is the exception: the only evidence that
+/// A no-warnings build criterion (#1481) is the exception: the only evidence that
 /// proves it is a CI run on the verified head that built with warnings as
 /// errors and succeeded (`proves_no_warnings_by_ci`); anything else is
 /// vacuous for it.
@@ -288,7 +288,9 @@ fn is_vacuous_evidence(criterion: &str, evidence: &str) -> bool {
     let ev_lower: String = ev.to_lowercase();
     let crit_lower: String = criterion.trim().to_lowercase();
 
-    if crit_lower.contains("no warning") || crit_lower.contains("without warning") {
+    if (crit_lower.contains("no warning") || crit_lower.contains("without warning"))
+        && (crit_lower.contains("build") || crit_lower.contains("compile"))
+    {
         return !proves_no_warnings_by_ci(&ev_lower);
     }
 
@@ -702,6 +704,22 @@ mod tests {
         ] {
             assert_eq!(no_warnings_decision(evidence), uncertain, "{evidence}");
         }
+    }
+
+    #[test]
+    fn a_behavioural_no_warning_criterion_passes_on_its_test_evidence() {
+        let crit = "emits no warning when the checkout is the registered one";
+        assert_eq!(
+            decide(
+                &[crit.to_owned()],
+                &[res(
+                    crit,
+                    AcVerdict::Pass,
+                    "tests/integration/worktree_guard.rs:617 asserts stderr is empty"
+                )],
+            ),
+            VerifyDecision::Proceed
+        );
     }
 
     // --- vacuous evidence tests (added by #549) ---
