@@ -8,7 +8,7 @@
 //!   invalid `--input`, an unknown `--tool`, no command) prints a `[legion]`
 //!   error, exits 2, and routes nothing.
 
-use crate::common::{legion_cmd, run_ok, run_with_stdin};
+use crate::common::{legion_cmd, run_ok, run_with_stdin, seed_watch_toml};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
@@ -33,6 +33,53 @@ fn payload(command: &str) -> Vec<u8> {
     })
     .to_string()
     .into_bytes()
+}
+
+/// A Bash payload whose `cwd` is `cwd`.
+fn payload_from(command: &str, cwd: &std::path::Path) -> Vec<u8> {
+    serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "session_id": "s1",
+        "cwd": cwd,
+        "tool_use_id": "t1"
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// #1479: a session started in a registered repo that then runs outside it
+/// files its incident records under the session's registered repo, and with
+/// no session lock under `unregistered`. The session lock names this test
+/// process, an ancestor of the hook it runs.
+#[test]
+fn an_incident_outside_a_registered_repo_files_under_the_sessions_repo() {
+    let incident_repo = |with_session_lock: bool| {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let checkout = tempfile::tempdir().expect("checkout");
+        let outside = tempfile::tempdir().expect("outside");
+        seed_watch_toml(dir.path(), &[("widget", checkout.path())]);
+        if with_session_lock {
+            let sessions = dir.path().join("sessions");
+            std::fs::create_dir_all(&sessions).expect("sessions dir");
+            std::fs::write(
+                sessions.join("widget.session"),
+                std::process::id().to_string(),
+            )
+            .expect("session lock");
+        }
+        hook_output(
+            dir.path(),
+            &shipped_policy_path(),
+            &payload_from("rm -rf /", outside.path()),
+        );
+        let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
+            .expect("incident log");
+        let row: Value = serde_json::from_str(log.lines().next().expect("a row")).expect("json");
+        row["repo"].as_str().expect("repo").to_string()
+    };
+    assert_eq!(incident_repo(true), "widget");
+    assert_eq!(incident_repo(false), "unregistered");
 }
 
 /// Runs the hook with `LEGION_CMD_POLICY` at `policy`, requiring exit 0 and
@@ -861,8 +908,13 @@ fn confirm_refuses_a_missing_reason_and_a_no_go_command() {
 #[test]
 fn a_no_go_command_is_refused_and_recorded_through_the_real_binary() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // The record's repo is the registered repo of the payload's cwd (#1479),
+    // so the fixture checkout is registered as `legion-test`.
+    let checkout = tempfile::tempdir().expect("checkout");
+    seed_watch_toml(dir.path(), &[("legion-test", checkout.path())]);
     for command in ["rm -rf /", "sudo rm -rf /", "sh -c 'rm -rf /'"] {
-        let out = hook_output(dir.path(), &shipped_policy_path(), &payload(command));
+        let input = payload_from(command, checkout.path());
+        let out = hook_output(dir.path(), &shipped_policy_path(), &input);
         assert_eq!(out["permissionDecision"], "deny", "{command}");
         let reason = out["permissionDecisionReason"].as_str().expect("reason");
         assert!(!reason.contains("instead"), "{command}: {reason}");

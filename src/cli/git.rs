@@ -735,14 +735,17 @@ fn default_push_is_origin_same_name(
 
 /// The audit agent: `LEGION_REPO` when set, else the registered repo the
 /// process directory lies in (a worktree maps to its main checkout's repo),
-/// else `unregistered` (#1479). Never read from git's arguments.
+/// else the session's registered repo, else `unregistered` (#1479). Never
+/// read from git's arguments.
 fn audit_agent() -> String {
     let legion_repo: Option<String> = std::env::var(crate::cmd::hook::LEGION_REPO_ENV).ok();
     let cwd: Option<String> = std::env::current_dir()
         .ok()
         .and_then(|d| d.to_str().map(str::to_string));
-    crate::cmd::hook::repo_for(legion_repo.as_deref(), cwd.as_deref())
-        .unwrap_or_else(|| crate::watch::UNREGISTERED_REPO.to_string())
+    crate::watch::own_write_repo(
+        crate::cmd::hook::repo_for(legion_repo.as_deref(), cwd.as_deref()),
+        None,
+    )
 }
 
 /// Run git with its own arguments; push and commit go through the audited

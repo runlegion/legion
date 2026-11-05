@@ -415,6 +415,21 @@ pub fn registered_repo_for(repos: &[WatchRepoConfig], path: &Path) -> Option<Str
         .map(|(_, name)| name)
 }
 
+/// The repo a write legion makes by itself is filed under (#1479):
+/// `registered` (the registered repo it was made from) when there is one,
+/// else the session's registered repo (the session lock `session_pid`
+/// holds, or with no pid one held by this process's ancestry), else
+/// [`UNREGISTERED_REPO`].
+pub fn own_write_repo(registered: Option<String>, session_pid: Option<u32>) -> String {
+    registered
+        .or_else(|| {
+            let data_dir = crate::data_dir().ok()?;
+            super::SessionLockTracker::new(&data_dir, default_session_lock_ttl_secs())
+                .session_repo(session_pid)
+        })
+        .unwrap_or_else(|| UNREGISTERED_REPO.to_string())
+}
+
 /// The registered repo of the process working directory, read from the
 /// watch.toml in the data dir; `None` when there is no such repo.
 pub fn registered_repo_for_cwd() -> Option<String> {

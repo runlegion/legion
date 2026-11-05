@@ -11,7 +11,8 @@ use crate::{db, error, watch};
 pub(crate) enum RepoAction {
     /// Print the repo that writes from `--cwd` are filed under: the registered
     /// repo the directory lies in, else the repo whose session lock `--pid`
-    /// holds, else `unregistered`. Never a name taken from the directory.
+    /// holds (without `--pid`, one this process's ancestry holds), else
+    /// `unregistered`. Never a name taken from the directory.
     Resolve {
         /// The directory to resolve.
         #[arg(long)]
@@ -27,15 +28,8 @@ pub(crate) enum RepoAction {
 /// `legion repo` (#1479).
 pub(crate) fn handle_repo(action: &RepoAction) -> error::Result<()> {
     let RepoAction::Resolve { cwd, pid } = action;
-    let base = data_dir()?;
-    let repos = watch::list_repos_in_config(&base.join("watch.toml"))?;
-    let repo = watch::registered_repo_for(&repos, cwd)
-        .or_else(|| {
-            let locks =
-                watch::SessionLockTracker::new(&base, watch::default_session_lock_ttl_secs());
-            pid.and_then(|pid| locks.repo_for_session_pid(pid))
-        })
-        .unwrap_or_else(|| watch::UNREGISTERED_REPO.to_string());
+    let repos = watch::list_repos_in_config(&data_dir()?.join("watch.toml"))?;
+    let repo = watch::own_write_repo(watch::registered_repo_for(&repos, cwd), *pid);
     println!("{repo}");
     Ok(())
 }

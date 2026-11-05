@@ -864,6 +864,48 @@ fn git_audit_agent_comes_from_legion_repo() {
     }
 }
 
+/// #1479: run outside every registered repo, rows name the session's
+/// registered repo (the session lock names this test process, an ancestor
+/// of the `legion git` it runs), and with no session lock `unregistered`.
+#[cfg(unix)]
+#[test]
+fn git_audit_agent_outside_a_registered_repo_names_the_sessions_repo() {
+    let _guard = RealRepoConfigGuard::new();
+    let agent_for = |with_session_lock: bool| {
+        let remote = init_bare_remote();
+        let root = tempfile::tempdir().unwrap();
+        let checkout: PathBuf = root.path().join("unregistered-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        init_local_at(&checkout, remote.path());
+        let data = tempfile::tempdir().unwrap();
+        let registered = tempfile::tempdir().unwrap();
+        seed_watch_toml(data.path(), &[("widget", registered.path())]);
+        if with_session_lock {
+            let sessions = data.path().join("sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(
+                sessions.join("widget.session"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(checkout.join("more.txt"), "more\n").unwrap();
+        let mut add = legion_git_in(data.path(), &checkout);
+        run_ok(add.env_remove("LEGION_REPO").args(["add", "more.txt"]));
+        let mut commit = legion_git_in(data.path(), &checkout);
+        run_ok(
+            commit
+                .env_remove("LEGION_REPO")
+                .args(["commit", "-m", "feat(x): y"]),
+        );
+        let rows = audit_rows(data.path());
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        rows[0]["agent"].as_str().unwrap().to_string()
+    };
+    assert_eq!(agent_for(true), "widget");
+    assert_eq!(agent_for(false), "unregistered");
+}
+
 /// Without `LEGION_REPO`, run from a linked worktree, rows name the main
 /// checkout's registered repo, not either directory's name (#1479).
 #[cfg(unix)]

@@ -790,10 +790,9 @@ pub(crate) fn route_call(
 
         if let (Some(work), Some((_, log)), Some(db)) = (session, &store, &db) {
             // An incident record is a write legion makes by itself: outside a
-            // registered repo it lands under `unregistered` (#1479).
-            let repo: String = repo
-                .clone()
-                .unwrap_or_else(|| crate::watch::UNREGISTERED_REPO.to_string());
+            // registered repo it lands under the session's registered repo,
+            // else `unregistered` (#1479).
+            let repo: String = crate::watch::own_write_repo(repo.clone(), None);
             let origin = Origin {
                 command: work.issued,
                 agent: work.store.agent_for(&repo),
