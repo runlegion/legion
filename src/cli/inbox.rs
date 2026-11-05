@@ -111,35 +111,21 @@ fn emit_inbox(posts: &[Reflection], out: &mut impl Write) -> error::Result<()> {
 /// separator with nothing on one side would misread as its own section.
 const SPLIT_SEPARATOR: &str = "---";
 
-/// The standing read-not-respond norm (#1073), rendered after non-directed
-/// posts and only after them. Settled with the operator 2026-08-31 and
-/// carried in workflow reflections 01a05655-1814 / 01a05655-5fec; this
-/// puts it in the same context window as the temptation instead of leaving
-/// it to a recall that may never fire, which is the whole mechanism -- the
-/// same one that makes REQUIRES A REPLY work.
-///
-/// It targets CONTEXT RESIDENCY, not replies. The operator's sharpening is
-/// the load-bearing half: the cost of broadcast mail is not the reply, it
-/// is what an agent adds to its own transcript, because every paragraph of
-/// commentary is re-billed as input on every later turn and eventually
-/// becomes what compaction remembers instead of the work. Dissent and
-/// questions are explicitly encouraged spends; only idle assent is cut.
+/// The standing norm for team mail (#1073), rendered after non-directed
+/// posts and only after them, so it sits in the same context window as the
+/// temptation to answer. The text is #1477's, verbatim: shortened from the
+/// earlier paragraph after the agents it addresses found that one too long
+/// to act on.
 ///
 /// One inherited edge, from `split_inbox`'s verb-only predicate (#1020):
 /// a wake-worthy `@all` broadcast buckets as directed, so a batch of only
 /// those renders no norm even though the posts are not addressed to the
-/// reading agent specifically. Defensible -- a wake-worthy broadcast does
-/// want an answer -- but it is a place where this gate and the issue's
-/// "not directed at the reading agent" wording diverge.
-const READ_NOT_RESPOND_NORM: &str = "These posts are for reading, at the end of what you were \
-     doing. Act on what concerns you; pass the rest in silence. Do not think out loud about them \
-     -- no commentary, summaries, or reactions in your session: anything you write about this \
-     mail lives in your context on every later turn. Do not report team conversations to the \
-     operator either; they did not ask about them and do not need a digest. Raise one only when \
-     you need their input. A reply is right when you are addressed, when you own the far side, \
-     when you DISAGREE (adversarial opinion is never wrong if it is true), or when you want to \
-     learn more -- dissent and questions are encouraged spends; only idle assent is cut. In every \
-     case, add nothing to your own context beyond the reply itself.";
+/// reading agent specifically.
+const READ_NOT_RESPOND_NORM: &str = "**Team mail.** Finish your current work first; peers don't \
+     interrupt. Then act on what concerns you and let the rest pass in silence: reply when it's \
+     addressed to you, when you own the other side, when you disagree, or when you want to know \
+     more. Questions and dissent are welcome. Only idle agreement is cut. Don't relay team mail \
+     to the operator unless you need their input.";
 
 /// Write `posts` split into musings then a separator then the directed
 /// (REQUIRES A REPLY) set -- `legion inbox --split` (#1020).
@@ -291,7 +277,7 @@ mod tests {
             .expect("musing text present");
         let separator_pos = rendered.find(SPLIT_SEPARATOR).expect("separator present");
         let directed_pos = rendered
-            .find("REQUIRES A REPLY")
+            .find("**Needs your reply.**")
             .expect("directed section present");
         assert!(
             musing_pos < separator_pos && separator_pos < directed_pos,
@@ -322,11 +308,11 @@ mod tests {
             !rendered.contains(SPLIT_SEPARATOR),
             "no separator when there is nothing on the other side, got:\n{rendered}"
         );
-        assert!(!rendered.contains("REQUIRES A REPLY"));
+        assert!(!rendered.contains("**Needs your reply.**"));
     }
 
     /// #1073: the norm renders after non-directed content, and it renders
-    /// BEFORE the separator so the directed REQUIRES A REPLY block stays the
+    /// BEFORE the separator so the directed needs-your-reply block stays the
     /// last thing in the block (#1020's ordering, which exists because a
     /// directed ask sat unanswered for forty minutes when it did not).
     #[test]
@@ -346,12 +332,12 @@ mod tests {
         let rendered = String::from_utf8(out).unwrap();
 
         let norm_pos = rendered
-            .find("These posts are for reading")
+            .find("**Team mail.**")
             .expect("norm line present when non-directed posts render");
         let musing_pos = rendered.find("just a musing").expect("musing present");
         let separator_pos = rendered.find(SPLIT_SEPARATOR).expect("separator present");
         let directed_pos = rendered
-            .find("REQUIRES A REPLY")
+            .find("**Needs your reply.**")
             .expect("directed section present");
         assert!(
             musing_pos < norm_pos && norm_pos < separator_pos && separator_pos < directed_pos,
@@ -376,11 +362,11 @@ mod tests {
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(
-            rendered.contains("REQUIRES A REPLY"),
+            rendered.contains("**Needs your reply.**"),
             "the directed set must still render, got:\n{rendered}"
         );
         assert!(
-            !rendered.contains("These posts are for reading"),
+            !rendered.contains("**Team mail.**"),
             "a directed-only batch must not carry the read-not-respond norm, got:\n{rendered}"
         );
     }
@@ -400,9 +386,7 @@ mod tests {
         let mut out = Vec::new();
         emit_inbox(&directed_only, &mut out).unwrap();
         assert!(
-            !String::from_utf8(out)
-                .unwrap()
-                .contains("These posts are for reading"),
+            !String::from_utf8(out).unwrap().contains("**Team mail.**"),
             "directed-only batch must not carry the norm on the non-split path"
         );
 
@@ -422,9 +406,7 @@ mod tests {
         let mut out = Vec::new();
         emit_inbox(&with_musing, &mut out).unwrap();
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .contains("These posts are for reading"),
+            String::from_utf8(out).unwrap().contains("**Team mail.**"),
             "a batch carrying a musing must render the norm on the non-split path"
         );
     }
@@ -448,7 +430,7 @@ mod tests {
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(
-            rendered.contains("These posts are for reading"),
+            rendered.contains("**Team mail.**"),
             "a musings-only batch is the primary case for the norm, got:\n{rendered}"
         );
         assert!(
@@ -456,31 +438,55 @@ mod tests {
             "nothing to separate when the directed bucket is empty, got:\n{rendered}"
         );
         assert!(
-            !rendered.contains("REQUIRES A REPLY"),
+            !rendered.contains("**Needs your reply.**"),
             "no directed bucket should render, got:\n{rendered}"
         );
     }
 
-    /// Kills the truncation mutation (#1073 review). Every other test matches
-    /// only the opening clause, so the const could be cut back to its first
-    /// sentence with a green suite -- and cutting it removes the operator's
-    /// sharpening, leaving a norm that reads as suppressing dissent. The text
-    /// IS the deliverable here, so it is pinned verbatim against #1073's
-    /// Behavior clause rather than sampled.
+    /// The text IS the deliverable (#1073, replaced by #1477), so it is
+    /// pinned verbatim rather than sampled: every other test matches only
+    /// its opening, and a truncated norm would leave them green.
     #[test]
     fn read_not_respond_norm_matches_the_issue_text_verbatim() {
         assert_eq!(
             READ_NOT_RESPOND_NORM,
-            "These posts are for reading, at the end of what you were doing. Act on what \
-concerns you; pass the rest in silence. Do not think out loud about them -- no commentary, \
-summaries, or reactions in your session: anything you write about this mail lives in your \
-context on every later turn. Do not report team conversations to the operator either; they did \
-not ask about them and do not need a digest. Raise one only when you need their input. A reply \
-is right when you are addressed, when you own the far side, when you DISAGREE (adversarial \
-opinion is never wrong if it is true), or when you want to learn more -- dissent and questions \
-are encouraged spends; only idle assent is cut. In every case, add nothing to your own context \
-beyond the reply itself.",
-            "the norm text is the deliverable; it must match #1073 as amended by #1175"
+            "**Team mail.** Finish your current work first; peers don't interrupt. Then act on \
+what concerns you and let the rest pass in silence: reply when it's addressed to you, when you \
+own the other side, when you disagree, or when you want to know more. Questions and dissent are \
+welcome. Only idle agreement is cut. Don't relay team mail to the operator unless you need their \
+input.",
+            "the norm text is the deliverable; it must match #1477"
+        );
+    }
+
+    /// The inbox's directed bucket carries #1477's text and nothing of the
+    /// wake framing around it: no auto-woken preamble (the agent is awake
+    /// mid-turn) and no closing footer.
+    #[test]
+    fn emit_inbox_split_directed_bucket_is_the_needs_your_reply_text() {
+        let db = test_db();
+        db.insert_reflection("seed", "sentinel", "team").unwrap();
+        assert!(deliver::claim_inbox(&db, "legion").unwrap().is_empty());
+        db.insert_reflection("kelex", "@legion question: which lane owns retries", "team")
+            .unwrap();
+        let posts = deliver::claim_inbox(&db, "legion").unwrap();
+
+        let mut out = Vec::new();
+        emit_inbox_split("legion", &posts, &mut out).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(
+            rendered.contains(
+                "**Needs your reply.** Finish your current work first, then answer before the \
+                 turn ends. If it asks something, answer it, even \"no\" or \"handing to X\". If \
+                 it asks you to do something, do it, or say plainly that you won't and why. A \
+                 bare \"ack\" isn't a reply. Reply with `legion signal --repo <your repo>`."
+            ),
+            "the directed bucket must carry #1477's text verbatim, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("auto-woken") && !rendered.contains("legion reflect"),
+            "mid-turn delivery carries no wake preamble or footer, got:\n{rendered}"
         );
     }
 
@@ -507,7 +513,7 @@ beyond the reply itself.",
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(
-            rendered.contains("REQUIRES A REPLY"),
+            rendered.contains("**Needs your reply.**"),
             "the directed set must still render with no musings present, got:\n{rendered}"
         );
         assert!(
@@ -625,23 +631,20 @@ beyond the reply itself.",
             "mid-turn delivery must not tell the agent to stop working (#1175):\n{split_output}"
         );
         assert!(
-            split_output.contains("they do not interrupt"),
+            split_output.contains("Finish your current work first"),
             "mid-turn delivery must say peer mail defers to work in flight (#1175):\n{split_output}"
         );
 
         // Both keep the obligation. The change is when it is serviced.
-        for (label, text) in [
-            ("pending-replies", &pending_replies_output),
-            ("inbox --split", &split_output),
-        ] {
-            assert!(
-                text.contains("REQUIRES A REPLY"),
-                "{label} must keep the directed header"
-            );
-            assert!(
-                text.contains("ghosting"),
-                "{label} must still name ack-and-stop as ghosting"
-            );
-        }
+        assert!(
+            pending_replies_output.contains("REQUIRES A REPLY")
+                && pending_replies_output.contains("ghosting"),
+            "pending-replies must keep the directed header and name ack-and-stop"
+        );
+        assert!(
+            split_output.contains("**Needs your reply.**")
+                && split_output.contains("A bare \"ack\" isn't a reply."),
+            "inbox --split must keep the directed header and refuse a bare ack"
+        );
     }
 }

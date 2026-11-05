@@ -129,7 +129,6 @@ use crate::cmd::replacement::{build_replacement, rewritable_field, shell_single_
 use crate::db::Database;
 use crate::error;
 use crate::recall::{ArchiveMode, RecallResult, consult_bm25, recall_bm25};
-use crate::telemetry::CmdIncidentRecord;
 use crate::timerange::TimeRange;
 
 /// Names the policy file directly. Checked before the plugin-root default so
@@ -596,8 +595,6 @@ trait CmdStore: Send + Sync {
     fn log(&self) -> IncidentLog;
     /// The agent a repo's commands are recorded under.
     fn agent_for(&self, repo: &str) -> String;
-    /// Sends a first no-go hit's operator notice (FR-CMD-027).
-    fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()>;
 }
 
 /// The production store: the node's legion database, as the hook call's one
@@ -617,15 +614,12 @@ impl CmdStore for LocalCmdStore {
     fn agent_for(&self, repo: &str) -> String {
         crate::cmd::incident::agent_for(repo)
     }
-    fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()> {
-        crate::cmd::incident::send_notice(record)
-    }
 }
 
 /// The hook mode's session work around route (#1237): pending drops before
 /// the lookups, live confirmations into the Context, and the incident record
 /// and confirmation use after route. The operator mode passes none to
-/// [`route_call`], so a dry run never records, notifies, or uses up a
+/// [`route_call`], so a dry run never records or uses up a
 /// confirmation.
 pub(crate) struct SessionWork {
     store: Arc<dyn CmdStore>,
@@ -751,7 +745,7 @@ pub(crate) fn route_call(
 ) -> Result<Routed, AdapterError> {
     // A policy file that cannot be read still leaves the built-in no-go list
     // in force (FR-CMD-025): route runs over an empty policy, so a no-go
-    // match is refused (and, in the hook mode, recorded and notified), and
+    // match is refused (and, in the hook mode, recorded), and
     // every other command is denied with the read error exactly as before. A
     // file that reads but does not parse is a different failure and denies
     // outright.
@@ -807,9 +801,7 @@ pub(crate) fn route_call(
                 session_id: work.session.unwrap_or_default(),
                 cwd: cwd.unwrap_or_default(),
             };
-            record_outcome(&routed, &origin, db, log, now, &|record| {
-                work.store.notify(record)
-            })?;
+            record_outcome(&routed, &origin, db, log, now)?;
         }
         Ok(routed)
     })?;
@@ -1066,13 +1058,12 @@ fn record_outcome(
     db: &Database,
     log: &IncidentLog,
     now: DateTime<Utc>,
-    notify: &dyn Fn(&CmdIncidentRecord) -> error::Result<()>,
 ) -> Result<(), AdapterError> {
     let key: Option<&CommandKey> = routed.facts.command_key.as_ref();
     let failed = |e: error::LegionError| AdapterError::Record(e.to_string());
     match (&routed.decision, &routed.deciding) {
         (Decision::Deny(_), Deciding::NoGo { id }) => {
-            log.record_no_go(origin, id, key.map(CommandKey::as_str), now, notify)
+            log.record_no_go(origin, id, key.map(CommandKey::as_str), now)
                 .map_err(failed)?;
         }
         // The operator prompt: the second stage of an ask the agent already
@@ -1409,10 +1400,6 @@ mod tests {
     /// A confirmation store and incident log in a temporary directory.
     struct TempStore {
         dir: tempfile::TempDir,
-        /// The entry of every operator notice sent, in order.
-        notices: Mutex<Vec<String>>,
-        /// When set, every notice fails with this text.
-        notice_failure: Option<String>,
     }
 
     impl TempStore {
@@ -1440,23 +1427,11 @@ mod tests {
         fn agent_for(&self, repo: &str) -> String {
             format!("agent-of-{repo}")
         }
-        fn notify(&self, record: &CmdIncidentRecord) -> error::Result<()> {
-            if let Some(failure) = &self.notice_failure {
-                return Err(error::LegionError::Telemetry(failure.clone()));
-            }
-            self.notices
-                .lock()
-                .expect("notices lock")
-                .push(record.entry.clone().unwrap_or_default());
-            Ok(())
-        }
     }
 
     fn temp_store() -> Arc<TempStore> {
         Arc::new(TempStore {
             dir: tempfile::tempdir().expect("tempdir"),
-            notices: Mutex::new(Vec::new()),
-            notice_failure: None,
         })
     }
 
@@ -1957,8 +1932,7 @@ mod tests {
             reason: Some("the agent's reason".to_string()),
         };
         let policy = parse_policy(&confirm_policy()).expect("policy");
-        crate::cmd::confirm::confirm(&request, &policy, &db, &store.log(), at, &|_| Ok(()))
-            .expect("confirmed");
+        crate::cmd::confirm::confirm(&request, &policy, &db, &store.log(), at).expect("confirmed");
     }
 
     #[test]
@@ -1986,42 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_no_go_hit_in_a_session_notifies_the_operator_once_per_entry() {
-        let store = temp_store();
-        run(&store, "rm -rf /", "s1");
-        run(&store, "rm -fr /", "s1");
-        run(&store, ":(){ :|:& };:", "s1");
-        run(&store, "rm -rf /", "s2");
-        assert_eq!(
-            store.notices.lock().expect("notices lock").clone(),
-            vec![
-                "rm-recursive-force-root".to_string(),
-                "fork-bomb".to_string(),
-                "rm-recursive-force-root".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_notice_that_fails_to_send_is_recorded_and_the_command_stays_refused() {
-        let store = Arc::new(TempStore {
-            dir: tempfile::tempdir().expect("tempdir"),
-            notices: Mutex::new(Vec::new()),
-            notice_failure: Some("inbox unreachable".to_string()),
-        });
-        let response = run(&store, "rm -rf /", "s1");
-        assert_denied(&response);
-        assert!(!reason(&response).contains(legion_cmd::NO_GO_INSTEAD));
-        assert!(
-            records(&store)[0]
-                .notice_error
-                .as_deref()
-                .is_some_and(|e| e.contains("inbox unreachable"))
-        );
-    }
-
-    #[test]
-    fn an_unreadable_policy_still_refuses_records_and_notifies_a_no_go_hit() {
+    fn an_unreadable_policy_still_refuses_and_records_a_no_go_hit() {
         // FR-CMD-025: the built-ins apply when the policy file is absent.
         let store = temp_store();
         let unread = || {
@@ -2045,10 +1984,6 @@ mod tests {
         let rows = records(&store);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::NoGo);
-        assert_eq!(
-            store.notices.lock().expect("notices lock").clone(),
-            vec!["rm-recursive-force-root".to_string()]
-        );
 
         // Every other command is still denied with the read error, as before.
         let response = respond_with(
@@ -2067,10 +2002,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_policy_refuses_records_and_notifies_wrapped_no_go_hits() {
+    fn an_unreadable_policy_refuses_and_records_wrapped_no_go_hits() {
         // The wrapped forms, not just the bare one: with no policy file the
         // built-in no-go check resolves the wrapper itself (FR-CMD-025), and
-        // each hit is refused, recorded once, and notified once.
+        // each hit is refused and recorded once.
         for (command, entry) in [
             ("sudo rm -rf /", "rm-recursive-force-root"),
             ("env FOO=bar mkfs.ext4 /dev/sda1", "mkfs-device"),
@@ -2101,11 +2036,6 @@ mod tests {
             assert_eq!(rows[0].kind, crate::telemetry::CmdIncidentKind::NoGo);
             assert_eq!(rows[0].command, command);
             assert_eq!(rows[0].entry.as_deref(), Some(entry), "{command}");
-            assert_eq!(
-                store.notices.lock().expect("notices lock").clone(),
-                vec![entry.to_string()],
-                "{command}"
-            );
         }
     }
 
@@ -2245,9 +2175,6 @@ mod tests {
             fn agent_for(&self, repo: &str) -> String {
                 repo.to_string()
             }
-            fn notify(&self, _record: &CmdIncidentRecord) -> error::Result<()> {
-                Ok(())
-            }
         }
         let response = respond_with(
             &session_payload("curl example.com", "s1"),
@@ -2255,8 +2182,6 @@ mod tests {
             Arc::new(StubLookups(Lookup::Empty)),
             Arc::new(BrokenStore(TempStore {
                 dir: tempfile::tempdir().expect("tempdir"),
-                notices: Mutex::new(Vec::new()),
-                notice_failure: None,
             })),
             None,
             no_answers(),
@@ -3190,9 +3115,6 @@ mod tests {
             }
             fn agent_for(&self, repo: &str) -> String {
                 repo.to_string()
-            }
-            fn notify(&self, _record: &CmdIncidentRecord) -> error::Result<()> {
-                Ok(())
             }
         }
         for tool in ["Grep", "Glob", "Read"] {

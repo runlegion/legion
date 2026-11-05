@@ -34,28 +34,12 @@
 #      a directed ask is open -- a check that does not depend on read
 #      order at all, which is why it is the backstop, not (1).
 #
-# Wired into UserPromptSubmit, PostToolUse (alongside mark-work.sh), and
-# Stop -- three points in a turn where surfacing a mid-session post is
-# cheap. PostToolUse fires on every tool call, so this debounces via a
-# per-session last-delivery-time sentinel under
-# ${XDG_CACHE_HOME:-$HOME/.cache}/legion, modeled on
-# identity-chain-load.sh's sentinel pattern -- except keyed by last-delivery
-# TIME rather than a one-shot flag, so the hook re-arms after the debounce
-# window instead of firing exactly once per session.
-#
-# Stop is EXEMPT from the debounce (#1000). Stop fires once per turn and is
-# the last chance to deliver before a session goes idle, where no further hook
-# fires until the agent acts again. Because Stop follows the last tool call,
-# it almost always lands inside the window a prior PostToolUse just opened --
-# so debouncing it swallowed the turn-end delivery in the common case, leaving a
-# post that arrived late in the turn unseen. The debounce still governs
-# UserPromptSubmit and PostToolUse, whose whole risk is per-tool-call
-# shell-out volume; Stop has neither that volume nor a later delivery to fall
-# back on. A Stop delivery that finds nothing new emits nothing and the turn
-# ends normally, so the exemption cannot loop. Stop's own directed-signal
-# obligation is additionally hard-enforced by stop.sh's pending-replies
-# gate (#1020), which blocks the turn outright rather than relying on this
-# hook's softer additionalContext.
+# Wired into UserPromptSubmit, PostToolUse, and Stop, and checked at every
+# one of them (#1478): PostToolUse has no matcher, so an awake agent's inbox
+# is read at every tool call and a new post or signal lands at the first
+# hook point after it arrives. There is no debounce. Checking often costs no
+# context, because `legion inbox` claims each post through its cursor and
+# injects it once; a check that finds nothing new emits nothing.
 #
 # Error handling: legion failures are logged to /tmp/legion-hook-errors.log.
 # The hook always exits 0 so a degraded legion never blocks the turn.
@@ -88,42 +72,6 @@ legion_hook_covered || exit 0
 EVENT_NAME=$(legion_hook_field '.hook_event_name')
 [ -n "$EVENT_NAME" ] || EVENT_NAME="UserPromptSubmit"
 
-# Minimum seconds between deliveries for one session. PostToolUse can fire many
-# times a minute; this keeps the inbox from shelling out to `legion` on
-# every single tool call.
-#
-# LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS is the retired name, still honored so
-# an operator who set it does not silently fall back to the default on upgrade.
-# Same one-release deletion condition as the command alias below.
-DEBOUNCE_SECONDS="${LEGION_INBOX_DEBOUNCE_SECONDS:-${LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS:-10}}"
-
-SAFE_SESSION=$(printf '%s' "$SESSION_ID" | tr -c 'a-zA-Z0-9_-' '_')
-
-# A failed mkdir is logged, not fatal: the delivery still runs, but with no
-# sentinel the debounce never engages and every tool call pays the full
-# shell-out -- the log line is the only symptom, so keep it.
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/legion"
-mkdir -p "$CACHE_DIR" 2>>"$LOG"
-SENTINEL="${CACHE_DIR}/inbox-last-${SAFE_SESSION}"
-
-NOW=$(date +%s)
-# Stop is never debounced (see header): it fires once per turn and is the
-# last delivery before idle. Only UserPromptSubmit/PostToolUse consult the
-# window. Stop still updates the sentinel below, so a delivery it performs
-# debounces the next tool-call flurry as usual.
-if [ "$EVENT_NAME" != "Stop" ] && [ -f "$SENTINEL" ]; then
-  LAST=$(cat "$SENTINEL" 2>/dev/null)
-  case "$LAST" in
-    '' | *[!0-9]*) LAST=0 ;;
-  esac
-  ELAPSED=$((NOW - LAST))
-  if [ "$ELAPSED" -lt "$DEBOUNCE_SECONDS" ]; then
-    exit 0
-  fi
-fi
-
-printf '%s' "$NOW" >"$SENTINEL" 2>/dev/null
-
 # `legion inbox` is the current spelling; `deliver drain` is the retired one,
 # tried ONLY if the first call exits non-zero. A plugin can be updated ahead
 # of its binary (`setup-binary` is a separate step), and the fallback is what
@@ -154,7 +102,7 @@ fi
 
 # Fixed opening and closing lines (#1020): this is a RESULT, not a note --
 # see the HOOK OUTPUT DOCTRINE above. --split already ordered $DELIVERED as
-# musings, then a separator, then the directed REQUIRES A REPLY set;
+# musings, then a separator, then the directed needs-your-reply set;
 # nothing follows the closing line.
 OPEN_LINE="[Legion] Inbox:"
 CLOSE_LINE="[Legion] End inbox."

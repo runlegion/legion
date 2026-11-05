@@ -1,10 +1,10 @@
 #!/bin/bash
 # Legion SessionStart hook: focused bootstrap.
 #
-# Session-only side effects live here: marker cleanup, index warm, daemon
-# supervisor, watch lock. The banner itself -- identity, operating
+# Session-only side effects live here: index warm, daemon supervisor,
+# watch lock. The banner itself -- identity, operating
 # contract, pending replies, checkpoint, index status, watch status,
-# current work, autonomy budget -- is assembled by lib/boot-sections.sh
+# current work -- is assembled by lib/boot-sections.sh
 # (#879), the SAME driver post-compact.sh calls, so the two SessionStart
 # matchers cannot drift out of sync the way they did before #879.
 #
@@ -34,14 +34,6 @@ if [ -z "$CWD" ]; then
   exit 0
 fi
 
-# Clean up per-session markers from prior session. Reset both -- the Stop
-# hook gates its reflect prompt on the work marker, which is touched by the
-# PostToolUse mark-work hook on any actual tool use. Sessions with only prose
-# Q&A (no tools) skip the reflect prompt. See #339 cleanup batch.
-CWD_HASH=$(legion_hash_str "$CWD")
-rm -f "/tmp/legion-reflected-${CWD_HASH}" 2>/dev/null
-rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
-
 # Warm the Tantivy index in the background
 ("$LEGION" recall --repo "$REPO" --context warmup --limit 1 >/dev/null 2>&1 &)
 
@@ -66,8 +58,7 @@ rm -f "/tmp/legion-work-${CWD_HASH}" 2>/dev/null
 # there is no local cache left to keep warm.
 
 # Banner assembly: identity, operating contract, pending replies,
-# checkpoint, index status, watch status, current work, autonomy budget --
-# in that order (LEGION_BOOT_SECTIONS in lib/boot-sections.sh). See that
+# checkpoint, index status, watch status, current work -- in that order (LEGION_BOOT_SECTIONS in lib/boot-sections.sh). See that
 # file for why the order is fixed and why no per-hook section list lives
 # here anymore.
 # Guarded: the source above is deliberately non-fatal, so a missing lib

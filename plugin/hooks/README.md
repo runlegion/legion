@@ -132,7 +132,7 @@ route's Decision stands (FR-CMD-010). The adapter is Claude-layer like the
 hooks it replaced, so the boundary above applies to it unchanged.
 
 The hooks deliberately absent from the table -- `session-start.sh`,
-`session-end.sh`, `post-compact.sh`, `mark-work.sh`, `post-edit-index.sh`,
+`session-end.sh`, `post-compact.sh`, `post-edit-index.sh`,
 `post-task-state.sh`, `identity-chain-load.sh`, `uncertainty-emit-on-task.sh`,
 `uncertainty-witness-on-completion.sh`, `setup-binary.sh`, `subagent-stop.sh`, and
 the `_legion-*.sh` sourced helpers -- refuse nothing at all. There is no verdict to record for a

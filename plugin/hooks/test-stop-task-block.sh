@@ -10,8 +10,9 @@
 #   run alongside it is GONE (#931 removed the card surface with no
 #   card-free replacement for local "accepted" claim state) -- there is no
 #   longer a first gate to test here.
-# - Reflection nudge (#569): fires via hookSpecificOutput.additionalContext
-#   (non-error, continues the turn), NOT decision:block.
+# - Turn-kind prompt (#1477, carried by #569's shape): fires on every Stop
+#   via hookSpecificOutput.additionalContext (non-error, continues the
+#   turn), NOT decision:block, and injects the issue's text and nothing else.
 # Also covers post-task-state.sh (still writes the task event log for other
 # consumers) and the watch-pty / session-end (#492/#493) bypass paths.
 #
@@ -30,14 +31,17 @@ STOP_HOOK="$CLAUDE_PLUGIN_ROOT/hooks/stop.sh"
 
 SESSION="test-session-461"
 
-# Seed work marker so the reflection nudge can fire. legion_hash_str comes
-# from the prelude (sourced by make_plugin_root) -- the same hash the hooks
-# use, so the marker paths agree by construction.
 CWD="/tmp/legion-test"
-CWD_HASH=$(legion_hash_str "$CWD")
-touch "/tmp/legion-work-${CWD_HASH}"
-# make_plugin_root installed a $WORK-cleanup trap; extend it with the /tmp markers.
-trap 'rm -rf "$WORK" /tmp/legion-work-'"${CWD_HASH}"' /tmp/legion-reflected-'"${CWD_HASH}" EXIT
+
+# The turn-kind prompt, byte for byte as #1477's acceptance criterion gives it.
+read -r -d '' TURN_KIND_PROMPT <<'EOF'
+Before you end this turn, name what kind of turn it was.
+**Design:** Sean, a peer, or you were working out what something should be. The deliverable is understanding. End with what you learned, what you still don't know, and the question that moves it forward. In a design turn the next move is a question, not an issue, a brief or a build. If you made one anyway, say so.
+**Delivery:** you were carrying out a design that was already agreed. Finish it, or say plainly what blocks it.
+**Can't tell:** treat it as design, and ask.
+**A peer's ask:** a reply is owed, not a build. Answer it. A question back counts as an answer.
+**If you acted on anything this turn:** name what you acted on that you assumed rather than found, so it can be checked.
+EOF
 
 echo "==> post-task-state appends create event"
 echo "{\"session_id\":\"${SESSION}\",\"tool_name\":\"TaskCreate\",\"tool_input\":{\"subject\":\"Ship the thing\"},\"tool_response\":{\"id\":\"1\",\"status\":\"pending\"}}" | bash "$POST_HOOK"
@@ -60,34 +64,27 @@ assert_contains "names bypass env on the delegated gate" "$out" 'LEGION_SKIP_STO
 echo "==> stop hook does NOT block when no delegated work item needs attention"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"no-delegated-session\"}" | bash "$STOP_HOOK")
 assert_not_contains "no dead-delegated work item -> no block from the gate" "$out" 'no longer verifiably live'
-# That call fell through to the reflection nudge and touched the shared
-# per-CWD marker; clear it so the dedicated nudge tests below still see a
-# clean slate (same cleanup discipline used throughout this file).
-rm -f "/tmp/legion-reflected-${CWD_HASH}"
 
-echo "==> clean board: stop nudges for reflection via additionalContext (#569)"
-# No FAKE_DELEGATED_NEEDS_ATTENTION -> the liveness gate does not fire ->
-# reflection path. It must emit hookSpecificOutput.additionalContext, NOT
-# decision:block.
+echo "==> clean board: stop injects exactly the turn-kind prompt via additionalContext (#1477, #569)"
+# No FAKE_DELEGATED_NEEDS_ATTENTION -> the liveness gate does not fire. The
+# stub would hand back an autonomy banner if the hook still asked for one;
+# the injected context must be the prompt and nothing else.
+out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" \
+  | FAKE_AUTONOMY_BANNER="SENTINEL_AUTONOMY_ABC" bash "$STOP_HOOK")
+ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_eq "injected context is exactly the turn-kind prompt" "$TURN_KIND_PROMPT" "$ctx"
+assert_contains "prompt uses additionalContext" "$out" '"hookEventName": "Stop"'
+assert_not_contains "prompt is NOT a block decision" "$out" '"decision": "block"'
+assert_not_contains "no autonomy budget rides with it" "$out" "SENTINEL_AUTONOMY_ABC"
+
+echo "==> the prompt fires on every turn, not once per session"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | bash "$STOP_HOOK")
-assert_contains "reflection nudge fires" "$out" 'Drop one thing a teammate would not have known walking in cold'
-assert_contains "nudge uses additionalContext" "$out" '"hookEventName": "Stop"'
-assert_not_contains "nudge is NOT a block decision" "$out" '"decision": "block"'
+ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')
+assert_eq "a second Stop in the same session prompts again" "$TURN_KIND_PROMPT" "$ctx"
 
-# Clean up reflection marker for next test
-rm -f "/tmp/legion-reflected-${CWD_HASH}"
-
-echo "==> reflection nudge is one-shot (marker guard)"
-# First call set the marker above; a second call must not re-nudge.
-touch "/tmp/legion-reflected-${CWD_HASH}"
-out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | bash "$STOP_HOOK")
-assert_empty "marker suppresses a second nudge" "$out"
-rm -f "/tmp/legion-reflected-${CWD_HASH}"
-
-echo "==> stop_hook_active suppresses the nudge (loop guard, #569)"
+echo "==> stop_hook_active suppresses the prompt (loop guard, #569)"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\",\"stop_hook_active\":true}" | bash "$STOP_HOOK")
-assert_empty "stop_hook_active path produces no nudge" "$out"
-rm -f "/tmp/legion-reflected-${CWD_HASH}"
+assert_empty "stop_hook_active path produces no prompt" "$out"
 
 echo "==> bypass via LEGION_SKIP_STOP_BLOCK=1 exits 0"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"${SESSION}\"}" | FAKE_DELEGATED_NEEDS_ATTENTION="item-42" LEGION_SKIP_STOP_BLOCK=1 bash "$STOP_HOOK")
@@ -128,11 +125,8 @@ echo "==> no session_id: hook passes through"
 out=$(echo "{\"cwd\":\"${CWD}\"}" | bash "$STOP_HOOK")
 assert_not_contains "missing session_id passes through" "$out" '"decision": "block"'
 
-# Clean up reflection marker before final test
-rm -f "/tmp/legion-reflected-${CWD_HASH}"
-
-echo "==> clean board, work present: reflection nudge fires"
+echo "==> a session with no tool use still gets the prompt"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"no-card-session\"}" | bash "$STOP_HOOK")
-assert_contains "nudge fires on a clean board" "$out" 'Drop one thing a teammate would not have known walking in cold'
+assert_contains "prompt fires with no work marker" "$out" 'Before you end this turn, name what kind of turn it was.'
 
 finish_tests

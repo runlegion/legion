@@ -64,20 +64,17 @@
 #    legion has never heard of at all. Ignores stop_hook_active for the
 #    same reason gate 1 does: the obligation must keep blocking across a
 #    continuation, not just once -- the harness's 8-block cap is its own
-#    backstop. Placed BEFORE gate 3's marker checks on purpose: an ask can
-#    be open on a Stop that touched no files (no WORK_MARKER) and this
-#    gate must still fire on that Stop, not only on ones that happened to
-#    do file work. Clears itself: replying to the signal (never `--to
+#    backstop. Placed BEFORE gate 3 on purpose: gate 3 emits on every Stop,
+#    so anything after it would never run. Clears itself: replying to the signal (never `--to
 #    all`, which retires nothing) is what empties `pending-replies` next
 #    time (`cli::signal::handle_signal`'s `retire_answered_signals`
 #    retires the ask on reply), not a marker file.
 #
-# 3. REFLECTION PROMPT. If work happened this session and the reflection
-#    hasn't fired yet, nudge for one via hookSpecificOutput.additionalContext
-#    (#569) -- non-error feedback that continues the turn so the agent acts on
-#    it, WITHOUT the hook-error labeling and 8-block cap that decision:block
-#    incurs. One-shot per session ($MARKER) + stop_hook_active guarded. Skip
-#    when nothing was learned.
+# 3. TURN-KIND PROMPT (#1477). Ask the agent to name what kind of turn it
+#    was -- design, delivery, can't tell, or a peer's ask -- via
+#    hookSpecificOutput.additionalContext (#569): non-error feedback that
+#    continues the turn, WITHOUT the hook-error labeling and 8-block cap that
+#    decision:block incurs. Fires on every Stop; stop_hook_active guarded.
 #
 # Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips all three gates. Writes a
 # telemetry row via `legion telemetry record-bypass` so the escape is
@@ -90,7 +87,7 @@ source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
 
 legion_hook_parse || exit 0
 # stop_hook_active is true when this Stop was itself triggered by a prior hook
-# continuation. The reflection nudge (which now continues the turn via
+# continuation. The turn-kind prompt (which continues the turn via
 # additionalContext, #569) honors it as a loop guard so a continuation we
 # caused does not re-nudge. The delegated-liveness block deliberately ignores
 # it -- that gate must keep firing while a dead delegation exists (the
@@ -100,8 +97,6 @@ STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
 if [ -z "$CWD" ]; then
   exit 0
 fi
-
-CWD_HASH=$(legion_hash_str "$CWD")
 
 # Session-end handoff (#493): optimistic expediter for the watch
 # reaper. Lets the reaper skip a poll cycle when the agent has cleanly
@@ -240,55 +235,34 @@ To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_
   fi
 fi
 
-# ---------- (3) Reflection prompt ----------
+# ---------- (3) Turn-kind prompt (#1477) ----------
 #
-# Prevent re-fires: one reflect prompt per session
-MARKER="/tmp/legion-reflected-${CWD_HASH}"
-if [ -f "$MARKER" ]; then
-  # Agent is exiting (no block fired); fire the #493 handoff so the
-  # reaper can skip a poll cycle.
-  session_end_handoff
-  exit 0
-fi
-
-# Skip if session had no real work
-WORK_MARKER="/tmp/legion-work-${CWD_HASH}"
-if [ ! -f "$WORK_MARKER" ]; then
-  # Same as above -- clean exit path, fire the handoff.
-  session_end_handoff
-  exit 0
-fi
-
-# Loop guard: if this Stop is itself a hook-induced continuation, the nudge
-# already fired -- do not re-emit. The on-disk $MARKER is the primary guard
-# (the next Stop hits the marker check above and exits 0); this is the
-# belt-and-suspenders for additionalContext's continue-the-turn behavior.
+# Every turn ends by naming what kind of turn it was: design, delivery,
+# can't tell, or a peer's ask. Replaces the per-session reflect prompt and
+# the autonomy-budget reminder that used to ride with it. It fires on every
+# Stop, not once per session and not only after tool use: a design turn is
+# often pure conversation, and that is the turn this prompt is for. The only
+# guard is stop_hook_active -- the prompt continues the turn via
+# additionalContext, so the Stop that continuation produces must not
+# re-prompt.
 if [ "$STOP_ACTIVE" = "true" ]; then
   session_end_handoff
   exit 0
 fi
 
-touch "$MARKER"
+read -r -d '' REASON <<'EOF'
+Before you end this turn, name what kind of turn it was.
+**Design:** Sean, a peer, or you were working out what something should be. The deliverable is understanding. End with what you learned, what you still don't know, and the question that moves it forward. In a design turn the next move is a question, not an issue, a brief or a build. If you made one anyway, say so.
+**Delivery:** you were carrying out a design that was already agreed. Finish it, or say plainly what blocks it.
+**Can't tell:** treat it as design, and ask.
+**A peer's ask:** a reply is owed, not a build. Answer it. A question back counts as an answer.
+**If you acted on anything this turn:** name what you acted on that you assumed rather than found, so it can be checked.
+EOF
 
-REASON="Drop one thing a teammate would not have known walking in cold -- a gotcha, a hidden invariant, how something actually works. Not what you did; the finding itself. A finding is never a record of what a person said or decided, nor a status. Store it: legion reflect --repo $REPO --text '<finding>'. Skip if nothing surprising came up."
-
-# Budget reminder (#524) -- the "on stop" half of surfacing the autonomy
-# budget. Tells the agent, as it wraps up, that it has sanctioned units left
-# to self-direct more work, so stopping is a choice, not a default. Fail-open:
-# any error leaves BUDGET empty and the reflection prompt fires unchanged.
-BUDGET=$("$LEGION" autonomy status --repo "$REPO" --banner 2>/dev/null)
-if [ -n "$BUDGET" ]; then
-  REASON="${REASON}
-
-${BUDGET}"
-fi
-
-# #569: the reflection nudge continues the turn via additionalContext, NOT
+# #569: the prompt continues the turn via additionalContext, NOT
 # decision:block. Verified against CC 2.1.168: Stop additionalContext is
 # "non-error feedback that continues the conversation" -- the agent receives
-# the nudge and acts on it, but without the hook-error labeling and the
+# the prompt and acts on it, but without the hook-error labeling and the
 # 8-consecutive-block cap that decision:block incurs. The delegated-liveness
-# gate above stays a hard decision:block on purpose (it must be able to
-# refuse the stop, and wants the cap as a safety valve); this softer nudge is
-# the right tool for a once-per-session prompt the agent should act on.
+# and pending-replies gates above stay hard decision:blocks on purpose.
 emit_context "Stop" "$REASON"
