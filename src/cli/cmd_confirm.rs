@@ -82,7 +82,11 @@ fn run_confirm(reason: Option<String>, command: &str) -> Result<(), ConfirmError
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
     let legion_repo: Option<String> = std::env::var(LEGION_REPO_ENV).ok();
-    let repo: String = repo_for(legion_repo.as_deref(), Some(&cwd)).unwrap_or_default();
+    // The confirmation's incident record is a write legion makes by itself:
+    // outside a registered repo it files under the session's registered
+    // repo, else `unregistered` (#1479).
+    let repo: String =
+        crate::watch::own_write_repo(repo_for(legion_repo.as_deref(), Some(&cwd)), None);
     let request = ConfirmRequest {
         origin: Origin {
             command: command.to_string(),

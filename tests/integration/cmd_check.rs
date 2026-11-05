@@ -48,38 +48,48 @@ fn payload_from(command: &str, cwd: &std::path::Path) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The repo field of the incident record a no-go refusal writes when the
+/// payload's cwd is outside every registered repo, with or without a session
+/// lock naming this test process (an ancestor of the hook it runs).
+fn incident_repo_outside_registered(with_session_lock: bool) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkout = tempfile::tempdir().expect("checkout");
+    let outside = tempfile::tempdir().expect("outside");
+    seed_watch_toml(dir.path(), &[("widget", checkout.path())]);
+    if with_session_lock {
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        std::fs::write(
+            sessions.join("widget.session"),
+            std::process::id().to_string(),
+        )
+        .expect("session lock");
+    }
+    hook_output(
+        dir.path(),
+        &shipped_policy_path(),
+        &payload_from("rm -rf /", outside.path()),
+    );
+    let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
+        .expect("incident log");
+    let row: Value = serde_json::from_str(log.lines().next().expect("a row")).expect("json");
+    row["repo"].as_str().expect("repo").to_string()
+}
+
 /// #1479: a session started in a registered repo that then runs outside it
-/// files its incident records under the session's registered repo, and with
-/// no session lock under `unregistered`. The session lock names this test
-/// process, an ancestor of the hook it runs.
+/// files its incident records under the session's registered repo. Unix
+/// only: the session is found through the process ancestry, read with `ps`.
+#[cfg(unix)]
 #[test]
 fn an_incident_outside_a_registered_repo_files_under_the_sessions_repo() {
-    let incident_repo = |with_session_lock: bool| {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let checkout = tempfile::tempdir().expect("checkout");
-        let outside = tempfile::tempdir().expect("outside");
-        seed_watch_toml(dir.path(), &[("widget", checkout.path())]);
-        if with_session_lock {
-            let sessions = dir.path().join("sessions");
-            std::fs::create_dir_all(&sessions).expect("sessions dir");
-            std::fs::write(
-                sessions.join("widget.session"),
-                std::process::id().to_string(),
-            )
-            .expect("session lock");
-        }
-        hook_output(
-            dir.path(),
-            &shipped_policy_path(),
-            &payload_from("rm -rf /", outside.path()),
-        );
-        let log = std::fs::read_to_string(dir.path().join("legion").join("cmd-incidents.jsonl"))
-            .expect("incident log");
-        let row: Value = serde_json::from_str(log.lines().next().expect("a row")).expect("json");
-        row["repo"].as_str().expect("repo").to_string()
-    };
-    assert_eq!(incident_repo(true), "widget");
-    assert_eq!(incident_repo(false), "unregistered");
+    assert_eq!(incident_repo_outside_registered(true), "widget");
+}
+
+/// #1479: with no session lock, an incident outside every registered repo
+/// files under `unregistered` -- on every platform.
+#[test]
+fn an_incident_outside_a_registered_repo_without_a_session_is_unregistered() {
+    assert_eq!(incident_repo_outside_registered(false), "unregistered");
 }
 
 /// Runs the hook with `LEGION_CMD_POLICY` at `policy`, requiring exit 0 and

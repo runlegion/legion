@@ -114,7 +114,9 @@ pub(crate) fn process_alive(pid: u32) -> bool {
 
 /// `pid` and its ancestors, nearest first, read with `ps` (no libc: the
 /// crate forbids unsafe). Stops at init, at an unreadable parent, or after
-/// a fixed depth, so it always ends.
+/// a fixed depth, so it always ends. Unix only: Windows has no `ps`, so
+/// there a session's repo is found only by an explicit pid.
+#[cfg(unix)]
 fn process_ancestry(pid: u32) -> impl Iterator<Item = u32> {
     const MAX_DEPTH: usize = 32;
     std::iter::successors(Some(pid), |&current| {
@@ -281,7 +283,9 @@ impl SessionLockTracker {
     /// session lock (`legion watch session-start`) names `pid`, or, with no
     /// pid, names this process or one of its ancestors -- a hook or a
     /// command run inside a session runs below the session's process. The
-    /// ancestry is walked only when some session lock exists.
+    /// ancestry is walked only when some session lock exists, and only on
+    /// unix; on Windows a lookup without a pid finds no session, so a write
+    /// outside a registered repo files under `unregistered`.
     pub fn session_repo(&self, pid: Option<u32>) -> Option<String> {
         let locks: Vec<(u32, String)> = std::fs::read_dir(&self.lock_dir)
             .ok()?
@@ -301,8 +305,9 @@ impl SessionLockTracker {
         };
         match pid {
             Some(pid) => repo_of(pid),
-            None if locks.is_empty() => None,
-            None => process_ancestry(std::process::id()).find_map(repo_of),
+            #[cfg(unix)]
+            None if !locks.is_empty() => process_ancestry(std::process::id()).find_map(repo_of),
+            None => None,
         }
     }
 
