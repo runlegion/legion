@@ -86,10 +86,13 @@ fn signal_without_repo_stops_outside_and_defaults_inside_a_registered_repo() {
 fn every_repo_flag_accepts_owner_repo_through_the_github_field() {
     let data = tempfile::tempdir().unwrap();
     let checkout = tempfile::tempdir().unwrap();
+    // A TOML literal string ('...') takes the path verbatim: a Windows path's
+    // backslashes would be escapes in a basic string ("...") and break the
+    // file.
     std::fs::write(
         data.path().join("watch.toml"),
         format!(
-            "[[repos]]\nname = \"widget\"\nworkdir = \"{}\"\ngithub = \"acme/widget-repo\"\n",
+            "[[repos]]\nname = \"widget\"\nworkdir = '{}'\ngithub = \"acme/widget-repo\"\n",
             checkout.path().display()
         ),
     )
