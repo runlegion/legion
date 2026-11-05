@@ -1448,9 +1448,10 @@ broadcast_tags = ["eng-team", "backend"]
     }
 
     #[test]
-    fn a_short_repo_arg_passes_through_and_an_unknown_owner_repo_is_refused() {
+    fn a_short_repo_arg_passes_through_without_reading_watch_toml() {
+        // The owner/repo path reads the data dir's watch.toml, so it is
+        // covered by tests/integration/repo_identity.rs under an isolated
+        // LEGION_DATA_DIR, never against the host's.
         assert_eq!(resolve_repo_arg("legion").as_deref(), Ok("legion"));
-        let err = resolve_repo_arg("nobody-owns/this-repo-1479").expect_err("unknown owner/repo");
-        assert!(err.contains("nobody-owns/this-repo-1479"), "{err}");
     }
 }

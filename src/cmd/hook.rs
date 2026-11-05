@@ -794,7 +794,11 @@ pub(crate) fn route_call(
         let routed: Routed = route(&worker_policy, &call, &ctx);
 
         if let (Some(work), Some((_, log)), Some(db)) = (session, &store, &db) {
-            let repo: String = repo.clone().unwrap_or_default();
+            // An incident record is a write legion makes by itself: outside a
+            // registered repo it lands under `unregistered` (#1479).
+            let repo: String = repo
+                .clone()
+                .unwrap_or_else(|| crate::watch::UNREGISTERED_REPO.to_string());
             let origin = Origin {
                 command: work.issued,
                 agent: work.store.agent_for(&repo),
@@ -1024,6 +1028,9 @@ pub(crate) fn repo_for(legion_repo: Option<&str>, cwd: Option<&str>) -> Option<S
 
 /// The registered repo `cwd` lies in, by watch.toml; never a directory name.
 fn registered_repo_of(cwd: &str) -> Option<String> {
+    // A directory that does not exist lies in no repo; checked first so the
+    // data dir is never read for it.
+    Path::new(cwd).canonicalize().ok()?;
     let watch_toml = crate::data_dir().ok()?.join("watch.toml");
     let repos = crate::watch::list_repos_in_config(&watch_toml).ok()?;
     crate::watch::registered_repo_for(&repos, Path::new(cwd))

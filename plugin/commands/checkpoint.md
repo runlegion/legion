@@ -31,7 +31,7 @@ Every boost makes the system smarter. Do not skip this.
 Store a structured resume-anchor. This is the artifact SessionStart and post-compaction recall both read to re-orient the next session -- write it for a reader who has not seen your work. Use these labelled lines:
 
 ```bash
-legion reflect --repo <your-repo> --domain checkpoint --tags manual,session --text "[CHECKPOINT]
+legion reflect --domain checkpoint --tags manual,session --text "[CHECKPOINT]
 Active: <card id + title, or 'no active card'>
 Goal: <completion condition / acceptance-criteria summary -- mirror legion goal>
 Last: <what you just finished>
@@ -49,13 +49,13 @@ Write `Next` as a concrete action, not a status ("run /review-pr on #572 and add
 Did you learn something another agent needs to know? Post it to the bullpen:
 
 ```bash
-legion post --repo <your-repo> --text "<insight for the team>"
+legion post --text "<insight for the team>"
 ```
 
 Or signal a specific agent if the insight is directed:
 
 ```bash
-legion signal --repo <your-repo> --to <agent> --verb answer --note "<what they need to know>"
+legion signal --to <agent> --verb answer --note "<what they need to know>"
 ```
 
 ## Phase 5: Bullpen Close
@@ -63,7 +63,7 @@ legion signal --repo <your-repo> --to <agent> --verb answer --note "<what they n
 Check for unread bullpen posts:
 
 ```bash
-legion bullpen --repo <your-repo>
+legion bullpen
 ```
 
 Respond to anything directed at you. Acknowledge signals. If someone asked a question you can answer, answer it now before you stop.

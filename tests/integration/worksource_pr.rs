@@ -1539,6 +1539,36 @@ fn pr_write_check_passes_substantive_body_and_reports_clean() {
     );
 }
 
+/// #1479: `issue view` and `pr write-check` take `owner/repo` as well as the
+/// short name, mapped through the watch.toml `github` field.
+#[cfg(unix)]
+#[test]
+fn issue_view_and_pr_write_check_accept_owner_repo() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(
+        data_dir.path(),
+        plugin_root.path(),
+        &view_issue_stub_plugin(),
+    );
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+    let mut args = write_check_args(&body_file);
+    let repo_value = args.iter().position(|a| a == "stub").expect("--repo stub");
+    args[repo_value] = "owner/stub".to_string();
+    let stdout = run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args(&args));
+    assert!(stdout.contains("pr-write gate clean"), "{stdout}");
+
+    run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "issue",
+        "view",
+        "--repo",
+        "owner/stub",
+        "--number",
+        "7",
+    ]));
+}
+
 /// Count `legion.gate` predictions, all of them or only those `--issue`
 /// finds -- the exact-match lookup legion-verify uses.
 #[cfg(unix)]
