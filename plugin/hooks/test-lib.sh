@@ -72,9 +72,33 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-echo "==> no resolvable binary leaves repo empty (fail-open, no guessing)"
-out=$(run_parse '{"cwd":"/tmp/myrepo","tool_name":"Grep","session_id":"s1"}' LEGION_BIN=/nonexistent/legion)
-assert_eq "no binary -> empty repo" "${out##*|}" ""
+echo "==> a binary without \`repo resolve\` falls back to the legacy derivation, never an empty repo"
+# A plugin can update before its binary. The pre-#1479 binary rejects the
+# unknown subcommand the way clap does (stderr, exit 2); hooks must keep
+# their repo rather than all go silent.
+old_bin="$WORK/old-legion"
+cat > "$old_bin" <<'OLDBIN'
+#!/bin/bash
+if [ "${1:-}" = repo ]; then
+  echo "error: unrecognized subcommand 'repo'" >&2
+  exit 2
+fi
+OLDBIN
+chmod +x "$old_bin"
+legacy_root="$WORK/legacy-origin"
+mkdir -p "$legacy_root" "$WORK/legacy-plain"
+git -C "$legacy_root" init -q 2>/dev/null
+git -C "$legacy_root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+git -C "$legacy_root" worktree add -q "$WORK/legacy-wt" -b legacy-branch 2>/dev/null
+old_parse() {
+  run_parse "{\"cwd\":\"$1\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}" LEGION_BIN="$2"
+}
+out=$(old_parse "$WORK/legacy-wt" "$old_bin")
+assert_eq "old binary: a worktree names its main checkout" "${out##*|}" "legacy-origin"
+out=$(old_parse "$WORK/legacy-plain" "$old_bin")
+assert_eq "old binary: a plain dir names its basename" "${out##*|}" "legacy-plain"
+out=$(old_parse "$WORK/legacy-plain" /nonexistent/legion)
+assert_eq "no binary: the legacy derivation, not empty" "${out##*|}" "legacy-plain"
 
 echo "==> empty stdin returns 1 from legion_hook_parse"
 printf '' | bash -c "source '$PRELUDE'; legion_hook_parse"

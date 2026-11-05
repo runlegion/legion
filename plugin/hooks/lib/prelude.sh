@@ -137,6 +137,28 @@ legion_session_pid() {
   return 0
 }
 
+# legion_legacy_repo CWD -- the pre-#1479 derivation, kept ONLY as the
+# fallback for a binary without `legion repo resolve`: the main checkout's
+# directory name (the parent of `git rev-parse --git-common-dir` when it
+# holds a `.git`, so a worktree names its main checkout and a submodule or
+# bare repo falls back), else CWD's basename.
+legion_legacy_repo() {
+  local cwd="$1" common root
+  common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
+  if [ -n "$common" ]; then
+    case "$common" in
+      /*) ;;
+      *) common="$cwd/$common" ;;
+    esac
+    root=$(dirname "$common")
+    if [ -e "$root/.git" ]; then
+      basename "$root"
+      return 0
+    fi
+  fi
+  basename "$cwd"
+}
+
 # legion_hook_parse -- read the hook event JSON from stdin and extract the
 # common fields into INPUT, CWD, TOOL, SESSION_ID, REPO. Returns 1 on
 # empty stdin so callers can `legion_hook_parse || exit 0`. jq failures
@@ -157,13 +179,21 @@ legion_hook_parse() {
   SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
   if [ -n "${LEGION_REPO:-}" ]; then
     REPO="$LEGION_REPO"
-  elif [ -n "$CWD" ] && [ -x "$LEGION" ]; then
+  elif [ -n "$CWD" ]; then
     # Repo identity is registered, never taken from the directory (#1479):
     # the binary answers from watch.toml -- the registered repo CWD (or its
     # main checkout, for a worktree) lies in, else the repo this session's
     # lock names, else the fixed `unregistered`. The shell never reads
-    # watch.toml and never guesses a name from a basename.
-    REPO=$("$LEGION" repo resolve --cwd "$CWD" --pid "$(legion_session_pid)" 2>/dev/null) || REPO=""
+    # watch.toml. Only a binary that cannot answer (none resolved, or one
+    # older than `repo resolve`) falls back to the legacy derivation, so a
+    # plugin that updates before its binary does not silence every hook.
+    REPO=""
+    if [ -x "$LEGION" ]; then
+      REPO=$("$LEGION" repo resolve --cwd "$CWD" --pid "$(legion_session_pid)" 2>/dev/null) || REPO=""
+    fi
+    if [ -z "$REPO" ]; then
+      REPO=$(legion_legacy_repo "$CWD")
+    fi
   fi
   return 0
 }
