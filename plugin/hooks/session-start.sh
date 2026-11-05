@@ -1,8 +1,8 @@
 #!/bin/bash
 # Legion SessionStart hook: focused bootstrap.
 #
-# Session-only side effects live here: marker cleanup, index warm, daemon
-# supervisor, watch lock. The banner itself -- identity, operating
+# Session-only side effects live here: index warm, daemon supervisor,
+# watch lock. The banner itself -- identity, operating
 # contract, pending replies, checkpoint, index status, watch status,
 # current work -- is assembled by lib/boot-sections.sh
 # (#879), the SAME driver post-compact.sh calls, so the two SessionStart

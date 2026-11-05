@@ -42,10 +42,9 @@ Ensures the legion binary is present and at the expected version. Also installs 
 Provides full situational awareness at session start:
 
 1. Derives the repo name from `basename $CWD`
-2. Cleans up markers from previous sessions (`/tmp/legion-reflected-*`, `/tmp/legion-work-*`, `/tmp/legion-recall-nudge-*`, `/tmp/legion-channel-*`)
-3. Runs session-only side effects: index warm, daemon supervisor probe, watch lock, GitHub -> kanban sync
-4. Calls `emit_boot_core` from `hooks/lib/boot-sections.sh` -- the shared banner assembly (#879)
-5. Outputs the assembled banner as `hookSpecificOutput.additionalContext`
+2. Runs session-only side effects: index warm, daemon supervisor probe, watch lock, GitHub -> kanban sync
+3. Calls `emit_boot_core` from `hooks/lib/boot-sections.sh` -- the shared banner assembly (#879)
+4. Outputs the assembled banner as `hookSpecificOutput.additionalContext`
 
 The banner sections, in order, come from that one shared list and are
 identical on both SessionStart matchers: `now --banner`, `whoami`
@@ -94,24 +93,13 @@ This checkpoint is recalled by the post-compact hook to restore continuity.
 
 **stop.sh** (timeout: 10s)
 
-Prompts the agent to reflect before closing. Guarded by two mutexes:
+Runs three gates in order on every Stop:
 
-1. **Reflected marker** (`/tmp/legion-reflected-<cwd-hash>`) -- prevents re-fires in the same session
-2. **Work marker** (`/tmp/legion-work-<cwd-hash>`) -- skips if the session had no real work (no Grep/Glob/WebFetch/WebSearch calls)
+1. **Delegated-work liveness** -- a `decision: block` when work delegated to a watch-spawned attempt is no longer verifiably live
+2. **Pending replies** -- a `decision: block` while a directed ask addressed to this repo is still unanswered (`legion pending-replies --directed`)
+3. **Turn-kind prompt** -- otherwise, injects a short prompt as `hookSpecificOutput.additionalContext` asking the agent to name what kind of turn it was (design, delivery, can't tell, or a peer's ask) and what it acted on that it assumed rather than found
 
-If both guards pass:
-
-1. Creates the reflected marker
-2. Checks for unread bullpen posts
-3. Checks for active kanban cards
-4. Outputs a `decision: block` response with a structured prompt:
-   - Team first: did you help a teammate?
-   - Reflect: store what you learned
-   - Boost what helped, signal what is unresolved
-   - Read unread bullpen posts (if any)
-   - Complete or block active kanban cards (if any)
-
-The `decision: block` means the agent must address these items before the session ends.
+The turn-kind prompt fires on every turn. Its only guard is `stop_hook_active`, so the continuation it causes does not prompt again. It uses additionalContext rather than `decision: block`, so it continues the turn without the hook-error label or the 8-block cap.
 
 ### PreToolUse
 
@@ -119,10 +107,7 @@ The `decision: block` means the agent must address these items before the sessio
 
 Matches: `Grep`, `Glob`, `WebFetch`, `WebSearch`
 
-Fires on every search-related tool call. Two functions:
-
-1. **Sets the work marker** (`/tmp/legion-work-<cwd-hash>`) -- signals that this session did real work. Used by the Stop hook mutex.
-2. **Injects a nudge** as additionalContext: "Before searching code, check legion memory first. Run: `legion recall --repo <repo> --context '<what you are looking for>'` or `legion consult --context '<problem>'` to search all agents."
+Fires on every search-related tool call and **injects a nudge** as additionalContext: "Before searching code, check legion memory first. Run: `legion recall --repo <repo> --context '<what you are looking for>'` or `legion consult --context '<problem>'` to search all agents."
 
 The permission decision is always `allow` -- the hook never blocks tool use.
 
