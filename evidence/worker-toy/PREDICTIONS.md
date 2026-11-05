@@ -16,12 +16,12 @@ Every event reaches each handler its type routes to at least once. Getting it ag
 2. A router: a table from type pattern to handlers, built from what handlers register.
 3. A supervisor per handler, one_for_one: a crash restarts that handler from its place; an event that keeps failing goes to that handler's bin and the rest carry on.
 4. Built-ins: store (v0.5.0 fill applied to one routed event) and declare.
-5. A flow runner, ported from the 2026-10-21 subs toy: JSONL rows of guard, step and next or else. Each step's result is an event, so an instance rebuilds by replaying its history. An instance is keyed by a correlation the flow declares, or one instance when it declares none.
+5. A flow runner, written fresh from the design, reusing no earlier toy or PR: JSONL rows of guard, step and next or else. Each step's result is an event, so an instance rebuilds by replaying its history. An instance is keyed by a correlation the flow declares, or one instance when it declares none.
 6. Steps: emit, host (an action outside the store), after (a timer on event time) and store.
 
 ## The data
 
-legion's live memory, read only: about 27,000 reflections enter as `legion.raw.reflection`. One flow guards that type, calls a host classifier (the rules from the ETL kinds toy), and emits `memory.<kind>`, which routes to the store built-in. An after row rechecks what stays unclassified.
+legion's live memory, read only: about 27,000 reflections enter as `legion.raw.reflection`. One flow guards that type, calls a host classifier written for this toy, and emits `memory.<kind>`, which routes to the store built-in. An after row rechecks what stays unclassified.
 
 ## Predictions
 
