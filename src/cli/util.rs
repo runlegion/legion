@@ -81,23 +81,23 @@ pub(crate) fn git_head_commit_and_branch() -> Result<(String, String), error::Le
     Ok((commit_hash, branch))
 }
 
-/// The repo key for a gate record (#1403): the main-checkout name of the
-/// process cwd, via [`crate::cmd::hook::repo_for`] (a linked worktree maps to
-/// its main checkout). `LEGION_REPO` is deliberately not consulted: the
-/// commit hash comes from the cwd's git, so the repo key must too.
+/// The repo key for a gate record (#1403): the registered repo the process
+/// cwd lies in (#1479; a linked worktree maps to its main checkout's repo).
+/// `LEGION_REPO` is deliberately not consulted: the commit hash comes from the
+/// cwd's git, so the repo key must too.
 pub(crate) fn current_repo_name() -> Result<String, error::LegionError> {
-    let cwd = std::env::current_dir().map_err(|e| {
+    crate::watch::registered_repo_for_cwd().ok_or_else(|| {
         error::LegionError::WorkSource(format!(
-            "cannot read the current directory ({e}); a gate cannot be recorded without a repo name"
-        ))
-    })?;
-    crate::cmd::hook::repo_for(None, cwd.to_str()).ok_or_else(|| {
-        error::LegionError::WorkSource(format!(
-            "cannot derive a repo name from {}; a gate cannot be recorded without a repo name",
-            cwd.display()
+            "this directory is not in a registered repo; a gate cannot be recorded without one. \
+             {REGISTER_HINT}"
         ))
     })
 }
+
+/// What to do when a command needs a repo and the working directory is not
+/// in a registered one (#1479).
+pub(crate) const REGISTER_HINT: &str = "Run it from a registered repo (or one of its worktrees), pass --repo <name>, \
+     or register this checkout with `legion watch add <path> --name <name>`.";
 
 /// Read input from `path` (the value of a `--*-file` flag) or, when it is
 /// `None`, from stdin. `flag` names the originating flag for the error

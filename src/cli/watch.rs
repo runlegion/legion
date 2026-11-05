@@ -8,6 +8,33 @@ use crate::cli::util::open_db;
 use crate::{db, error, watch};
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum RepoAction {
+    /// Print the repo that writes from `--cwd` are filed under: the registered
+    /// repo the directory lies in, else the repo whose session lock `--pid`
+    /// holds (without `--pid`, one this process's ancestry holds), else
+    /// `unregistered`. Never a name taken from the directory.
+    Resolve {
+        /// The directory to resolve.
+        #[arg(long)]
+        cwd: std::path::PathBuf,
+
+        /// The session process id (the one `legion watch session-start`
+        /// recorded), for a directory outside every registered repo.
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+}
+
+/// `legion repo` (#1479).
+pub(crate) fn handle_repo(action: &RepoAction) -> error::Result<()> {
+    let RepoAction::Resolve { cwd, pid } = action;
+    let repos = watch::list_repos_in_config(&data_dir()?.join("watch.toml"))?;
+    let repo = watch::own_write_repo(watch::registered_repo_for(&repos, cwd), *pid);
+    println!("{repo}");
+    Ok(())
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum WatchAction {
     /// Add a working directory to watch.toml (idempotent by canonicalized path)
     Add {
@@ -48,7 +75,8 @@ pub(crate) enum WatchAction {
     /// (no TTL) because an idle interactive session must still hold the gate.
     /// Non-fatal and fast -- hook failure never blocks Claude Code startup.
     SessionStart {
-        /// Repo name to lock (basename of the working directory).
+        /// Repo name to lock: the registered repo the hook resolved with
+        /// `legion repo resolve` (#1479).
         #[arg(long)]
         repo: String,
 

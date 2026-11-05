@@ -307,7 +307,7 @@ fn document_view_reports_criteria_served_by_a_clean_verdict() {
         ]
     })
     .to_string();
-    run_ok(legion_cmd(dir.path()).current_dir(gate_repo.path()).args([
+    run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",

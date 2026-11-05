@@ -112,6 +112,25 @@ pub(crate) fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// `pid` and its ancestors, nearest first, read with `ps` (no libc: the
+/// crate forbids unsafe). Stops at init, at an unreadable parent, or after
+/// a fixed depth, so it always ends. Unix only: Windows has no `ps`, so
+/// there a session's repo is found only by an explicit pid.
+#[cfg(unix)]
+fn process_ancestry(pid: u32) -> impl Iterator<Item = u32> {
+    const MAX_DEPTH: usize = 32;
+    std::iter::successors(Some(pid), |&current| {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "ppid=", "-p", &current.to_string()])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let parent: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        (parent > 1 && parent != current).then_some(parent)
+    })
+    .take(MAX_DEPTH)
+}
+
 /// Send SIGTERM to `pid`. Returns true when the signal was delivered.
 ///
 /// Shells out to `kill` for the same reason [`process_alive`] does -- one
@@ -258,6 +277,38 @@ impl SessionLockTracker {
         std::fs::create_dir_all(&self.lock_dir)?;
         std::fs::write(self.session_path(repo), pid.to_string())?;
         Ok(())
+    }
+
+    /// The session's registered repo (#1479): the repo whose interactive
+    /// session lock (`legion watch session-start`) names `pid`, or, with no
+    /// pid, names this process or one of its ancestors -- a hook or a
+    /// command run inside a session runs below the session's process. The
+    /// ancestry is walked only when some session lock exists, and only on
+    /// unix; on Windows a lookup without a pid finds no session, so a write
+    /// outside a registered repo files under `unregistered`.
+    pub fn session_repo(&self, pid: Option<u32>) -> Option<String> {
+        let locks: Vec<(u32, String)> = std::fs::read_dir(&self.lock_dir)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "session"))
+            .filter_map(|path| {
+                let holder = std::fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+                Some((holder, path.file_stem()?.to_str()?.to_string()))
+            })
+            .collect();
+        let repo_of = |candidate: u32| {
+            locks
+                .iter()
+                .find(|(holder, _)| *holder == candidate)
+                .map(|(_, repo)| repo.clone())
+        };
+        match pid {
+            Some(pid) => repo_of(pid),
+            #[cfg(unix)]
+            None if !locks.is_empty() => process_ancestry(std::process::id()).find_map(repo_of),
+            None => None,
+        }
     }
 
     /// Delete the interactive-session lock for `repo`.

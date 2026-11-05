@@ -17,7 +17,8 @@ mod tracker;
 
 pub use config::{
     WatchConfig, WatchRepoConfig, add_repo_to_config, default_session_lock_ttl_secs,
-    list_repos_in_config, load_config, remove_repo_from_config, rename_in_config,
+    list_repos_in_config, load_config, own_write_repo, registered_repo_for,
+    registered_repo_for_cwd, remove_repo_from_config, rename_in_config, resolve_repo_arg,
 };
 pub use gates::{PersonaLeaseGate, QuotaPanicGate, poll_cycle};
 pub use locks::{

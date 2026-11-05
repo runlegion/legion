@@ -18,7 +18,7 @@
 # tool call.
 #
 # Repo identity (the single decision point): the LEGION_REPO env var takes
-# precedence over basename($CWD), in EVERY hook. An operator setting
+# precedence over `legion repo resolve` (#1479), in EVERY hook. An operator setting
 # LEGION_REPO must get the same repo identity from enforcement, lifecycle,
 # and memory hooks alike -- per-hook divergence here meant enforcement
 # could apply to one repo set and memory to another (#614 audit).
@@ -97,6 +97,68 @@ legion_resolve_bin() {
 
 LEGION=$(legion_resolve_bin)
 
+# legion_session_pid -- print the session's pid (the one its session lock
+# names): the long-lived session process, never this short-lived hook. The hook's parent is not
+# always that process. Claude Code runs hooks as `/bin/sh -c "bash .../hooks/
+# <hook>.sh"`; where that shell execs its last command (macOS) $PPID is
+# the session, but where it does not (observed on Linux, #1400) $PPID is a
+# shell wrapper that exits with the hook, leaving a lock watch reads as stale.
+# So when $PPID is an sh/dash/bash whose command line names a hook, step
+# up exactly one level to its parent; otherwise keep $PPID. One level only,
+# so it can never overshoot to a terminal shell or a long-lived host. The
+# match is on the suffix because the wrapper's argv may still carry an
+# unexpanded ${CLAUDE_PLUGIN_ROOT}. Every failed or empty `ps` lookup falls
+# back to $PPID silently: this never fails and prints nothing but the pid.
+legion_session_pid() {
+  local name args parent
+  name=$(ps -o comm= -p "$PPID" 2>/dev/null) || name=""
+  name="${name##*/}"
+  case "${name#-}" in
+    sh | dash | bash) ;;
+    *)
+      printf '%s\n' "$PPID"
+      return 0
+      ;;
+  esac
+  args=$(ps -o args= -p "$PPID" 2>/dev/null) || args=""
+  case "$args" in
+    *hooks/*.sh*) ;;
+    *)
+      printf '%s\n' "$PPID"
+      return 0
+      ;;
+  esac
+  parent=$(ps -o ppid= -p "$PPID" 2>/dev/null) || parent=""
+  parent="${parent//[[:space:]]/}"
+  case "$parent" in
+    '' | *[!0-9]*) printf '%s\n' "$PPID" ;;
+    *) printf '%s\n' "$parent" ;;
+  esac
+  return 0
+}
+
+# legion_legacy_repo CWD -- the pre-#1479 derivation, kept ONLY as the
+# fallback for a binary without `legion repo resolve`: the main checkout's
+# directory name (the parent of `git rev-parse --git-common-dir` when it
+# holds a `.git`, so a worktree names its main checkout and a submodule or
+# bare repo falls back), else CWD's basename.
+legion_legacy_repo() {
+  local cwd="$1" common root
+  common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
+  if [ -n "$common" ]; then
+    case "$common" in
+      /*) ;;
+      *) common="$cwd/$common" ;;
+    esac
+    root=$(dirname "$common")
+    if [ -e "$root/.git" ]; then
+      basename "$root"
+      return 0
+    fi
+  fi
+  basename "$cwd"
+}
+
 # legion_hook_parse -- read the hook event JSON from stdin and extract the
 # common fields into INPUT, CWD, TOOL, SESSION_ID, REPO. Returns 1 on
 # empty stdin so callers can `legion_hook_parse || exit 0`. jq failures
@@ -118,41 +180,27 @@ legion_hook_parse() {
   if [ -n "${LEGION_REPO:-}" ]; then
     REPO="$LEGION_REPO"
   elif [ -n "$CWD" ]; then
-    # A git WORKTREE's basename is its own directory name -- for an
-    # agent worktree that is the branch/agent label
-    # (`.claude/worktrees/agent-a2a0...`), not the repo. Taking it
-    # verbatim made every hook address the session as a repo legion has
-    # never heard of: the Stop nudge told agents to run `legion reflect
-    # --repo agent-a2a0...`, coverage gates missed, and recall queried a
-    # name with no rows. `--git-common-dir` points at the ORIGINAL
-    # repo's .git for a worktree (and at plain `.git` for a normal
-    # checkout), so its parent is the real repo root in both cases.
-    # Falls back to the basename when git is absent or CWD is not a
-    # repo at all -- the pre-existing fail-open behavior.
-    REPO=$(basename "$CWD")
-    _legion_common_dir=$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null)
-    if [ -n "$_legion_common_dir" ]; then
-      case "$_legion_common_dir" in
-        /*) ;;
-        *) _legion_common_dir="$CWD/$_legion_common_dir" ;;
-      esac
-      _legion_repo_root=$(dirname "$_legion_common_dir")
-      # `dirname(git-common-dir) == repo root` holds when the common dir is
-      # `<root>/.git` -- true for a normal checkout AND for a worktree, whose
-      # common dir points at the ORIGINAL repo's .git. It is FALSE inside a
-      # submodule, where the common dir is `<super>/.git/modules/<name>`:
-      # dirname gives `<super>/.git/modules`, whose basename is the literal
-      # string "modules". That is worse than the basename it replaced, which
-      # at least gave the submodule's own directory name, and `[ -d ]` alone
-      # does not catch it because `.git/modules` really is a directory.
-      # Requiring a `.git` INSIDE the resolved root is what distinguishes a
-      # real repo root from an internal git directory: a bare repo (common
-      # dir `.`) and a submodule both fail it and fall back.
-      if [ -e "$_legion_repo_root/.git" ]; then
-        REPO=$(basename "$_legion_repo_root")
-      fi
+    # Repo identity is registered, never taken from the directory (#1479):
+    # the binary answers from watch.toml -- the registered repo CWD (or its
+    # main checkout, for a worktree) lies in, else the repo this session's
+    # lock names, else the fixed `unregistered`. The shell never reads
+    # watch.toml. Only a binary without the subcommand falls back to the
+    # legacy derivation, so a plugin that updates before its binary does
+    # not silence every hook: an older binary rejects `repo` the way clap
+    # rejects any unknown subcommand, with exit 2, and so does no binary at
+    # all. Any other failure (a malformed watch.toml, say) is not a reason
+    # to guess a name, so it files under `unregistered`.
+    local resolve_rc=2
+    REPO=""
+    if [ -x "$LEGION" ]; then
+      REPO=$("$LEGION" repo resolve --cwd "$CWD" --pid "$(legion_session_pid)" 2>/dev/null)
+      resolve_rc=$?
     fi
-    unset _legion_common_dir _legion_repo_root
+    if [ "$resolve_rc" -eq 2 ]; then
+      REPO=$(legion_legacy_repo "$CWD")
+    elif [ "$resolve_rc" -ne 0 ] || [ -z "$REPO" ]; then
+      REPO="unregistered"
+    fi
   fi
   return 0
 }

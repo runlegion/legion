@@ -35,10 +35,6 @@ use crate::cli::push::handle_push;
 use crate::cli::util::{audit, open_db};
 use crate::{db, error};
 
-/// The audit agent when neither `LEGION_REPO` nor the process directory
-/// yields a repo name the router would accept.
-const UNKNOWN_AGENT: &str = "unknown";
-
 /// Global options (`man git`) that take a value, in their separate-argument
 /// spelling. Each is followed by its value as the next argument.
 const GLOBAL_VALUE_SEPARATE: [&str; 7] = [
@@ -737,16 +733,19 @@ fn default_push_is_origin_same_name(
     }
 }
 
-/// The audit agent: `LEGION_REPO` when set, else the repo name the router
-/// derives from the process directory (the main checkout's name, not a
-/// worktree's). Never read from git's arguments.
+/// The audit agent: `LEGION_REPO` when set, else the registered repo the
+/// process directory lies in (a worktree maps to its main checkout's repo),
+/// else the session's registered repo, else `unregistered` (#1479). Never
+/// read from git's arguments.
 fn audit_agent() -> String {
     let legion_repo: Option<String> = std::env::var(crate::cmd::hook::LEGION_REPO_ENV).ok();
     let cwd: Option<String> = std::env::current_dir()
         .ok()
         .and_then(|d| d.to_str().map(str::to_string));
-    crate::cmd::hook::repo_for(legion_repo.as_deref(), cwd.as_deref())
-        .unwrap_or_else(|| UNKNOWN_AGENT.to_string())
+    crate::watch::own_write_repo(
+        crate::cmd::hook::repo_for(legion_repo.as_deref(), cwd.as_deref()),
+        None,
+    )
 }
 
 /// Run git with its own arguments; push and commit go through the audited

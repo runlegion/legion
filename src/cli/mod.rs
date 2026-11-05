@@ -41,7 +41,7 @@ use self::ops::{ClusterAction, MeshAction, TelemetryAction, UncertaintyAction};
 use self::pr::PrAction;
 use self::schedule::ScheduleAction;
 use self::verify::QualityGateAction;
-use self::watch::WatchAction;
+use self::watch::{RepoAction, WatchAction};
 
 /// `legion --version` output, including the build id (#698) so the value
 /// matches what the daemon reports at /health. The semver version stays the
@@ -68,6 +68,109 @@ pub(crate) struct Cli {
 
     #[command(subcommand)]
     pub(crate) command: Commands,
+}
+
+impl Cli {
+    /// Parse argv with the repo identity rules (#1479): every `--repo`
+    /// accepts the short name or `owner/repo`, and a `--repo` that this
+    /// invocation requires defaults to the registered repo of the working
+    /// directory. Outside a registered repo a missing required `--repo`
+    /// stops the command and says how to name or register one. The working
+    /// directory is looked up only when clap reports `--repo` itself missing,
+    /// so every other invocation reads no watch.toml and touches no data dir.
+    /// The retry passes the registered name as a real `--repo` right after
+    /// the subcommand path, so it satisfies `--repo` however clap made it
+    /// required (`required`, `required_unless_present_any`, ...).
+    pub(crate) fn parse_with_registered_repo() -> Self {
+        let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        let err = match Self::try_parse_from_argv(&argv) {
+            Ok(cli) => return cli,
+            Err(err) => err,
+        };
+        if !names_missing_repo(&err) {
+            err.exit()
+        }
+        if let Some(name) = crate::watch::registered_repo_for_cwd() {
+            let retry = with_repo_inserted(&Self::command_with_repo_rules(), &argv, &name);
+            return Self::try_parse_from_argv(&retry).unwrap_or_else(|err| err.exit());
+        }
+        let _ = err.print();
+        eprintln!(
+            "\nThis directory is not in a registered repo. {}",
+            util::REGISTER_HINT
+        );
+        std::process::exit(2);
+    }
+
+    fn command_with_repo_rules() -> clap::Command {
+        use clap::CommandFactory;
+        with_repo_rules(Self::command())
+    }
+
+    fn try_parse_from_argv(argv: &[std::ffi::OsString]) -> Result<Self, clap::Error> {
+        use clap::FromArgMatches;
+        Self::command_with_repo_rules()
+            .try_get_matches_from(argv)
+            .and_then(|matches| Self::from_arg_matches(&matches))
+    }
+}
+
+/// Every `--repo` of `command` and its subcommands accepts the short name or
+/// `owner/repo` (see [`Cli::parse_with_registered_repo`]).
+fn with_repo_rules(command: clap::Command) -> clap::Command {
+    command
+        .mut_args(|arg| {
+            if arg.get_long() == Some("repo") {
+                arg.value_parser(|value: &str| crate::watch::resolve_repo_arg(value))
+            } else {
+                arg
+            }
+        })
+        .mut_subcommands(with_repo_rules)
+}
+
+/// `argv` with `--repo <name>` inserted after its subcommand path: after the
+/// last token that names a subcommand of the one before it (the global
+/// `-v`/`--verbose` may sit between them). The scan stops at any other flag,
+/// so a flag's value is never read as a subcommand, and everything after the
+/// insertion point is the subcommand's own arguments.
+fn with_repo_inserted(
+    command: &clap::Command,
+    argv: &[std::ffi::OsString],
+    name: &str,
+) -> Vec<std::ffi::OsString> {
+    let mut current = command;
+    let mut insert_at = 1;
+    for (index, token) in argv.iter().enumerate().skip(1) {
+        let Some(token) = token.to_str() else { break };
+        if matches!(token, "-v" | "--verbose") {
+            continue;
+        }
+        match current.find_subcommand(token) {
+            Some(sub) if !token.starts_with('-') => {
+                current = sub;
+                insert_at = index + 1;
+            }
+            _ => break,
+        }
+    }
+    let mut out = argv.to_vec();
+    out.splice(insert_at..insert_at, ["--repo".into(), name.into()]);
+    out
+}
+
+/// True when `err` is clap's missing-required-argument error and `--repo`
+/// is among the arguments it names as missing (not merely in its usage).
+fn names_missing_repo(err: &clap::Error) -> bool {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    err.kind() == ErrorKind::MissingRequiredArgument
+        && match err.get(ContextKind::InvalidArg) {
+            Some(ContextValue::Strings(missing)) => {
+                missing.iter().any(|arg| arg.starts_with("--repo"))
+            }
+            Some(ContextValue::String(missing)) => missing.starts_with("--repo"),
+            _ => false,
+        }
 }
 
 #[derive(Subcommand)]
@@ -410,8 +513,9 @@ pub(crate) enum Commands {
     /// optional structure for RFC-shaped asks. For a one-line ask, just
     /// `--verb question --note "..."` is enough.
     Signal {
-        /// Repository name (identifies the sender)
-        #[arg(long)]
+        /// Repository name (identifies the sender). Defaults to the registered
+        /// repo of the working directory; required outside one (#1479).
+        #[arg(long, required = true)]
         repo: Vec<String>,
 
         /// Recipient agent name (or "all")
@@ -1053,6 +1157,12 @@ pub(crate) enum Commands {
         action: Option<WatchAction>,
     },
 
+    /// Repo identity (#1479): which registered repo a directory belongs to
+    Repo {
+        #[command(subcommand)]
+        action: RepoAction,
+    },
+
     /// Start the legion daemon (channel + watch)
     Daemon {
         /// HTTP port for the channel server
@@ -1377,4 +1487,54 @@ pub(crate) enum ReflectAction {
         #[arg(long)]
         set_domain: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    fn inserted(args: &[&str]) -> Vec<String> {
+        let argv: Vec<OsString> = args.iter().map(OsString::from).collect();
+        with_repo_inserted(&Cli::command_with_repo_rules(), &argv, "widget")
+            .into_iter()
+            .map(|token| token.into_string().expect("utf-8"))
+            .collect()
+    }
+
+    #[test]
+    fn the_registered_repo_is_inserted_after_the_subcommand_path() {
+        assert_eq!(
+            inserted(&["legion", "bullpen", "--count"]),
+            ["legion", "bullpen", "--repo", "widget", "--count"]
+        );
+        assert_eq!(
+            inserted(&["legion", "-v", "uncertainty", "predictions"]),
+            [
+                "legion",
+                "-v",
+                "uncertainty",
+                "predictions",
+                "--repo",
+                "widget"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_flag_value_that_names_a_subcommand_is_not_read_as_one() {
+        assert_eq!(
+            inserted(&["legion", "reflect", "--text", "retag"]),
+            ["legion", "reflect", "--repo", "widget", "--text", "retag"]
+        );
+    }
+
+    #[test]
+    fn a_retry_inside_a_registered_repo_satisfies_required_unless_present() {
+        let argv: Vec<OsString> = ["legion", "bullpen"].iter().map(OsString::from).collect();
+        let retry = with_repo_inserted(&Cli::command_with_repo_rules(), &argv, "widget");
+        assert!(Cli::try_parse_from_argv(&argv).is_err());
+        assert!(Cli::try_parse_from_argv(&retry).is_ok());
+    }
 }

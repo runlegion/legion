@@ -386,6 +386,71 @@ pub fn rename_in_config(path: &Path, from: &str, to: &str) -> Result<bool> {
     Ok(true)
 }
 
+// -- Repo identity (#1479) ----------------------------------------------------
+
+/// The repo name for writes legion makes by itself from a directory that is
+/// not a registered repo, when the session holds no registered repo either.
+pub const UNREGISTERED_REPO: &str = "unregistered";
+
+/// The registered repo `path` lies in, or `None`. A repo is identified only by
+/// its watch.toml entry: `path` (or, for a linked worktree, its main checkout)
+/// must sit at or under a registered workdir. The deepest such workdir wins.
+/// Nothing is ever derived from a directory name.
+pub fn registered_repo_for(repos: &[WatchRepoConfig], path: &Path) -> Option<String> {
+    let path = path.canonicalize().ok()?;
+    let main_checkout = crate::inventory::git_common_dir(&path)
+        .and_then(|common| common.parent().map(Path::to_path_buf))
+        .filter(|root| root.join(".git").exists());
+    repos
+        .iter()
+        .filter_map(|repo| {
+            let workdir = Path::new(&repo.workdir).canonicalize().ok()?;
+            let inside = path.starts_with(&workdir)
+                || main_checkout
+                    .as_ref()
+                    .is_some_and(|root| root.starts_with(&workdir));
+            inside.then(|| (workdir.components().count(), repo.name.clone()))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, name)| name)
+}
+
+/// The repo a write legion makes by itself is filed under (#1479):
+/// `registered` (the registered repo it was made from) when there is one,
+/// else the session's registered repo (the session lock `session_pid`
+/// holds, or with no pid one held by this process's ancestry), else
+/// [`UNREGISTERED_REPO`].
+pub fn own_write_repo(registered: Option<String>, session_pid: Option<u32>) -> String {
+    registered
+        .or_else(|| {
+            let data_dir = crate::data_dir().ok()?;
+            super::SessionLockTracker::new(&data_dir, default_session_lock_ttl_secs())
+                .session_repo(session_pid)
+        })
+        .unwrap_or_else(|| UNREGISTERED_REPO.to_string())
+}
+
+/// The registered repo of the process working directory, read from the
+/// watch.toml in the data dir; `None` when there is no such repo.
+pub fn registered_repo_for_cwd() -> Option<String> {
+    let repos = list_repos_in_config(&crate::data_dir().ok()?.join("watch.toml")).ok()?;
+    registered_repo_for(&repos, &std::env::current_dir().ok()?)
+}
+
+/// A `--repo` value as the registered short name: `owner/repo` maps through
+/// the watch.toml `github` field; a short name passes through unchanged.
+pub fn resolve_repo_arg(value: &str) -> std::result::Result<String, String> {
+    if !value.contains('/') {
+        return Ok(value.to_string());
+    }
+    crate::worksource::repo_for_github(value).ok_or_else(|| {
+        format!(
+            "no registered repo has github = \"{value}\" in watch.toml; pass the short name, \
+             or add the github field to its entry"
+        )
+    })
+}
+
 /// Read the current config from disk, or return a fresh default if the file
 /// does not exist. Used by add/remove to do a read-modify-write.
 fn read_or_default(path: &Path) -> Result<WatchConfig> {
@@ -1293,5 +1358,115 @@ broadcast_tags = ["eng-team", "backend"]
 
         let cfg = load_config(&config_path).expect("valid config must load cleanly");
         assert_eq!(cfg.repos.len(), 2);
+    }
+
+    // -- repo identity (#1479) ------------------------------------------------
+
+    fn registered(name: &str, workdir: &Path) -> WatchRepoConfig {
+        WatchRepoConfig {
+            name: name.to_string(),
+            workdir: workdir.to_string_lossy().into_owned(),
+            agent: None,
+            broadcast_tags: Vec::new(),
+            extra: toml::Table::new(),
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("git spawns");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_registered_workdir_and_its_subdirectories_name_the_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_dir = dir.path().join("checkout-dir");
+        std::fs::create_dir_all(repo_dir.join("src")).expect("mkdir");
+        let repos = [registered("legion", &repo_dir)];
+        assert_eq!(
+            registered_repo_for(&repos, &repo_dir).as_deref(),
+            Some("legion")
+        );
+        assert_eq!(
+            registered_repo_for(&repos, &repo_dir.join("src")).as_deref(),
+            Some("legion")
+        );
+        assert_eq!(
+            registered_repo_for(&repos, &repo_dir.join("src").join("..")).as_deref(),
+            Some("legion")
+        );
+    }
+
+    #[test]
+    fn a_directory_outside_every_registered_repo_names_none_not_its_basename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_dir = dir.path().join("legion");
+        let scratch = dir.path().join("scratchpad");
+        std::fs::create_dir_all(&repo_dir).expect("mkdir");
+        std::fs::create_dir_all(&scratch).expect("mkdir");
+        let repos = [registered("legion", &repo_dir)];
+        assert_eq!(registered_repo_for(&repos, &scratch), None);
+        assert_eq!(registered_repo_for(&repos, &repo_dir.join("..")), None);
+        assert_eq!(registered_repo_for(&[], &repo_dir), None);
+    }
+
+    #[test]
+    fn a_linked_worktree_outside_the_workdir_names_its_main_checkouts_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_dir = dir.path().join("main-repo");
+        std::fs::create_dir_all(&repo_dir).expect("mkdir");
+        git(&repo_dir, &["init", "-q"]);
+        git(
+            &repo_dir,
+            &["commit", "--allow-empty", "-q", "-m", "initial"],
+        );
+        let worktree = dir.path().join("elsewhere").join("feature-wt");
+        let worktree_arg = worktree.to_string_lossy().into_owned();
+        git(
+            &repo_dir,
+            &["worktree", "add", "-q", &worktree_arg, "-b", "feature"],
+        );
+        let repos = [registered("registered-name", &repo_dir)];
+        assert_eq!(
+            registered_repo_for(&repos, &worktree).as_deref(),
+            Some("registered-name")
+        );
+    }
+
+    #[test]
+    fn the_deepest_registered_workdir_wins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outer = dir.path().join("outer");
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).expect("mkdir");
+        let repos = [registered("outer", &outer), registered("inner", &inner)];
+        assert_eq!(
+            registered_repo_for(&repos, &inner).as_deref(),
+            Some("inner")
+        );
+        assert_eq!(
+            registered_repo_for(&repos, &outer).as_deref(),
+            Some("outer")
+        );
+    }
+
+    #[test]
+    fn a_short_repo_arg_passes_through_without_reading_watch_toml() {
+        // The owner/repo path reads the data dir's watch.toml, so it is
+        // covered by tests/integration/repo_identity.rs under an isolated
+        // LEGION_DATA_DIR, never against the host's.
+        assert_eq!(resolve_repo_arg("legion").as_deref(), Ok("legion"));
     }
 }

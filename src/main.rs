@@ -56,8 +56,6 @@ mod worksource;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use clap::Parser;
-
 use cli::util::raise_fd_limit;
 use cli::{Cli, Commands};
 
@@ -119,7 +117,7 @@ fn run() -> error::Result<()> {
     if let Some(result) = cli::grep::run_from_argv(&argv) {
         return result;
     }
-    let cli = Cli::parse();
+    let cli = Cli::parse_with_registered_repo();
     VERBOSE.store(cli.verbose, Ordering::Relaxed);
 
     match cli.command {
@@ -335,6 +333,7 @@ fn run() -> error::Result<()> {
             json,
         } => cli::ops::handle_audit(repo, action, limit, json)?,
         Commands::Watch { action } => cli::watch::handle(action)?,
+        Commands::Repo { action } => cli::watch::handle_repo(&action)?,
         Commands::Daemon { port } => cli::misc::handle_daemon(port)?,
         Commands::DaemonSpawn { port } => cli::misc::handle_daemon_spawn(port)?,
         Commands::DaemonStop => cli::misc::handle_daemon_stop()?,

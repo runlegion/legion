@@ -257,6 +257,16 @@ case "${1:-}" in
       fi
     fi
     ;;
+  repo)
+    # `repo resolve --cwd DIR` (#1479): prelude.sh asks the binary for the
+    # repo. The stub answers FAKE_REPO_RESOLVE when set, else DIR's basename,
+    # so a harness about what a hook DOES with its repo can name one by its
+    # cwd. The real resolution (watch.toml only) is tested against the real
+    # binary in test-lib.sh.
+    if [ "${2:-}" = "resolve" ] && [ "${3:-}" = "--cwd" ]; then
+      printf '%s\n' "${FAKE_REPO_RESOLVE:-$(basename "${4:-}")}"
+    fi
+    ;;
   watch)
     if [ "${2:-}" = "list" ]; then
       printf '%s\n' "${FAKE_WATCH:-}"
