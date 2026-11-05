@@ -34,7 +34,7 @@
 #      a directed ask is open -- a check that does not depend on read
 #      order at all, which is why it is the backstop, not (1).
 #
-# Wired into UserPromptSubmit, PostToolUse (alongside mark-work.sh), and
+# Wired into UserPromptSubmit, PostToolUse, and
 # Stop -- three points in a turn where surfacing a mid-session post is
 # cheap. PostToolUse fires on every tool call, so this debounces via a
 # per-session last-delivery-time sentinel under

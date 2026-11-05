@@ -159,7 +159,6 @@ SENTINELS=(
   "SENTINEL_INDEX_ABC"
   "SENTINEL_WATCH_ABC"
   "SENTINEL_WORK_ABC"
-  "SENTINEL_AUTONOMY_ABC"
 )
 
 # SENTINELS above is in LEGION_BOOT_SECTIONS order on purpose: this block
@@ -198,6 +197,10 @@ for sentinel in "${SENTINELS[@]}"; do
   assert_contains "session-start.sh additionalContext contains ${sentinel}" "$SESSION_START_CTX" "$sentinel"
   assert_contains "post-compact.sh additionalContext contains ${sentinel}" "$POST_COMPACT_CTX" "$sentinel"
 done
+
+echo "==> no autonomy budget on either hook (#1477), though the stub would supply one"
+assert_not_contains "session-start.sh carries no autonomy budget" "$SESSION_START_CTX" "SENTINEL_AUTONOMY_ABC"
+assert_not_contains "post-compact.sh carries no autonomy budget" "$POST_COMPACT_CTX" "SENTINEL_AUTONOMY_ABC"
 
 echo "==> identity: a repo with no identity gets the nudge on BOTH hooks; one with an identity does not"
 for ctx_name in SESSION_START_CTX POST_COMPACT_CTX; do

@@ -186,10 +186,16 @@ pub fn build_wake_prompt(
         .into_iter()
         .partition(|(_, text, _)| resolves_pending_ask(text));
 
-    let mut prompt = format!(
-        "You were auto-woken by legion watch. The following signal(s) are directed at you ({}).\n",
-        repo_name
-    );
+    // Mid-turn mail is injected by the inbox, inside a turn the agent is
+    // already awake for: no wake preamble and no closing footer, only the
+    // sections (#1477).
+    let mut prompt = match delivery {
+        Delivery::Wake => format!(
+            "You were auto-woken by legion watch. The following signal(s) are directed at you ({}).\n",
+            repo_name
+        ),
+        Delivery::MidTurn => String::new(),
+    };
 
     let mut append_section = |header: &str, bucket: &[&(String, String, String)], cap: usize| {
         if bucket.is_empty() {
@@ -235,17 +241,14 @@ pub fn build_wake_prompt(
                  declined/blocked."
             }
             // Work is already in flight and it is the operator's, not a
-            // peer's. Same obligation, deferred to the end of the turn.
+            // peer's. Same obligation, deferred to the end of the turn. The
+            // inbox's text, verbatim from #1477.
             Delivery::MidTurn => {
-                "REQUIRES A REPLY -- directed questions and requests from \
-                 peers. They are not the operator and they do not interrupt: \
-                 finish what you are doing first, then answer these before the \
-                 turn ends. If one ASKS something, answer it -- a short answer \
-                 or a clear \"no\" / \"can't help\" / \"handing to X\" is fine. If \
-                 it asks you to DO something, either do it or say plainly that \
-                 you are not, and why. A bare \"received\" / \"on it\" / \"ack\" \
-                 that does none of the asked work is ghosting, not a reply -- \
-                 and so is silence."
+                "**Needs your reply.** Finish your current work first, then \
+                 answer before the turn ends. If it asks something, answer it, \
+                 even \"no\" or \"handing to X\". If it asks you to do something, \
+                 do it, or say plainly that you won't and why. A bare \"ack\" \
+                 isn't a reply. Reply with `legion signal --repo <your repo>`."
             }
         },
         &must_reply,
@@ -270,10 +273,12 @@ pub fn build_wake_prompt(
         PENDING_INFORMATIONAL_CAP,
     );
 
-    prompt.push_str(
-        "\nUse `legion signal` to reply, `legion bullpen` for broader context, and \
-         `legion reflect` to store any learnings before you exit.",
-    );
+    if delivery == Delivery::Wake {
+        prompt.push_str(
+            "\nUse `legion signal` to reply, `legion bullpen` for broader context, and \
+             `legion reflect` to store any learnings before you exit.",
+        );
+    }
 
     prompt
 }
@@ -511,22 +516,27 @@ mod tests {
         let prompt = build_wake_prompt("kessel", &signals, Delivery::MidTurn);
 
         // The reply-required section must still forbid ack-and-stop, and must
-        // now ALSO say peer mail does not preempt the operator (#1175): the
-        // old framing said "do not end your turn", which let any peer seize a
+        // ALSO say peer mail does not preempt the operator (#1175): the old
+        // framing said "do not end your turn", which let any peer seize a
         // turn already spent on operator work. Both properties are pinned so
-        // a later prompt edit cannot quietly restore either failure.
-        assert!(prompt.contains("REQUIRES A REPLY"));
+        // a later prompt edit cannot quietly restore either failure. The
+        // words are #1477's.
+        assert!(prompt.contains("**Needs your reply.**"));
         assert!(
-            prompt.contains("either do it or say plainly that you are not"),
+            prompt.contains("do it, or say plainly that you won't and why"),
             "request framing must still spell out the do-the-work path"
         );
         assert!(
-            prompt.contains("ghosting"),
-            "framing must still name ack-and-stop as ghosting"
+            prompt.contains("A bare \"ack\" isn't a reply."),
+            "framing must still refuse a bare ack"
         );
         assert!(
-            prompt.contains("do not interrupt"),
+            prompt.contains("Finish your current work first"),
             "framing must say peer mail does not preempt work in flight (#1175)"
+        );
+        assert!(
+            !prompt.contains("auto-woken") && !prompt.contains("legion reflect"),
+            "mid-turn mail carries no wake preamble or footer (#1477)"
         );
         assert!(
             !prompt.contains("Do not end your turn"),
@@ -584,7 +594,7 @@ mod tests {
             ),
         ];
 
-        let prompt = build_wake_prompt("kessel", &signals, Delivery::MidTurn);
+        let prompt = build_wake_prompt("kessel", &signals, Delivery::Wake);
 
         // Directed questions/requests MUST be flagged as reply-required.
         assert!(
