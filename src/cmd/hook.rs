@@ -1010,30 +1010,23 @@ pub(crate) fn configured_policy_path() -> Option<PathBuf> {
 }
 
 /// The repo a recall lookup is scoped to (see the module doc). `LEGION_REPO`
-/// when set and non-empty, else the name derived from `cwd`; `None` when
-/// neither yields a name that passes [`is_safe_repo_name`]. An unsafe
-/// `LEGION_REPO` is `None`, not a fall-through to `cwd`: an explicit override
-/// that fails validation is a misconfiguration, not a hint.
+/// when set and non-empty, else the registered repo `cwd` lies in (#1479);
+/// `None` when neither yields a name that passes [`is_safe_repo_name`]. An
+/// unsafe `LEGION_REPO` is `None`, not a fall-through to `cwd`: an explicit
+/// override that fails validation is a misconfiguration, not a hint.
 pub(crate) fn repo_for(legion_repo: Option<&str>, cwd: Option<&str>) -> Option<String> {
     let candidate: Option<String> = match legion_repo.filter(|value| !value.is_empty()) {
         Some(value) => Some(value.to_string()),
-        None => cwd.and_then(repo_name_from_cwd),
+        None => cwd.and_then(registered_repo_of),
     };
     candidate.filter(|name| is_safe_repo_name(name))
 }
 
-/// The main checkout's directory name for `cwd`, following
-/// `prelude.sh`'s `legion_hook_parse`: the parent of `git rev-parse
-/// --git-common-dir` when it holds a `.git` (a linked worktree resolves to
-/// its primary; a submodule's common dir sits under `.git/modules` and fails
-/// the check), else `cwd`'s own basename.
-fn repo_name_from_cwd(cwd: &str) -> Option<String> {
-    let path = Path::new(cwd);
-    let root: PathBuf = crate::inventory::git_common_dir(path)
-        .and_then(|common| common.parent().map(Path::to_path_buf))
-        .filter(|root| root.join(".git").exists())
-        .unwrap_or_else(|| path.to_path_buf());
-    root.file_name()?.to_str().map(str::to_string)
+/// The registered repo `cwd` lies in, by watch.toml; never a directory name.
+fn registered_repo_of(cwd: &str) -> Option<String> {
+    let watch_toml = crate::data_dir().ok()?.join("watch.toml");
+    let repos = crate::watch::list_repos_in_config(&watch_toml).ok()?;
+    crate::watch::registered_repo_for(&repos, Path::new(cwd))
 }
 
 /// True when `name` is a plain repo name: ASCII letters, digits, `-`, `_`,
@@ -1932,7 +1925,7 @@ mod tests {
             Ok(confirm_policy()),
             Arc::new(StubLookups(Lookup::Empty)),
             store.clone(),
-            None,
+            Some("legion".to_string()),
             no_answers(),
             TEST_DEADLINE,
         )
@@ -2304,7 +2297,7 @@ mod tests {
             Ok(POLICY.to_string()),
             Arc::new(FailingLookups),
             temp_store(),
-            None,
+            Some("legion".to_string()),
             no_answers(),
             TEST_DEADLINE,
         )
@@ -2318,10 +2311,16 @@ mod tests {
     fn a_fetched_lookup_reaches_route_and_the_rule_decides() {
         // With both lookups fetched, the rule's own deny fires -- proof the
         // results are wired into `Context`, not fetched and dropped.
-        let response = respond_stub(
+        let response = respond_with(
             &fetch_payload("https://example.com", Some(REPO_CWD)),
-            POLICY,
-        );
+            Ok(POLICY.to_string()),
+            Arc::new(StubLookups(Lookup::Empty)),
+            temp_store(),
+            Some("legion".to_string()),
+            no_answers(),
+            TEST_DEADLINE,
+        )
+        .response;
         assert_denied(&response);
         assert_eq!(
             reason(&response),
@@ -2345,7 +2344,7 @@ mod tests {
             Ok(POLICY.to_string()),
             lookups.clone(),
             temp_store(),
-            None,
+            Some("legion".to_string()),
             no_answers(),
             TEST_DEADLINE,
         )
@@ -2408,7 +2407,7 @@ mod tests {
             Ok(POLICY.to_string()),
             lookups,
             temp_store(),
-            None,
+            Some("legion".to_string()),
             no_answers(),
             ROUTE_DEADLINE,
         )
@@ -2448,8 +2447,8 @@ mod tests {
     }
 
     #[test]
-    fn a_cwd_outside_git_falls_back_to_its_basename() {
-        assert_eq!(repo_for(None, Some(REPO_CWD)), Some("legion".to_string()));
+    fn an_unregistered_cwd_names_no_repo_not_its_basename() {
+        assert_eq!(repo_for(None, Some(REPO_CWD)), None);
         assert_eq!(repo_for(None, None), None);
     }
 
@@ -2490,45 +2489,6 @@ mod tests {
         .response;
         assert_denied(&response);
         assert!(lookups.calls().is_empty());
-    }
-
-    #[test]
-    fn a_worktree_cwd_names_the_main_checkout_not_the_worktree() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let repo_dir = dir.path().join("main-repo");
-        std::fs::create_dir_all(&repo_dir).expect("mkdir");
-        let config = dir.path().join("empty.gitconfig");
-        std::fs::write(&config, "").expect("write config");
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .current_dir(&repo_dir)
-                .env("GIT_CONFIG_GLOBAL", &config)
-                .env("GIT_CONFIG_SYSTEM", &config)
-                .args([
-                    "-c",
-                    "user.name=t",
-                    "-c",
-                    "user.email=t@example.invalid",
-                    "-c",
-                    "commit.gpgsign=false",
-                ])
-                .args(args)
-                .output()
-                .expect("git spawns");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        git(&["init", "-q"]);
-        git(&["commit", "--allow-empty", "-q", "-m", "initial"]);
-        git(&["worktree", "add", "-q", "wt", "-b", "feature"]);
-        let worktree = repo_dir.join("wt");
-        assert_eq!(
-            repo_for(None, worktree.to_str()),
-            Some("main-repo".to_string())
-        );
     }
 
     // -- quoting -----------------------------------------------------------------

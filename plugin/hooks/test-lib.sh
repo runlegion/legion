@@ -3,7 +3,7 @@
 #
 # Covers the contracts every hook now leans on:
 # - stdin parse into INPUT/CWD/TOOL/SESSION_ID/REPO
-# - repo identity precedence: LEGION_REPO env over basename(cwd), uniformly
+# - repo identity precedence: LEGION_REPO env over `legion repo resolve`, uniformly
 # - binary resolution: LEGION_BIN override > plugin-root copy > PATH
 # - legion_hash_str byte-compatibility with the historical echo|md5 markers
 # - the four emit shapes (allow/deny/block/context)
@@ -35,57 +35,46 @@ echo "==> legion_hook_parse extracts the common fields"
 out=$(run_parse '{"cwd":"/tmp/myrepo","tool_name":"Grep","session_id":"s1"}')
 assert_eq "cwd/tool/session/repo extracted" "$out" "/tmp/myrepo|Grep|s1|myrepo"
 
-echo "==> repo precedence: LEGION_REPO overrides basename(cwd)"
+echo "==> repo precedence: LEGION_REPO overrides the resolved repo"
 out=$(run_parse '{"cwd":"/tmp/myrepo","tool_name":"Grep","session_id":"s1"}' LEGION_REPO=other-repo)
-assert_eq "LEGION_REPO wins over basename" "$out" "/tmp/myrepo|Grep|s1|other-repo"
+assert_eq "LEGION_REPO wins over the resolved repo" "$out" "/tmp/myrepo|Grep|s1|other-repo"
 
 echo "==> missing cwd leaves repo empty (no basename guessing)"
 out=$(run_parse '{"tool_name":"Grep","session_id":"s1"}')
 assert_eq "no cwd -> empty repo" "$out" "|Grep|s1|"
 
-echo "==> a git worktree resolves to the PARENT repo, not the worktree directory name"
-# A worktree's basename is its own label -- for an agent worktree that is
-# `agent-a2a0...`, a name legion has never heard of. Taking it verbatim made
-# the Stop nudge tell agents to `legion reflect --repo agent-a2a0...`, and
-# coverage/recall queried a repo with no rows. --git-common-dir points at the
-# ORIGINAL repo's .git from inside a worktree, so its parent is the real root.
-wt_root="$WORK/wt-origin"
-mkdir -p "$wt_root"
-git -C "$wt_root" init -q 2>/dev/null
-git -C "$wt_root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
-git -C "$wt_root" worktree add -q "$WORK/agent-deadbeef" -b probe-branch 2>/dev/null
-out=$(run_parse "{\"cwd\":\"$WORK/agent-deadbeef\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
-assert_eq "worktree resolves to the parent repo name" "${out##*|}" "wt-origin"
-
-echo "==> a plain checkout still resolves to its own basename"
-out=$(run_parse "{\"cwd\":\"$wt_root\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
-assert_eq "normal repo unchanged" "${out##*|}" "wt-origin"
-
-echo "==> a submodule falls back to its own name, never the literal 'modules'"
-# Inside a submodule, --git-common-dir is <super>/.git/modules/<name>, so
-# dirname is <super>/.git/modules and its basename is the literal string
-# "modules" -- a name that matches no repo, and WORSE than the basename it
-# replaced. `[ -d ]` does not catch it because .git/modules really is a
-# directory; requiring a .git INSIDE the resolved root does. Found by review,
-# verified against a real submodule rather than reasoned about.
-sm_root="$WORK/sm"
-mkdir -p "$sm_root"
-git -C "$sm_root" init -q super 2>/dev/null
-git -C "$sm_root" init -q subm 2>/dev/null
-git -C "$sm_root/subm" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
-git -C "$sm_root/super" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
-git -C "$sm_root/super" -c protocol.file.allow=always submodule add -q ../subm subm 2>/dev/null
-if [ -e "$sm_root/super/subm/.git" ]; then
-  out=$(run_parse "{\"cwd\":\"$sm_root/super/subm\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
-  assert_eq "submodule resolves to its own dir name" "${out##*|}" "subm"
+echo "==> repo identity comes from the real binary's watch.toml, never a basename (#1479)"
+# The stub answers `repo resolve` from its cwd; these checks drive the real
+# binary so the rule itself is what is tested: a registered checkout and its
+# worktrees name the registered repo, anything else names `unregistered`.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REAL_LEGION="${LEGION_CMD_TEST_BIN:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}/debug/legion}"
+if [ -x "$REAL_LEGION" ]; then
+  reg_data="$WORK/reg-data"
+  reg_root="$WORK/checkout-dir"
+  mkdir -p "$reg_data" "$reg_root" "$WORK/plain-dir"
+  git -C "$reg_root" init -q 2>/dev/null
+  git -C "$reg_root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  git -C "$reg_root" worktree add -q "$WORK/agent-deadbeef" -b probe-branch 2>/dev/null
+  printf '[[repos]]\nname = "registered-name"\nworkdir = "%s"\n' "$reg_root" > "$reg_data/watch.toml"
+  real_parse() {
+    run_parse "{\"cwd\":\"$1\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}" \
+      LEGION_BIN="$REAL_LEGION" LEGION_DATA_DIR="$reg_data"
+  }
+  out=$(real_parse "$reg_root")
+  assert_eq "a registered checkout names its registered repo" "${out##*|}" "registered-name"
+  out=$(real_parse "$WORK/agent-deadbeef")
+  assert_eq "its worktree names the same registered repo" "${out##*|}" "registered-name"
+  out=$(real_parse "$WORK/plain-dir")
+  assert_eq "an unregistered dir names unregistered, not its basename" "${out##*|}" "unregistered"
 else
-  echo "  SKIP: submodule fixture unavailable in this environment"
+  echo "  FAIL: no legion build at $REAL_LEGION (run cargo build, or set LEGION_CMD_TEST_BIN)" >&2
+  FAIL=$((FAIL + 1))
 fi
 
-echo "==> a non-git directory still falls back to basename (fail-open)"
-mkdir -p "$WORK/plain-dir"
-out=$(run_parse "{\"cwd\":\"$WORK/plain-dir\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}")
-assert_eq "non-repo falls back to basename" "${out##*|}" "plain-dir"
+echo "==> no resolvable binary leaves repo empty (fail-open, no guessing)"
+out=$(run_parse '{"cwd":"/tmp/myrepo","tool_name":"Grep","session_id":"s1"}' LEGION_BIN=/nonexistent/legion)
+assert_eq "no binary -> empty repo" "${out##*|}" ""
 
 echo "==> empty stdin returns 1 from legion_hook_parse"
 printf '' | bash -c "source '$PRELUDE'; legion_hook_parse"

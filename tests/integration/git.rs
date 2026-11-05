@@ -865,7 +865,7 @@ fn git_audit_agent_comes_from_legion_repo() {
 }
 
 /// Without `LEGION_REPO`, run from a linked worktree, rows name the main
-/// repository, not the worktree's directory.
+/// checkout's registered repo, not either directory's name (#1479).
 #[cfg(unix)]
 #[test]
 fn git_audit_agent_from_a_worktree_names_the_main_repository() {
@@ -883,6 +883,7 @@ fn git_audit_agent_from_a_worktree_names_the_main_repository() {
     );
     std::fs::write(linked.join("more.txt"), "more\n").unwrap();
     let data = tempfile::tempdir().unwrap();
+    seed_watch_toml(data.path(), &[("registered-main", &main_repo)]);
 
     let git_in_linked = |args: &[&str]| {
         let mut cmd = legion_git_in(data.path(), &linked);
@@ -896,6 +897,6 @@ fn git_audit_agent_from_a_worktree_names_the_main_repository() {
     let rows = audit_rows(data.path());
     assert_eq!(rows.len(), 3, "{rows:#?}");
     for row in &rows {
-        assert_eq!(row["agent"], "mainrepo", "{row:#}");
+        assert_eq!(row["agent"], "registered-main", "{row:#}");
     }
 }

@@ -28,6 +28,7 @@ mod mesh;
 mod module_graph;
 mod prose_stdin;
 mod push;
+mod repo_identity;
 mod sym_freshness;
 mod sym_tree;
 mod uncertainty;

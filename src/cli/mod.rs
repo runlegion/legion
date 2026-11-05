@@ -41,7 +41,7 @@ use self::ops::{ClusterAction, MeshAction, TelemetryAction, UncertaintyAction};
 use self::pr::PrAction;
 use self::schedule::ScheduleAction;
 use self::verify::QualityGateAction;
-use self::watch::WatchAction;
+use self::watch::{RepoAction, WatchAction};
 
 /// `legion --version` output, including the build id (#698) so the value
 /// matches what the daemon reports at /health. The semver version stays the
@@ -68,6 +68,64 @@ pub(crate) struct Cli {
 
     #[command(subcommand)]
     pub(crate) command: Commands,
+}
+
+impl Cli {
+    /// Parse argv with the repo identity rules (#1479): every `--repo`
+    /// accepts the short name or `owner/repo`, and a `--repo` that is
+    /// required defaults to the registered repo of the working directory.
+    /// Outside a registered repo a missing required `--repo` stops the
+    /// command and says how to name or register one. The working directory
+    /// is looked up only when a required `--repo` is missing, so every other
+    /// invocation reads no watch.toml and touches no data dir.
+    pub(crate) fn parse_with_registered_repo() -> Self {
+        let err = match Self::try_parse_with(None) {
+            Ok(cli) => return cli,
+            Err(err) => err,
+        };
+        let missing_repo = err.kind() == clap::error::ErrorKind::MissingRequiredArgument
+            && err.to_string().contains("--repo");
+        if !missing_repo {
+            err.exit()
+        }
+        if let Some(name) = crate::watch::registered_repo_for_cwd() {
+            // One leak per process: clap's default value must be 'static.
+            let name: &'static str = Box::leak(name.into_boxed_str());
+            return Self::try_parse_with(Some(name)).unwrap_or_else(|err| err.exit());
+        }
+        let _ = err.print();
+        eprintln!(
+            "\nThis directory is not in a registered repo. {}",
+            util::REGISTER_HINT
+        );
+        std::process::exit(2);
+    }
+
+    /// Parse argv with every `--repo` accepting `owner/repo`, and, when
+    /// `registered` names a repo, each required `--repo` defaulting to it.
+    fn try_parse_with(registered: Option<&'static str>) -> Result<Self, clap::Error> {
+        use clap::{CommandFactory, FromArgMatches};
+        with_repo_rules(Self::command(), registered)
+            .try_get_matches()
+            .and_then(|matches| Self::from_arg_matches(&matches))
+    }
+}
+
+/// Apply the repo identity rules to every `--repo` of `command` and its
+/// subcommands (see [`Cli::parse_with_registered_repo`]).
+fn with_repo_rules(command: clap::Command, registered: Option<&'static str>) -> clap::Command {
+    command
+        .mut_args(|arg| {
+            if arg.get_long() != Some("repo") {
+                return arg;
+            }
+            let arg = arg.value_parser(|value: &str| crate::watch::resolve_repo_arg(value));
+            match registered {
+                Some(name) if arg.is_required_set() => arg.required(false).default_value(name),
+                _ => arg,
+            }
+        })
+        .mut_subcommands(|sub| with_repo_rules(sub, registered))
 }
 
 #[derive(Subcommand)]
@@ -410,8 +468,9 @@ pub(crate) enum Commands {
     /// optional structure for RFC-shaped asks. For a one-line ask, just
     /// `--verb question --note "..."` is enough.
     Signal {
-        /// Repository name (identifies the sender)
-        #[arg(long)]
+        /// Repository name (identifies the sender). Defaults to the registered
+        /// repo of the working directory; required outside one (#1479).
+        #[arg(long, required = true)]
         repo: Vec<String>,
 
         /// Recipient agent name (or "all")
@@ -1051,6 +1110,12 @@ pub(crate) enum Commands {
     Watch {
         #[command(subcommand)]
         action: Option<WatchAction>,
+    },
+
+    /// Repo identity (#1479): which registered repo a directory belongs to
+    Repo {
+        #[command(subcommand)]
+        action: RepoAction,
     },
 
     /// Start the legion daemon (channel + watch)

@@ -17,6 +17,25 @@ pub fn legion_cmd(data_dir: &Path) -> Command {
     cmd
 }
 
+/// `legion_cmd` run from `checkout`, with `checkout` registered in
+/// `data_dir`'s watch.toml under its own directory name (once). A gate
+/// record's repo key is the registered repo of the working directory
+/// (#1479), so a fixture checkout must be registered to record one.
+pub fn legion_cmd_in(data_dir: &Path, checkout: &Path) -> Command {
+    let already = std::fs::read_to_string(data_dir.join("watch.toml"))
+        .is_ok_and(|toml| toml.contains(&checkout.display().to_string().replace('\\', "/")));
+    if !already {
+        let name = checkout
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("checkout name");
+        seed_watch_toml(data_dir, &[(name, checkout)]);
+    }
+    let mut cmd = legion_cmd(data_dir);
+    cmd.current_dir(checkout);
+    cmd
+}
+
 /// A variant of `legion_cmd` that also overrides the home directory so the
 /// usage command reads sessions from the tempdir instead of the real
 /// `~/.claude/projects/`.

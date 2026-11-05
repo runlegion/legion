@@ -8,6 +8,39 @@ use crate::cli::util::open_db;
 use crate::{db, error, watch};
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum RepoAction {
+    /// Print the repo that writes from `--cwd` are filed under: the registered
+    /// repo the directory lies in, else the repo whose session lock `--pid`
+    /// holds, else `unregistered`. Never a name taken from the directory.
+    Resolve {
+        /// The directory to resolve.
+        #[arg(long)]
+        cwd: std::path::PathBuf,
+
+        /// The session process id (the one `legion watch session-start`
+        /// recorded), for a directory outside every registered repo.
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+}
+
+/// `legion repo` (#1479).
+pub(crate) fn handle_repo(action: &RepoAction) -> error::Result<()> {
+    let RepoAction::Resolve { cwd, pid } = action;
+    let base = data_dir()?;
+    let repos = watch::list_repos_in_config(&base.join("watch.toml"))?;
+    let repo = watch::registered_repo_for(&repos, cwd)
+        .or_else(|| {
+            let locks =
+                watch::SessionLockTracker::new(&base, watch::default_session_lock_ttl_secs());
+            pid.and_then(|pid| locks.repo_for_session_pid(pid))
+        })
+        .unwrap_or_else(|| watch::UNREGISTERED_REPO.to_string());
+    println!("{repo}");
+    Ok(())
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum WatchAction {
     /// Add a working directory to watch.toml (idempotent by canonicalized path)
     Add {

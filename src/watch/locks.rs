@@ -260,6 +260,21 @@ impl SessionLockTracker {
         Ok(())
     }
 
+    /// The repo whose interactive-session lock `pid` holds (#1479): the
+    /// session's registered repo, as `legion watch session-start` recorded it.
+    pub fn repo_for_session_pid(&self, pid: u32) -> Option<String> {
+        std::fs::read_dir(&self.lock_dir)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "session"))
+            .find(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|contents| contents.trim().parse::<u32>() == Ok(pid))
+            })
+            .and_then(|path| path.file_stem()?.to_str().map(str::to_string))
+    }
+
     /// Delete the interactive-session lock for `repo`.
     ///
     /// Idempotent: a missing file is not an error. Removes only the
