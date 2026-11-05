@@ -67,6 +67,15 @@ if [ -x "$REAL_LEGION" ]; then
   assert_eq "its worktree names the same registered repo" "${out##*|}" "registered-name"
   out=$(real_parse "$WORK/plain-dir")
   assert_eq "an unregistered dir names unregistered, not its basename" "${out##*|}" "unregistered"
+  # A malformed watch.toml makes `repo resolve` fail (exit 1), which is not
+  # the older-binary case: no name is guessed, the write files under
+  # `unregistered`.
+  bad_data="$WORK/bad-data"
+  mkdir -p "$bad_data"
+  printf 'this is [not toml\n' > "$bad_data/watch.toml"
+  out=$(run_parse "{\"cwd\":\"$reg_root\",\"tool_name\":\"Grep\",\"session_id\":\"s1\"}" \
+    LEGION_BIN="$REAL_LEGION" LEGION_DATA_DIR="$bad_data")
+  assert_eq "a malformed watch.toml names unregistered, not the legacy name" "${out##*|}" "unregistered"
 else
   echo "  FAIL: no legion build at $REAL_LEGION (run cargo build, or set LEGION_CMD_TEST_BIN)" >&2
   FAIL=$((FAIL + 1))

@@ -81,7 +81,8 @@ pub(crate) enum WatchAction {
     /// (no TTL) because an idle interactive session must still hold the gate.
     /// Non-fatal and fast -- hook failure never blocks Claude Code startup.
     SessionStart {
-        /// Repo name to lock (basename of the working directory).
+        /// Repo name to lock: the registered repo the hook resolved with
+        /// `legion repo resolve` (#1479).
         #[arg(long)]
         repo: String,
 

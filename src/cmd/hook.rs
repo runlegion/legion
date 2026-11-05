@@ -94,9 +94,10 @@
 //! # The repo
 //!
 //! `Context::repo` is derived once, in [`repo_for`], and validated there:
-//! `LEGION_REPO` when set, else the main checkout's directory name for the
-//! payload's `cwd` (a linked worktree's own folder name is never the repo),
-//! else `cwd`'s basename -- and whatever that yields must be a plain name
+//! `LEGION_REPO` when set, else the registered repo the payload's `cwd` lies
+//! in by watch.toml (a linked worktree maps to its main checkout's repo; no
+//! name is ever taken from a directory, #1479), else `None` -- and whatever
+//! that yields must be a plain name
 //! (ASCII letters, digits, `-`, `_`, `.`, not starting with `.`) or it is
 //! `None`. `cwd` is attacker-shaped input; a name that fails validation is
 //! not a repo, and no consumer re-validates or re-sanitizes it. Nothing in

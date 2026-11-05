@@ -184,15 +184,22 @@ legion_hook_parse() {
     # the binary answers from watch.toml -- the registered repo CWD (or its
     # main checkout, for a worktree) lies in, else the repo this session's
     # lock names, else the fixed `unregistered`. The shell never reads
-    # watch.toml. Only a binary that cannot answer (none resolved, or one
-    # older than `repo resolve`) falls back to the legacy derivation, so a
-    # plugin that updates before its binary does not silence every hook.
+    # watch.toml. Only a binary without the subcommand falls back to the
+    # legacy derivation, so a plugin that updates before its binary does
+    # not silence every hook: an older binary rejects `repo` the way clap
+    # rejects any unknown subcommand, with exit 2, and so does no binary at
+    # all. Any other failure (a malformed watch.toml, say) is not a reason
+    # to guess a name, so it files under `unregistered`.
+    local resolve_rc=2
     REPO=""
     if [ -x "$LEGION" ]; then
-      REPO=$("$LEGION" repo resolve --cwd "$CWD" --pid "$(legion_session_pid)" 2>/dev/null) || REPO=""
+      REPO=$("$LEGION" repo resolve --cwd "$CWD" --pid "$(legion_session_pid)" 2>/dev/null)
+      resolve_rc=$?
     fi
-    if [ -z "$REPO" ]; then
+    if [ "$resolve_rc" -eq 2 ]; then
       REPO=$(legion_legacy_repo "$CWD")
+    elif [ "$resolve_rc" -ne 0 ] || [ -z "$REPO" ]; then
+      REPO="unregistered"
     fi
   fi
   return 0
