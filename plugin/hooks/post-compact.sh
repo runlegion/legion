@@ -3,7 +3,7 @@
 # The compaction summary is STALE. This hook provides ground truth.
 #
 # The core banner (identity, operating contract, pending replies,
-# checkpoint, index status, watch status, current work, autonomy budget)
+# checkpoint, index status, watch status, current work)
 # is assembled by lib/boot-sections.sh (#879) via emit_boot_core -- the SAME driver
 # session-start.sh calls. Before #879 this hook emitted only a standalone
 # checkpoint block, so compaction silently dropped identity, the operating
@@ -35,12 +35,6 @@ legion_hook_parse || exit 0
 if [ -z "$CWD" ]; then
   exit 0
 fi
-
-CWD_HASH=$(legion_hash_str "$CWD")
-
-# Clean up stop-hook marker so reflect prompt fires fresh
-MARKER="/tmp/legion-reflected-${CWD_HASH}"
-rm -f "$MARKER" 2>/dev/null
 
 OUTPUT="[Legion] POST-COMPACTION RE-ORIENTATION
 IMPORTANT: You just compacted. The compaction summary may be stale or incomplete.
@@ -98,7 +92,7 @@ fi
 # `/legion:surface` renders all four in full, on demand.
 #
 # Core banner: identity, operating contract, pending replies, checkpoint,
-# index status, current work, autonomy budget (#879). This is the same
+# index status, current work (#879). This is the same
 # emit_boot_core call session-start.sh makes -- the checkpoint reflection
 # that used to get its own "LEGION CHECKPOINT (stored before compaction)"
 # wrapper here now rides inside this block like every other session, and

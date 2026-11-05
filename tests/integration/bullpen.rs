@@ -348,7 +348,7 @@ fn pending_replies_emits_wake_prompt_for_request_signals() {
          post-compact, so it must carry the stronger framing, got: {stdout}"
     );
     assert!(
-        !stdout.contains("they do not interrupt"),
+        !stdout.contains("**Needs your reply.**"),
         "the mid-turn deferring framing must not reach a boot/post-compact reader, \
          which has no work in flight to defer to, got: {stdout}"
     );

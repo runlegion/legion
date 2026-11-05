@@ -250,20 +250,13 @@ boot_section_work() {
   fi
 }
 
-# Autonomy budget (#524) -- remind the agent it has sanctioned units to
-# spend on self-directed work, so it acts on the board instead of waiting to
-# be told.
-boot_section_budget() {
-  "$LEGION" autonomy status --repo "$REPO" --banner 2>>"$LOG"
-}
-
 # The canonical order (#338: "identity before work" -- pending-replies
 # prepended in front of identity drowned the banner under 100KB of
 # REQUIRES A REPLY framing on rafters' rich-identity startup, and the agent
 # defaulted to generic Claude prose instead of reading its identity chain).
 # This array is now the ONLY place section order is decided -- it used to
 # be re-derived independently by each hook's comment numbering.
-LEGION_BOOT_SECTIONS=(now identity whatami pending checkpoint index watch work budget)
+LEGION_BOOT_SECTIONS=(now identity whatami pending checkpoint index watch work)
 
 # emit_boot_core -- render every section in LEGION_BOOT_SECTIONS, in order,
 # skipping empty ones, and print the joined result. No arguments. No
