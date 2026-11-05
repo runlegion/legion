@@ -265,6 +265,11 @@ impl VerifyDecision {
 ///    - observable-behavior language ("returns", "panics", "output", "exits",
 ///      "prints", "emits", "displays")
 ///
+/// A no-warnings criterion (#1481) is the exception: the only evidence that
+/// proves it is a CI run on the verified head that built with warnings as
+/// errors and succeeded (`proves_no_warnings_by_ci`); anything else is
+/// vacuous for it.
+///
 /// The heuristic is intentionally narrow and conservative: false-negatives
 /// (letting a weak-but-real citation through) are acceptable. False-positives
 /// (flagging real evidence as vacuous) are not. Where the heuristic cannot
@@ -282,6 +287,10 @@ fn is_vacuous_evidence(criterion: &str, evidence: &str) -> bool {
 
     let ev_lower: String = ev.to_lowercase();
     let crit_lower: String = criterion.trim().to_lowercase();
+
+    if crit_lower.contains("no warning") || crit_lower.contains("without warning") {
+        return !proves_no_warnings_by_ci(&ev_lower);
+    }
 
     // Condition 1: evidence is a substring of the criterion (restatement).
     if !crit_lower.is_empty() && crit_lower.contains(ev_lower.as_str()) {
@@ -304,6 +313,26 @@ fn is_vacuous_evidence(criterion: &str, evidence: &str) -> bool {
         || has_file_line_ref(ev);
 
     !has_marker
+}
+
+/// True when lowercased evidence names a CI run, the head it ran on (a commit
+/// hash: 7 to 40 hex characters with at least one letter, so a numeric run id
+/// never stands in for it), a warnings-as-errors build, and success (#1481).
+fn proves_no_warnings_by_ci(ev_lower: &str) -> bool {
+    let names_head = ev_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|t| {
+            (7..=40).contains(&t.len())
+                && t.chars().all(|c| c.is_ascii_hexdigit())
+                && t.chars().any(|c| c.is_ascii_alphabetic())
+        });
+    let warnings_as_errors = ["-d warnings", "deny(warnings)", "warnings as errors"]
+        .iter()
+        .any(|m| ev_lower.contains(m));
+    let succeeded = ["success", "succeeded", "green", "passed"]
+        .iter()
+        .any(|m| ev_lower.contains(m));
+    ev_lower.contains("ci run") && names_head && warnings_as_errors && succeeded
 }
 
 /// True when the string contains a colon followed immediately by at least one
@@ -623,6 +652,56 @@ mod tests {
             decide(&ac, &results),
             VerifyDecision::Incomplete { unaddressed: 2 }
         );
+    }
+
+    // --- #1481: a green CI run proves a no-warnings criterion ---
+
+    const NO_WARNINGS: &str = "The workspace builds with no warnings.";
+
+    fn no_warnings_decision(evidence: &str) -> VerifyDecision {
+        decide(
+            &[NO_WARNINGS.to_owned()],
+            &[res(NO_WARNINGS, AcVerdict::Pass, evidence)],
+        )
+    }
+
+    #[test]
+    fn green_warnings_as_errors_ci_run_on_head_proves_no_warnings() {
+        // Verbatim evidence from rannoch #206 and #213, both recorded uncertain.
+        for evidence in [
+            "CI run 42093029057 at f9146ff: RUSTFLAGS=-D warnings, cargo fmt --check, cargo \
+             clippy --workspace --all-targets --all-features, cargo nextest run --workspace all \
+             green on check and three platform jobs.",
+            "CI run 42105551115 on head 5f70c42: check and platforms (ubuntu, macos, windows) \
+             all SUCCESS; job runs cargo clippy --workspace --all-targets --all-features under \
+             RUSTFLAGS=-D warnings; 94 tests passed under nextest.",
+        ] {
+            assert_eq!(
+                no_warnings_decision(evidence),
+                VerifyDecision::Proceed,
+                "{evidence}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_warnings_without_such_a_ci_run_stays_uncertain() {
+        let uncertain = VerifyDecision::NeedsInput {
+            uncertain: vec![NO_WARNINGS.to_owned()],
+        };
+        for evidence in [
+            // failed
+            "CI run 42093029057 at f9146ff: RUSTFLAGS=-D warnings, clippy failed.",
+            // no warnings-as-errors build
+            "CI run 42093029057 at f9146ff: all jobs green.",
+            // no head: the run id alone is not a commit
+            "CI run 42093029057: RUSTFLAGS=-D warnings, all jobs green.",
+            // not a CI run
+            "src/lib.rs:10 sets deny(warnings); cargo build passed locally at f9146ff",
+            "https://github.com/runlegion/rannoch/actions",
+        ] {
+            assert_eq!(no_warnings_decision(evidence), uncertain, "{evidence}");
+        }
     }
 
     // --- vacuous evidence tests (added by #549) ---
