@@ -2,7 +2,7 @@
 # Test runner for the hook-side inbox hook (#941, #1020).
 #
 # Verifies inbox.sh surfaces delivered bullpen posts as
-# additionalContext, debounces repeat firings within one session, wraps its
+# additionalContext, checks at every firing with no debounce (#1478), wraps its
 # output in the fixed HOOK OUTPUT DOCTRINE result block with the directed
 # (REQUIRES A REPLY) set last, and does all of this without ever invoking
 # `legion mcp` -- this hook's whole point is a delivery path that does not
@@ -22,6 +22,10 @@ for event in UserPromptSubmit PostToolUse Stop; do
   last_cmd=$(jq -r --arg ev "$event" '.hooks[$ev] | last | .hooks | last | .command' "$HOOKS_SRC_DIR/hooks.json")
   assert_contains "inbox.sh is the last hook for $event" "$last_cmd" "inbox.sh"
 done
+
+echo "==> hooks.json: the PostToolUse inbox group has no matcher, so it runs on every tool call (#1478)"
+inbox_matcher=$(jq -r '.hooks.PostToolUse[] | select(any(.hooks[]; .command | contains("inbox.sh"))) | .matcher // "none"' "$HOOKS_SRC_DIR/hooks.json")
+assert_eq "PostToolUse inbox group matches every tool" "$inbox_matcher" "none"
 
 make_plugin_root inbox.sh
 
@@ -44,52 +48,30 @@ assert_contains "surfaces the delivered post text" "$out" "a post that landed mi
 assert_contains "tags the firing event" "$out" '"hookEventName": "PostToolUse"'
 unset FAKE_INBOX
 
-echo "==> debounce: a second PostToolUse firing inside the debounce window makes no inbox call"
+echo "==> every tool call checks the inbox: back-to-back PostToolUse firings each make an inbox call (#1478)"
 : > "$LEGION_STUB_LOG"
-export LEGION_INBOX_DEBOUNCE_SECONDS=60
+run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-2","tool_name":"Edit"}' >/dev/null
+run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-2","tool_name":"Edit"}' >/dev/null
+calls=$(grep -c '^inbox' "$LEGION_STUB_LOG")
+assert_eq "two firings, two inbox calls" "$calls" "2"
+
+echo "==> a post that arrives right after a check lands at the very next tool call (#1478)"
+empty_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-next","tool_name":"Edit"}')
+assert_empty "nothing new, nothing emitted" "$empty_out"
 export FAKE_INBOX="[Legion] Bullpen (1 posts):
-- [rafters] first delivery (2026-08-16)"
+- [rafters] arrived a moment after the last check (2026-11-05)"
+next_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-next","tool_name":"Edit"}')
+assert_contains "the next tool call delivers it" "$next_out" "arrived a moment after the last check"
+unset FAKE_INBOX
 
-first_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-2","tool_name":"Edit"}')
-assert_contains "first call delivers" "$first_out" "first delivery"
-calls_after_first=$(grep -c '^inbox' "$LEGION_STUB_LOG")
-assert_eq "one inbox call after the first firing" "$calls_after_first" "1"
-
-second_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-2","tool_name":"Edit"}')
-assert_empty "debounced second call emits nothing" "$second_out"
-calls_after_second=$(grep -c '^inbox' "$LEGION_STUB_LOG")
-assert_eq "still only one inbox call after the debounced firing" "$calls_after_second" "1"
-unset LEGION_INBOX_DEBOUNCE_SECONDS FAKE_INBOX
-
-echo "==> stop bypasses the debounce: a Stop within the window still delivers (#1000)"
-: > "$LEGION_STUB_LOG"
-export LEGION_INBOX_DEBOUNCE_SECONDS=60
+echo "==> Stop delivers too (#1000)"
 export FAKE_INBOX="[Legion] Bullpen (1 posts):
 - [rafters] turn-end delivery (2026-08-25)"
-
-# Prime the sentinel with a PostToolUse delivery, so the debounce window is open.
-prime_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-stop","tool_name":"Edit"}')
-assert_contains "priming PostToolUse delivers" "$prime_out" "turn-end delivery"
-
-# Regression guard: a non-Stop event inside the window is still debounced --
-# the exemption must not have disabled the debounce wholesale.
-pt_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-stop","tool_name":"Edit"}')
-assert_empty "a second PostToolUse in the window is still debounced" "$pt_out"
-
-# The fix: a Stop in the same window MUST still deliver -- it fires once per
-# turn and is the last chance before the session goes idle.
+run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-stop","tool_name":"Edit"}' >/dev/null
 stop_out=$(run_hook '{"hook_event_name":"Stop","cwd":"/tmp/legion-test","session_id":"inbox-test-stop","tool_name":""}')
-assert_contains "Stop within the debounce window still delivers" "$stop_out" "turn-end delivery"
+assert_contains "Stop right after a tool call still delivers" "$stop_out" "turn-end delivery"
 assert_contains "the Stop delivery tags the Stop event" "$stop_out" '"hookEventName": "Stop"'
-
-# The Stop delivery wrote the sentinel, so a tool-call flurry right after it is
-# debounced as before -- the exemption is for Stop only, not a reset of the
-# window (#1000 Behavior: "A Stop delivery still writes the sentinel"). With
-# FAKE_INBOX still set, a non-debounced PostToolUse would surface
-# "turn-end delivery"; asserting empty proves the Stop-written sentinel held.
-post_stop_out=$(run_hook '{"hook_event_name":"PostToolUse","cwd":"/tmp/legion-test","session_id":"inbox-test-stop","tool_name":"Edit"}')
-assert_empty "a PostToolUse right after the Stop is debounced by the Stop-written sentinel" "$post_stop_out"
-unset LEGION_INBOX_DEBOUNCE_SECONDS FAKE_INBOX
+unset FAKE_INBOX
 
 echo "==> delivery with no MCP subprocess: the hook lane delivers without ever invoking legion mcp"
 : > "$LEGION_STUB_LOG"
