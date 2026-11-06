@@ -69,7 +69,7 @@ has() { # has <label> <haystack> <needle>
 # It is deliberately NOT put on PREFLIGHT_SANDBOX_ROOTS. That list is inherited
 # by the subshells `iso_run` uses, and a cleanup running there would delete this
 # file's own victims out from under it mid-run.
-ISO_TMP="$(pf_phys "$(mktemp -d)")" || {
+ISO_TMP="$(pf_phys "$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")")" || {
   printf '[test-preflight-isolation] could not create the temp root\n' >&2
   exit 90
 }
@@ -448,6 +448,25 @@ mkdir -p "${FAKE_TMP}/removable"
 iso_rm "$ISO_TMP" "$FAKE_TMP" "${FAKE_TMP}/removable"
 eq  "sandbox_rm: a path strictly under the temp root IS removed" "0" "$ISO_RC"
 no  "sandbox_rm: and it is really gone"               test -d "${FAKE_TMP}/removable"
+
+# -- 10b. THE SANDBOX IS MADE WHERE THE REMOVER LOOKS (#1489) -----------------
+# pf_sandbox_rm only removes what is under ${TMPDIR:-/tmp}, so the sandbox has to
+# be created there, whatever TMPDIR is. A bare `mktemp -d` on macOS ignores
+# TMPDIR and lands in /var/folders, and the remover then refuses its own
+# sandbox. Run in a subshell so the sandbox list it builds stays its own.
+# (GNU mktemp honours TMPDIR, so on Linux this held before the fix too.)
+ALT_TMP="${ISO_TMP}/alt-tmp"
+mkdir -p "$ALT_TMP"
+ISO_ALT="$(
+  PREFLIGHT_SANDBOX_ROOTS=()
+  TMPDIR="${ALT_TMP}/" pf_make_sandbox "$V_OK" || exit 1
+  root="${PREFLIGHT_SANDBOX_ROOTS[0]}"
+  pf_path_under "$root" "$ALT_TMP" && printf 'under '
+  TMPDIR="${ALT_TMP}/" pf_sandbox_cleanup 2>/dev/null
+  [ -d "$root" ] || printf 'removed'
+)"
+eq "tmpdir: the sandbox is made under TMPDIR and cleaned up from there" \
+  "under removed" "$ISO_ALT"
 
 # -- 11. THE REQUIRED-SUITE LIST ---------------------------------------------
 # PREFLIGHT_REQUIRED_SUITES exists so a renamed or deleted suite stops the
