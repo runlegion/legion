@@ -158,7 +158,7 @@ SUITE_SELF_TOP="$( (cd "$DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/de
 
 # ONE temp root for the whole suite, so "is this path mine?" is a containment
 # test rather than a list of four unrelated mktemp results.
-SUITE_TMP="$(phys "$(mktemp -d)")" || {
+SUITE_TMP="$(phys "$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")")" || {
   printf '[test-release] could not create the suite temp root\n' >&2
   exit 90
 }

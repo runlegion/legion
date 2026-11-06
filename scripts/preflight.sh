@@ -256,7 +256,7 @@ PREFLIGHT_SANDBOX=""
 pf_make_sandbox() {
   local repo_root="$1" root sandbox
   PREFLIGHT_SANDBOX=""
-  root="$(mktemp -d)" || return 1
+  root="$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")" || return 1
   root="$(pf_phys "$root")" || return 1
   # Registered, not trapped: installing the EXIT trap here would clobber a trap
   # the caller set (scripts/test-preflight-isolation.sh owns one), and traps are

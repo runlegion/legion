@@ -332,7 +332,7 @@ tag_target_matches() {
 # absence, so it must not be able to produce one.
 ref_version() {
   local ref="$1" file_rel="$2" field="$3" tmpdir scratch got rc=0
-  tmpdir="$(mktemp -d)" || return 2
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")" || return 2
   scratch="${tmpdir}/${file_rel##*/}"
   if git show "${ref}:${file_rel}" >"$scratch" 2>/dev/null; then
     got="$(legion sym etc extract "$scratch" --field "$field" 2>/dev/null)" || rc=2
@@ -1080,7 +1080,7 @@ docs_worktree_setup() {
 
   start_point="$(git -C "$root" ls-remote --heads origin | docs_start_point "$branch" "origin/${base_branch}")"
 
-  parent="$(mktemp -d)" || fail "docs step: could not create a temp dir for the docs worktree"
+  parent="$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")" || fail "docs step: could not create a temp dir for the docs worktree"
   wt="${parent}/${label}"
 
   git -C "$root" worktree add --quiet -b "$branch" "$wt" "$start_point" \

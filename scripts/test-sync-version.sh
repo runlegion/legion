@@ -218,11 +218,11 @@ run_case() {
 
 echo "[test-sync-version] running 5 scenarios..."
 
-T1=$(mktemp -d)
-T2=$(mktemp -d)
-T3=$(mktemp -d)
-T4=$(mktemp -d)
-T5=$(mktemp -d)
+T1=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
+T2=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
+T3=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
+T4=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
+T5=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -rf "$T1" "$T2" "$T3" "$T4" "$T5"' EXIT
 
 # Scenario 1: all versions match 0.6.5
