@@ -1,5 +1,111 @@
 # Legion Changelog
 
+## 0.44.5
+
+The registered-repo release. Legion used to take a repo's name from the working
+directory's basename, so a checkout under a different folder name, a linked worktree, or a
+subdirectory could file memory, signals and gate records under a repo that does not exist.
+A repo is now identified only by its `watch.toml` entry. A required `--repo` that is left
+out defaults to the registered repo of the working directory, and outside one the command
+stops and says how to register. The same release changes what an agent hears from its
+hooks. Each turn now ends with a prompt that asks the agent to name the turn as design or
+delivery, which replaces the once-per-session reflect nudge and the autonomy banner. The
+inbox is checked at every tool call instead of every 10 seconds. Four fixes ship
+alongside: no-warnings verification, legion-cmd refusals, hook-test deadlines and the
+issue-writer template lookup.
+
+Patch release: additive behavior within the existing CLI and hook surfaces (one new
+`legion repo resolve` subcommand, and `--repo` defaulting where it was required), no
+wire-format change and no schema migration; `SCHEMA_VERSION` stays 3.
+
+### New
+
+- **Repo identity comes from `watch.toml`, never from the working directory** (PR #1486,
+  #1479). One resolver, `registered_repo_for` in `src/watch/config.rs`, maps a directory
+  to the registered repo whose workdir contains it. A linked worktree maps through its main
+  checkout. When workdirs nest, the deepest one wins, and no name is ever derived from a
+  basename. When clap reports a required `--repo` missing, the CLI retries with
+  `--repo <registered>` inserted after the subcommand path. That covers every way clap
+  makes `--repo` required, including bullpen's `required_unless_present_any`. Outside a
+  registered checkout, the command stops and says to pass `--repo` or run
+  `legion watch add`. The lookup runs only on that missing-argument path, so no other
+  invocation reads `watch.toml`. `legion signal` now requires `--repo` under the same
+  rule, so a signal is never silently recorded with no repo. Every `--repo` accepts the
+  short name or `owner/repo`, matched through the `watch.toml` `github` field. Gate
+  records (`current_repo_name`) and the legion-cmd hook's `repo_for` call the same
+  resolver. The new `legion repo resolve --cwd <path> [--pid <pid>]` prints the repo a
+  hook files under: the registered repo, else the repo whose session lock that pid holds,
+  else `unregistered`. `prelude.sh` calls it instead of guessing, and `session-lock.sh` no
+  longer locks `unregistered`. The git audit agent and the legion-cmd incident record use
+  `unregistered` where they used to write "unknown" or an empty repo. The plugin can
+  update before the binary does, so when `legion repo resolve` is missing or no binary is
+  found, `prelude.sh` falls back to the pre-0.44.5 derivation rather than leaving `REPO`
+  empty and silencing every hook.
+
+### Fixed
+
+- **A no-warnings build criterion needs a green warnings-as-errors CI run on the head**
+  (PR #1484, #1481). `is_vacuous_evidence` in `src/verify.rs` left real CI evidence for
+  "builds with no warnings" uncertain, and rannoch #206 and #213 both stalled on it. A
+  criterion that mentions no warnings and a build or compile now passes only when
+  `proves_no_warnings_by_ci` finds four things in the evidence: a CI run, a commit hash for
+  the head (7 to 40 hex characters with at least one letter, so a numeric run id does not
+  count), a warnings-as-errors marker (`-D warnings`, `deny(warnings)`), and success. Any
+  other evidence leaves the criterion uncertain. A behavioural criterion such as "emits no
+  warning when X" is not a build criterion, so it still goes through the generic evidence
+  check.
+- **legion-cmd refusals go to the incident log, not the bullpen** (PR #1483, #1482). A
+  no-go hit was already recorded in `cmd-incidents.jsonl` with its entry, agent, repo,
+  session and command. On the first hit, an operator notice also posted it to the bullpen,
+  which put a refusal in front of the whole team. That notice is removed along with its
+  plumbing: the notify seam on `record_no_go`, `confirm` and `CmdStore`, the notice
+  composer, and the `notice_error` field on the incident record. Old rows that carry the
+  field still parse, because serde ignores it. The real-binary test now asserts the
+  record's fields and an empty bullpen after a refusal.
+- **Hook tests decide under a test deadline, not the 7 s production one** (PR #1471,
+  #1470). `route_call`, `respond_with` and `check_with` now take the decision deadline as
+  a parameter. Production passes `ROUTE_DEADLINE`, still 7000 ms. The wiring and
+  rule-decision tests pass `TEST_DEADLINE` (120 s), so on a loaded Windows runner a
+  rule's deny no longer turns into a deadline deny. A new test checks the production
+  deadline: a lookup that sleeps past `ROUTE_DEADLINE` gets the 7000 ms deadline deny.
+- **issue-writer finds the org template and follows its current shape** (PR #1469,
+  #1430). The agent looks for the implementation-task template in the target repo's
+  `.github/ISSUE_TEMPLATE/` first, then in the org's `.github` repo, both through
+  `gh api`. It stops with UNCLEAR, naming both places, only when neither has a template.
+  Section rules now refer to the template read at invocation, which drops the hard-coded
+  Interface, Behavior, Done When, Dev Workflow and Context sections. Recorded choices are
+  written as `<what> (chosen <date>): because <why>` in the template's choices section.
+  When the template has no choices section, they are left out. An open choice returns a
+  QUESTIONS block instead of a body.
+
+### Changed
+
+- **The stop hook asks what kind of turn it was, on every turn** (PR #1485, #1477). Gate 3
+  of `stop.sh` used to be a reflect prompt that fired once per session, only after file
+  work (the `mark-work.sh` marker), with the autonomy-budget banner attached. It now
+  injects a turn-kind prompt through `additionalContext` on every Stop. The prompt asks
+  the agent to name the turn: design (end with what was learned, what is still unknown,
+  and the next question), delivery (finish, or name the blocker), can't tell (treat it as
+  design and ask), or a peer's ask (a reply is owed, not a build). It also asks the agent
+  to name anything it acted on that it assumed rather than found. `stop_hook_active` is
+  the only guard. A design turn is often pure conversation, which is why the prompt no
+  longer waits for tool use. The autonomy-budget section is also gone from session start
+  and post-compact. `legion autonomy` and its data are unchanged. The inbox now shows a
+  shorter **Team mail** norm after posts, and a directed signal that arrives mid-turn
+  carries only the **Needs your reply** text, with no wake preamble or footer.
+- **An awake agent's inbox is checked at every tool call** (PR #1485, #1478).
+  PostToolUse already ran `inbox.sh` on every tool call, but a 10 s per-session debounce
+  meant most of those calls skipped the inbox read. The debounce and its sentinel are
+  removed, so a new post or signal is injected at the first hook point after it arrives.
+  The inbox cursor still claims each message, so each one is injected once.
+
+### Removed
+
+- **`mark-work.sh` and the reflect/work marker files** (PR #1485, #1477). They existed
+  only to gate the old reflect prompt. `session-start.sh` no longer cleans them up.
+- **`LEGION_INBOX_DEBOUNCE_SECONDS` and `LEGION_DELIVERY_DRAIN_DEBOUNCE_SECONDS`** (PR
+  #1485, #1478). The inbox debounce they tuned is gone, so setting them now does nothing.
+
 ## 0.44.4
 
 The localhost-daemon release. `legion daemon` bound its HTTP channel server to
