@@ -458,12 +458,11 @@ no  "sandbox_rm: and it is really gone"               test -d "${FAKE_TMP}/remov
 ALT_TMP="${ISO_TMP}/alt-tmp"
 mkdir -p "$ALT_TMP"
 ISO_ALT="$(
-  export TMPDIR="${ALT_TMP}/"
   PREFLIGHT_SANDBOX_ROOTS=()
-  pf_make_sandbox "$V_OK" || exit 1
+  TMPDIR="${ALT_TMP}/" pf_make_sandbox "$V_OK" || exit 1
   root="${PREFLIGHT_SANDBOX_ROOTS[0]}"
   pf_path_under "$root" "$ALT_TMP" && printf 'under '
-  pf_sandbox_cleanup 2>/dev/null
+  TMPDIR="${ALT_TMP}/" pf_sandbox_cleanup 2>/dev/null
   [ -d "$root" ] || printf 'removed'
 )"
 eq "tmpdir: the sandbox is made under TMPDIR and cleaned up from there" \
