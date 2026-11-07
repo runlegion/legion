@@ -1,5 +1,29 @@
 # Legion Changelog
 
+## 0.44.7
+
+The one-line-guidance release. On 0.44.6 every prompt carried the six-line turn-kind
+prompt, and its first line, "name what kind of turn it was", read as an instruction about
+output. One agent printed a turn-kind footer on every reply while the others ignored it,
+and neither was the intent. Each prompt now carries a single line instead: "Nothing to act
+on here unless you learn something new. If you do, reflect it."
+
+Patch release: one fix within the existing prompt-time hook. No CLI change, no
+wire-format change and no schema migration; `SCHEMA_VERSION` stays 3.
+
+### Fixed
+
+- **The prompt-time guidance is one line** (PR #1498, #1497). `plugin/hooks/turn-kind.sh`
+  now emits exactly "Nothing to act on here unless you learn something new. If you do,
+  reflect it." as `UserPromptSubmit` `additionalContext` on every prompt, in place of the
+  turn-kind text from #1477 (design, delivery, can't tell, a peer's ask, and naming what
+  was assumed rather than found). No hook sends that text any more. `stop.sh` is
+  untouched: its two gates, delegated-work liveness and pending replies, block as before,
+  and a clean Stop still emits nothing. `plugin/hooks/test-turn-kind.sh` checks that each
+  prompt carries exactly the new line and scans every hook script, including `lib/`, for
+  the old turn-kind markers. The `hooks.json` description, `docs/site/plugin-guide.md` and
+  `docs/site/llms-full.txt` now describe the one line the hook sends.
+
 ## 0.44.6
 
 The quieter-turn release. On 0.44.5 the turn-kind prompt ran as Stop `additionalContext`
