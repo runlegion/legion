@@ -21,7 +21,11 @@ Every event reaches each handler its type routes to at least once. Getting it ag
 
 ## The data
 
-legion's live memory, read only: about 27,000 reflections enter as `legion.raw.reflection`. One flow guards that type, calls a host classifier written for this toy, and emits `memory.<kind>`, which routes to the store built-in. An after row rechecks what stays unclassified.
+Westwind, the team's shared sample database (research document 01a1b37a-e007-75e1-8cbc-8f029c6d397a), rebuilt from its generator and checked against its seed hash. Each row enters as a typed CloudEvent: `westwind.customer.joined`, `westwind.product.listed`, `westwind.order.placed`, `westwind.order_line.added` and so on. Built-in store takes them into a Westwind ontology that declares the relations Westwind's tables leave implicit, `employees.reports_to` included.
+
+One flow guards `westwind.order_line.added`: a host step looks up the product's stock, emits `westwind.stock.low` when a line takes it under its reorder level, and an after row emits `westwind.order.unshipped` for an order still without a shipped date a set time after it was placed, by event time. Their answers are checked against SQL over the same seed.
+
+For the speed predictions, a generator in the toy extends the order history from Westwind's customers and products with a fixed seed, to about 1,000,000 order lines, so every run sees the same events.
 
 ## Predictions
 
