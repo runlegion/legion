@@ -1,5 +1,51 @@
 # Legion Changelog
 
+## 0.44.6
+
+The quieter-turn release. On 0.44.5 the turn-kind prompt ran as Stop `additionalContext`
+on every Stop. That continued every turn, so even a two-line reply was followed by the
+prompt's six lines and a second paragraph from the agent answering them, and the guidance
+arrived after the answer it was meant to shape. The prompt now arrives with each user
+prompt, and a Stop that trips no gate ends the turn with no output. The startup identity
+and operating-contract banners grow from 2 KB to 16 KB each, so entries render whole
+instead of being cut to their first sentence. Release preflight also works again when
+`TMPDIR` points somewhere other than the platform default.
+
+Patch release: three fixes within the existing hook, recall and release-script surfaces.
+No CLI change, no wire-format change and no schema migration; `SCHEMA_VERSION` stays 3.
+
+### Fixed
+
+- **The turn-kind prompt arrives with the prompt, not as a Stop continuation** (PR #1494,
+  #1491). The guidance from #1477 (design, delivery, can't tell, a peer's ask, and naming
+  what was assumed rather than found) moves out of `stop.sh` gate 3 into a new
+  `UserPromptSubmit` hook, `plugin/hooks/turn-kind.sh`. It emits the same text through
+  `additionalContext` on every prompt, before the agent answers, and always exits 0 so a
+  degraded legion never blocks a prompt. `stop.sh` now runs two gates, delegated-work
+  liveness and pending replies, and both block exactly as they did on 0.44.5. A Stop that
+  trips neither runs the session-end handoff and exits with no output, so the turn is not
+  continued. The `stop_hook_active` read that guarded the old prompt is removed, since
+  nothing on Stop continues the turn any more. `LEGION_SKIP_STOP_BLOCK=1` now skips both
+  gates. New tests show the prompt-time hook emitting the guidance and a clean Stop
+  emitting nothing.
+- **Startup banners are 16 KB and render entries whole when they fit** (PR #1493, #1492).
+  `WHOAMI_BYTE_CAP` and `WHATAMI_BYTE_CAP` in `src/recall.rs` rise from 2048 to 16384
+  bytes. The 2 KB cap made whatami cut most entries to their first sentence, and those
+  banners are what agents read at startup. `format_capped_banner` now checks first whether
+  every entry fits the cap whole, and if so renders each one whole. Before, the fair-share
+  split from #716 ran in all cases, so a long entry that came before shorter ones could be
+  truncated even when the whole banner fit. Fair-share truncation now runs only for a
+  banner that would overflow, and that banner still stays within its cap. The existing
+  banner tests are scaled to the new cap.
+- **Release preflight works wherever `TMPDIR` points** (PR #1490, #1489). On macOS a bare
+  `mktemp -d` ignores `TMPDIR`, but `pf_sandbox_rm` and the suite's perimeter check only
+  clean up under `${TMPDIR:-/tmp}`. With `TMPDIR` set elsewhere, the guard refused to
+  remove the preflight's own sandboxes and preflight failed. Every `mktemp -d` in
+  `scripts/preflight.sh`, `scripts/release.sh` and their tests now passes an explicit
+  `${TMPDIR:-/tmp}/tmp.XXXXXXXXXX` template, so temp directories are made under the root
+  the guard checks whether `TMPDIR` is unset, set to the default, or set to another
+  writable folder.
+
 ## 0.44.5
 
 The registered-repo release. Legion used to take a repo's name from the working
