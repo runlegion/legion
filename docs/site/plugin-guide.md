@@ -93,13 +93,22 @@ This checkpoint is recalled by the post-compact hook to restore continuity.
 
 **stop.sh** (timeout: 10s)
 
-Runs three gates in order on every Stop:
+Runs two gates in order on every Stop:
 
 1. **Delegated-work liveness** -- a `decision: block` when work delegated to a watch-spawned attempt is no longer verifiably live
 2. **Pending replies** -- a `decision: block` while a directed ask addressed to this repo is still unanswered (`legion pending-replies --directed`)
-3. **Turn-kind prompt** -- otherwise, injects a short prompt as `hookSpecificOutput.additionalContext` asking the agent to name what kind of turn it was (design, delivery, can't tell, or a peer's ask) and what it acted on that it assumed rather than found
 
-The turn-kind prompt fires on every turn. Its only guard is `stop_hook_active`, so the continuation it causes does not prompt again. It uses additionalContext rather than `decision: block`, so it continues the turn without the hook-error label or the 8-block cap.
+A Stop that trips neither gate produces no output and does not continue the turn.
+
+### UserPromptSubmit
+
+**identity-chain-load.sh** (timeout: 8s)
+
+Fires on the first prompt of each session: walks the identity chain via `legion chain --full` and injects the full doctrine.
+
+**turn-kind.sh** (timeout: 5s)
+
+Fires on every prompt. Injects a short prompt as `hookSpecificOutput.additionalContext` asking the agent to name what kind of turn it is (design, delivery, can't tell, or a peer's ask) and what it acted on that it assumed rather than found. It arrives with the prompt, before the agent answers.
 
 ### PreToolUse
 

@@ -1362,6 +1362,11 @@ SESSIONSTART / STARTUP (two hooks fire sequentially):
        of each session: walks the identity chain via `legion chain --full` and
        injects full doctrine (push-minimal/pull-deep).
 
+       The UserPromptSubmit turn-kind hook fires on every prompt: injects a
+       short prompt asking the agent to name what kind of turn it is (design,
+       delivery, can't tell, or a peer's ask) and what it acted on that it
+       assumed rather than found, before the agent answers.
+
 SESSIONSTART / COMPACT:
 
     post-compact.sh (timeout 15s):
@@ -1394,16 +1399,16 @@ PRECOMPACT:
 STOP:
 
     stop.sh (timeout 10s, v0.14.0+):
-       Hard-blocks stopping while an Accepted kanban card exists.
-       decision:block surfaces the board-derived goal (the active card's
-       acceptance criteria from `legion goal --repo <repo>`) and nudges an
-       end-of-work reflection via additionalContext.
+       Runs two gates in order: delegated-work liveness (decision:block when
+       work delegated to a watch-spawned attempt is no longer verifiably
+       live) and pending replies (decision:block while a directed ask is
+       unanswered, via `legion pending-replies --directed`). A Stop that
+       trips neither produces no output and does not continue the turn.
 
        Bypass: LEGION_SKIP_STOP_BLOCK=1. Suppressed under watch-pty.
 
        A companion PostToolUse task-state hook records per-session
-       TaskCreate/TaskUpdate status so the Stop hook can also block on
-       incomplete TaskList items.
+       TaskCreate/TaskUpdate status to a task event log.
 
        SubagentStop hook (v0.16.3): persists a spawned subagent's transcript
        tail as a domain=checkpoint reflection (tagged subagent,auto) and
@@ -1686,8 +1691,8 @@ PROJECT LAYOUT
 DESIGN PRINCIPLES
 ================================================================================
 
-Reflections store transferable expertise, not changelogs. The Stop hook asks
-"what would you tell another agent who hits this problem tomorrow?"
+Reflections store transferable expertise, not changelogs. Ask "what would
+you tell another agent who hits this problem tomorrow?"
 
 Boost/decay provides emergent quality without manual curation. Useful knowledge
 rises via boost (recall_count). Unused knowledge fades via decay. Floor of 0.1
