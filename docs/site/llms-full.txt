@@ -1362,10 +1362,9 @@ SESSIONSTART / STARTUP (two hooks fire sequentially):
        of each session: walks the identity chain via `legion chain --full` and
        injects full doctrine (push-minimal/pull-deep).
 
-       The UserPromptSubmit turn-kind hook fires on every prompt: injects a
-       short prompt asking the agent to name what kind of turn it is (design,
-       delivery, can't tell, or a peer's ask) and what it acted on that it
-       assumed rather than found, before the agent answers.
+       The UserPromptSubmit turn-kind hook fires on every prompt: injects one
+       line, "Nothing to act on here unless you learn something new. If you
+       do, reflect it.", before the agent answers.
 
 SESSIONSTART / COMPACT:
 

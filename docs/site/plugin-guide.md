@@ -108,7 +108,7 @@ Fires on the first prompt of each session: walks the identity chain via `legion 
 
 **turn-kind.sh** (timeout: 5s)
 
-Fires on every prompt. Injects a short prompt as `hookSpecificOutput.additionalContext` asking the agent to name what kind of turn it is (design, delivery, can't tell, or a peer's ask) and what it acted on that it assumed rather than found. It arrives with the prompt, before the agent answers.
+Fires on every prompt. Injects one line as `hookSpecificOutput.additionalContext`: "Nothing to act on here unless you learn something new. If you do, reflect it." It arrives with the prompt, before the agent answers.
 
 ### PreToolUse
 
