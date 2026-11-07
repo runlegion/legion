@@ -26,8 +26,8 @@
 # --directed, not coverage; see stop.sh's own comments for the full
 # reasoning.
 #
-# The other two Stop gates (delegated-liveness, turn-kind prompt) are
-# covered in test-stop-task-block.sh; this file is scoped to the new
+# The delegated-liveness gate and the clean-Stop path are covered in
+# test-stop-task-block.sh; this file is scoped to the new
 # pending-replies gate alone, following test-daemon-supervisor.sh's
 # per-hook layout.
 #
@@ -88,6 +88,7 @@ echo "==> empty legion pending-replies does not block on this gate"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"pending-2\"}" | bash "$STOP_HOOK")
 assert_not_contains "no pending replies -> no decision:block" "$out" '"decision": "block"'
 assert_not_contains "no pending replies -> no block from this gate" "$out" "REQUIRES A REPLY"
+assert_empty "no pending replies -> the Stop emits nothing (#1491)" "$out"
 
 echo "==> LEGION_SKIP_STOP_BLOCK=1 bypasses the pending-replies gate too, and exits 0"
 out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"pending-3\"}" \
@@ -122,14 +123,6 @@ out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"pending-6\"}" \
     LEGION_SPAWN_SOURCE=watch-pty \
     bash "$STOP_HOOK")
 assert_empty "watch-pty bypass produces no output" "$out"
-
-echo "==> the gate fires ahead of the turn-kind prompt"
-# Regression guard for gate ordering: the turn-kind prompt emits on every
-# Stop, so the pending-replies gate must run before it or never run at all.
-out=$(echo "{\"cwd\":\"${CWD}\",\"session_id\":\"pending-7\"}" \
-  | FAKE_PENDING_REPLIES="REQUIRES A REPLY -- no tool calls happened yet" \
-    bash "$STOP_HOOK")
-assert_contains "blocks ahead of the turn-kind prompt" "$out" '"decision": "block"'
 
 echo "==> an uncovered cwd does not block, even with pending replies fixtured (#1020 review, HIGH 2)"
 # A different cwd, absent from FAKE_WATCH and with no reflections --

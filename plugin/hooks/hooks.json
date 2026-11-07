@@ -1,5 +1,5 @@
 {
-  "description": "Legion hooks: recall on start, turn-kind prompt on stop, checkpoint on compact and on subagent stop, bullpen awareness on tool use",
+  "description": "Legion hooks: recall on start, turn-kind prompt on each prompt, checkpoint on compact and on subagent stop, bullpen awareness on tool use",
   "hooks": {
     "SessionStart": [
       {
@@ -107,6 +107,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/identity-chain-load.sh",
             "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/turn-kind.sh",
+            "timeout": 5
           },
           {
             "type": "command",
