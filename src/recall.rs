@@ -26,7 +26,7 @@ pub const WHOAMI_BANNER_CLOSE: &str = "=== END IDENTITY ===";
 /// the boot banner readable and to force `format_capped_banner` to divide
 /// space fairly across roots (per-entry budgeting, #716) rather than letting
 /// the newest root consume it unbounded.
-pub const WHOAMI_BYTE_CAP: usize = 2048;
+pub const WHOAMI_BYTE_CAP: usize = 16384;
 
 /// Banner that wraps `legion whatami` output -- the operating contract (how I
 /// operate), distinct from whoami (who I am). Lands right after identity at
@@ -37,7 +37,7 @@ pub const WHATAMI_BANNER_CLOSE: &str = "=== END OPERATING CONTRACT ===";
 /// Soft byte budget for `legion whatami` output. Same rationale as
 /// `WHOAMI_BYTE_CAP`: a scannability budget enforced fairly per-entry, not a
 /// measured harness cutoff.
-pub const WHATAMI_BYTE_CAP: usize = 2048;
+pub const WHATAMI_BYTE_CAP: usize = 16384;
 
 /// Minimum bytes of actual reflection text (after subtracting the id line,
 /// truncation notice, and chain pointer overhead) a truncated entry must get
@@ -158,6 +158,9 @@ fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
 /// Render a byte-capped boot banner from root reflections. Shared by
 /// `format_whoami` and `format_whatami`.
 ///
+/// When every entry fits the cap whole, each renders whole (#1492); the
+/// budgeting below applies only to a banner that would overflow.
+///
 /// Per-entry budgeting (#716): the available space (cap minus header/footer)
 /// is divided evenly across the remaining entries at each step, so a single
 /// oversized root cannot consume the whole cap and starve the rest -- the
@@ -211,21 +214,32 @@ fn format_capped_banner(
     let header = format!("{open}\n{header_line}\n");
     let footer = format!("{close}\n");
     let available = cap.saturating_sub(header.len() + footer.len());
+    let chain_line = |entry: &WhoamiEntry| {
+        if entry.in_chain {
+            format!("  \u{21b3} chain context: legion chain --id {}\n", entry.id)
+        } else {
+            String::new()
+        }
+    };
+    let full_body =
+        |entry: &WhoamiEntry| format!("- {} (id: {})\n{}", entry.text, entry.id, chain_line(entry));
 
     let mut buf = header;
+    let full_bodies: Vec<String> = entries.iter().map(full_body).collect();
+    if full_bodies.iter().map(String::len).sum::<usize>() <= available {
+        buf.extend(full_bodies);
+        buf.push_str(&footer);
+        return buf;
+    }
+
     let mut remaining_budget = available;
     let mut dropped = 0usize;
     let total = entries.len();
 
-    for (idx, entry) in entries.iter().enumerate() {
+    for (idx, (entry, full_body)) in entries.iter().zip(full_bodies).enumerate() {
         let slots_left = total - idx;
         let per_entry_budget = remaining_budget / slots_left;
-        let chain_line = if entry.in_chain {
-            format!("  \u{21b3} chain context: legion chain --id {}\n", entry.id)
-        } else {
-            String::new()
-        };
-        let full_body = format!("- {} (id: {})\n{}", entry.text, entry.id, chain_line);
+        let chain_line = chain_line(entry);
 
         if full_body.len() <= per_entry_budget {
             remaining_budget = remaining_budget.saturating_sub(full_body.len());
@@ -1763,7 +1777,7 @@ mod tests {
         // dropped to a bare count. This is the #716 behavior change: prior
         // code emitted 2 entries in full and lumped the other 3 into a
         // "3 more truncated" pointer.
-        let big = "x".repeat(800);
+        let big = "x".repeat(6400);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("id{i}"), &big, false))
             .collect();
@@ -1782,7 +1796,7 @@ mod tests {
         // folded into the aggregate pointer, per the "truncation line stays
         // accurate about what was omitted" contract.
         let text = "x".repeat(400);
-        let entries: Vec<WhoamiEntry> = (0..40)
+        let entries: Vec<WhoamiEntry> = (0..320)
             .map(|i| entry(&format!("id{i}"), &text, false))
             .collect();
         let out = format_whoami("legion", &entries);
@@ -1804,7 +1818,7 @@ mod tests {
         // (so it is charged against the entry's budget), not appended after
         // truncation as an afterthought -- confirm it actually survives into
         // the rendered, truncated body rather than being silently dropped.
-        let big = "x".repeat(800);
+        let big = "x".repeat(6400);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("id{i}"), &big, i == 2))
             .collect();
@@ -1826,7 +1840,7 @@ mod tests {
         // change that blows the overshoot open further has to touch this
         // assertion deliberately.
         let text = "x".repeat(400);
-        let entries: Vec<WhoamiEntry> = (0..40)
+        let entries: Vec<WhoamiEntry> = (0..320)
             .map(|i| entry(&format!("id{i}"), &text, false))
             .collect();
         let out = format_whoami("legion", &entries);
@@ -1858,12 +1872,12 @@ mod tests {
 
     #[test]
     fn format_whatami_rafters_shape_all_roots_readable() {
-        // The rafters case that motivated #716: one 2.4KB narrative root
-        // (newest) plus two small rule roots, under a 2KB cap. Before the
+        // The rafters case that motivated #716: one narrative root larger
+        // than the cap (newest) plus two small rule roots. Before the
         // fix, the 2.4KB root alone blew the cap and the two rule roots
         // collapsed to "(2 more truncated)". After the fix, all three
         // roots must appear as content, not just a count.
-        let narrative = "N".repeat(2400);
+        let narrative = "N".repeat(19200);
         let rule_one = "work the board before asking for more".to_string();
         let rule_two = "night-shift agents post status, do not ping".to_string();
         let entries = vec![
@@ -1896,7 +1910,7 @@ mod tests {
         // Per-entry notices point at the entry's own `--id`, not
         // `--domain` (the #950 sharpening) -- every truncated entry gets
         // its own fault-in pointer naming its own id.
-        let big = "x".repeat(800);
+        let big = "x".repeat(6400);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("id{i}"), &big, false))
             .collect();
@@ -1932,7 +1946,7 @@ mod tests {
         // Enough entries to push per-entry share below MIN_ENTRY_RENDER_BYTES
         // so some are genuinely dropped and the aggregate pointer fires.
         let big = "x".repeat(400);
-        let entries: Vec<WhoamiEntry> = (0..40)
+        let entries: Vec<WhoamiEntry> = (0..320)
             .map(|i| entry(&format!("w{i}"), &big, false))
             .collect();
         let out = format_whatami("kelex", &entries);
@@ -1946,7 +1960,7 @@ mod tests {
         // banner (whoami vs. whatami) -- only the AGGREGATE "(N more ...
         // truncated)" line stays pointed at `--domain workflow` (covered by
         // `format_whatami_truncation_pointer_uses_workflow_domain`).
-        let big = "x".repeat(800);
+        let big = "x".repeat(6400);
         let entries: Vec<WhoamiEntry> = (0..5)
             .map(|i| entry(&format!("w{i}"), &big, false))
             .collect();
@@ -2303,7 +2317,7 @@ mod tests {
     #[test]
     fn format_whoami_banner_uses_gist_when_it_fits_entrys_share() {
         let lead = "Gist lead paragraph summarizing the point in one paragraph.";
-        let body = "z".repeat(3000);
+        let body = "z".repeat(24000);
         let text = format!("{lead}\n\n{body}");
         let out = format_whoami("legion", &[entry("g1", &text, false)]);
 
@@ -2321,7 +2335,7 @@ mod tests {
     #[test]
     fn format_whoami_banner_falls_back_to_card_when_gist_too_large() {
         let sentence = "Card sentence ends right here.";
-        let filler = "y".repeat(3000);
+        let filler = "y".repeat(24000);
         let text = format!("{sentence} {filler}\n\nMore text after the blank line.");
         let out = format_whoami("legion", &[entry("c1", &text, false)]);
 
@@ -2342,7 +2356,7 @@ mod tests {
         // share, so the cascade must fall all the way through to the raw
         // truncate_at_char_boundary slice rather than emitting an
         // oversized Card render.
-        let text = format!("{}. {}", "a".repeat(5000), "b".repeat(5000));
+        let text = format!("{}. {}", "a".repeat(40000), "b".repeat(40000));
         let out = format_whoami("legion", &[entry("x1", &text, false)]);
 
         assert!(
@@ -2352,10 +2366,53 @@ mod tests {
         assert!(!out.contains(&"b".repeat(10)), "b run must not render");
         assert!(
             !out.contains(". b"),
-            "raw slice must not reach the sentence boundary at offset 5000"
+            "raw slice must not reach the sentence boundary at offset 40000"
         );
         assert!(out.contains("..."), "raw slice keeps its ellipsis marker");
         assert!(out.contains("legion recall --repo legion --id x1"));
+    }
+
+    // --- #1492: 16 KB banners, whole entries when they fit ---
+
+    #[test]
+    fn banner_caps_are_16_kib() {
+        assert_eq!(WHOAMI_BYTE_CAP, 16384);
+        assert_eq!(WHATAMI_BYTE_CAP, 16384);
+    }
+
+    #[test]
+    fn banner_renders_entries_whole_when_they_fit_the_cap() {
+        // The first entry is larger than an even share of the cap but the
+        // banner as a whole fits, so every entry renders whole -- not cut
+        // to its gist, card, or first sentence.
+        let long = format!(
+            "First sentence. {}\n\nSecond paragraph.",
+            "Many more words follow here. ".repeat(300)
+        );
+        let short = "work the board";
+        let entries = vec![entry("long", &long, false), entry("short", short, false)];
+        for out in [
+            format_whoami("legion", &entries),
+            format_whatami("legion", &entries),
+        ] {
+            assert!(out.contains(&format!("- {long} (id: long)")));
+            assert!(out.contains(&format!("- {short} (id: short)")));
+            assert!(!out.contains("truncated"));
+            assert!(out.len() <= WHOAMI_BYTE_CAP);
+        }
+    }
+
+    #[test]
+    fn banner_that_overflows_stays_within_cap() {
+        let big = "Sentence one. ".repeat(500);
+        let entries: Vec<WhoamiEntry> = (0..5)
+            .map(|i| entry(&format!("id{i}"), &big, false))
+            .collect();
+        let whoami = format_whoami("legion", &entries);
+        let whatami = format_whatami("legion", &entries);
+        assert!(whoami.contains("truncated -- full text"));
+        assert!(whoami.len() <= WHOAMI_BYTE_CAP, "{} bytes", whoami.len());
+        assert!(whatami.len() <= WHATAMI_BYTE_CAP, "{} bytes", whatami.len());
     }
 
     #[test]
@@ -2365,10 +2422,10 @@ mod tests {
         // enough further entries are starved below MIN_ENTRY_RENDER_BYTES
         // to also fire the aggregate `--domain` pointer. The two must not
         // collapse into one code path.
-        let solo_text = "x".repeat(800);
+        let solo_text = "x".repeat(6400);
         let filler_text = "x".repeat(400);
         let mut entries = vec![entry("solo0", &solo_text, false)];
-        for i in 1..40 {
+        for i in 1..320 {
             entries.push(entry(&format!("id{i}"), &filler_text, false));
         }
         let out = format_whoami("legion", &entries);
