@@ -17,7 +17,7 @@ log: a stream (append-only file), never on the main path -> trickle reader -> he
 - The inbox is durable and takes CloudEvents.
 - The worker decides what it does now and what it leaves to flows. The toy's workers write first and leave the rest to flows.
 - One write per fact: the row as it is now, with the id of the event that made it. No log table, no hearing table, no copy of the row on the main path.
-- After the write, the flows registered for that row's type load and run. Independent steps go back on the inbox as new CloudEvents. A step that depends on another waits.
+- After the write, the flows registered for that row's type load and run on the row the worker just wrote, handed to them in memory. Nothing reads a row back after writing it. Independent steps go back on the inbox as new CloudEvents. A step that depends on another waits.
 - The row is the flow's state. No flow instance is stored apart from the row.
 - Each flow declares how its events are ordered: by clock (event time, with a lateness), by dependency (an event is ready when the events it needs exist), or neither.
 - A timer is a CloudEvent on the inbox for delivery at a later event time.
