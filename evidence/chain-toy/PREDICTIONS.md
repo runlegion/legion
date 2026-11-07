@@ -8,7 +8,7 @@ A whole service runs as a chain of flows, each firing on the type of an event an
 
 ## The data
 
-Westwind (research document 01a1b37a-e007-75e1-8cbc-8f029c6d397a), grown by the same seeded generator with support tickets, returns, refunds, shipments with tracking, made-to-order products and supplier orders, all keyed by UUIDv7. A second, small ontology, Oz, sits beside it in the same store.
+Westwind's world (research document 01a1b37a-e007-75e1-8cbc-8f029c6d397a: its customers, products, suppliers, employees and shippers), rebuilt to fit the events, not the schema. The graph-vs-relational toy showed that loading Westwind's tables row for row costs about 10 times what SQLite pays, on rannoch main and on v0.6.0 alike. So the seeded generator emits what happens in the business, each event one thing that happened carrying what it is about: `order.placed` with its lines inside, `order.shipped` with its shipment, `ticket.opened` with its text. No event exists to carry a row, and nothing is a node because it was a table: an order is a node with its lines, and edges join it to its customer and to the products it holds. Support tickets, returns, refunds, shipments with tracking, made-to-order products and supplier orders are in the same stream, all keyed by UUIDv7. A second, small ontology, Oz, sits beside it in the same store.
 
 The 320 seeded orders take the plain path. A cast of scripted customers takes every other path, each with a known event trail:
 
@@ -45,6 +45,7 @@ accept, allocate, pick and pack (a join on every line), ship, deliver, after-shi
 10. Tyrion's subscription, run for 10 years of monthly orders, rebuilds in the same time in year 10 as in year 1: an instance carries its state into a fresh history rather than growing one without end. The worker toy measured rebuild growing linearly, about 2 us per history entry.
 11. Everything a step sends is in its history, and a history entry is durable only after the store writes it records. Both broke in the worker toy and were caught by replay.
 12. The full chain over the seeded orders and the cast, replayed 1, 10 and 1,000 times, stopped and killed, leaves the same store contents and the same flow states, comparing all but each event's arrival time (`recorded`).
+13. Loading the event-shaped stream stores an order at least 3 times faster than the row-for-row load did on the same main (7,493 rows/s, an order and its lines counted as one order), on a quiet machine, and in less than half the bytes per order.
 
 ## What breaks the idea
 
