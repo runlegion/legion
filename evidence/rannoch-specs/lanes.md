@@ -31,10 +31,9 @@ Operator, 2026-11-07:
 
 Lanes that send an event on instead of writing it (a mesh plugs in there) are left out until something needs them.
 
-## Open, for the operator
-
-1. What exactly the lane contract holds.
 
 ## Answered
+
+- **What the lane contract holds** (operator, 2026-11-07: "looks right"): the side a worker sees. `next(worker)` hands out the next event, `done(ticket)` and `failed(ticket, reason)` close it, and `position` says where the lane is; the types they use (`Ticket`, `Failure`, `State`) are in the contract crate. How events come into a lane stays in each lane crate: `rannoch-queue-mem` keeps `accept`, `accept_from`, `subscribe`, `flush` and the heartbeat; a trickle lane reads the log and has no `accept`.
 
 - **A purge's store swap and the fast lane** (purge swap toy, rannoch toys/purge-swap at 78f7fd4, RESULTS.md): rewriting the store without the purged facts and swapping it in kept every write made during the purge (about 61,000), left no purged content in the store, WAL or shm, and changed no surviving read (282,300 of 282,300). The swap held the fast lane 241-263 ms, about one batch (the lane's longest batch without a purge was about 305 ms), and the lane ran at 76-78% of its rate over the purge.
