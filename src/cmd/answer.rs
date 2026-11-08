@@ -128,12 +128,14 @@ pub(crate) struct LocalAnswers;
 
 impl Answerer for LocalAnswers {
     fn answer(&self, call: &SearchCall) -> Option<Answer> {
-        let workdirs: Vec<(String, PathBuf)> = watched_workdirs()?;
+        let repos: Vec<WatchRepoConfig> = watched_repos()?;
+        let workdirs: Vec<(String, PathBuf)> = watched_workdirs(&repos);
         let cwd: Option<&Path> = call.cwd.as_deref().map(Path::new);
         match call.tool.as_str() {
             "Grep" => {
                 let repo: Option<String> =
                     crate::cmd::hook::repo_for(call.legion_repo.as_deref(), call.cwd.as_deref());
+                let workdirs: Vec<(String, PathBuf)> = with_tree(workdirs, cwd, &repos);
                 grep_answer(&call.input, cwd, &workdirs, &|pattern: &str| {
                     recall_texts(repo.as_deref(), pattern)
                 })
@@ -170,21 +172,36 @@ pub(crate) fn answer_within(
     rx.recv_timeout(deadline).ok().flatten()
 }
 
-/// Every watched repo as `(name, canonical workdir)`. `None` when
-/// watch.toml cannot be read; a workdir that no longer resolves is left out.
-fn watched_workdirs() -> Option<Vec<(String, PathBuf)>> {
+/// Every watched repo. `None` when watch.toml cannot be read.
+fn watched_repos() -> Option<Vec<WatchRepoConfig>> {
     let path: PathBuf = crate::data_dir().ok()?.join("watch.toml");
-    let repos: Vec<WatchRepoConfig> = crate::watch::list_repos_in_config(&path).ok()?;
-    Some(
-        repos
-            .into_iter()
-            .filter_map(|r| {
-                std::fs::canonicalize(&r.workdir)
-                    .ok()
-                    .map(|dir| (r.name, dir))
-            })
-            .collect(),
-    )
+    crate::watch::list_repos_in_config(&path).ok()
+}
+
+/// Every watched repo as `(name, canonical workdir)`; a workdir that no
+/// longer resolves is left out.
+fn watched_workdirs(repos: &[WatchRepoConfig]) -> Vec<(String, PathBuf)> {
+    repos
+        .iter()
+        .filter_map(|r| {
+            std::fs::canonicalize(&r.workdir)
+                .ok()
+                .map(|dir| (r.name.clone(), dir))
+        })
+        .collect()
+}
+
+/// `workdirs` plus the tree `cwd` is in, when it is a worktree of a watched
+/// repo (#1503): a Grep there is answered over the tree, as sym would.
+fn with_tree(
+    mut workdirs: Vec<(String, PathBuf)>,
+    cwd: Option<&Path>,
+    repos: &[WatchRepoConfig],
+) -> Vec<(String, PathBuf)> {
+    if let Some(tree) = cwd.and_then(|dir| crate::cli::index_cmd::tree_of(dir, repos)) {
+        workdirs.push((tree.key(), tree.path));
+    }
+    workdirs
 }
 
 /// The texts of the reflections in `repo` that match `pattern` (BM25, no
@@ -835,6 +852,58 @@ mod tests {
                 .text
                 .contains(&format!("{}:1:needle", shown(&repo, "sub/b.txt")))
         );
+        assert!(!answer.text.contains("a.txt"));
+    }
+
+    #[test]
+    fn a_grep_in_a_tree_of_a_watched_repo_is_answered_over_the_tree() {
+        let repo = Repo::new();
+        repo.write("a.txt", "main only\n");
+        let git = |dir: &Path, args: &[&str]| {
+            let status = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git");
+            assert!(status.success());
+        };
+        git(&repo.root, &["add", "."]);
+        git(&repo.root, &["commit", "-q", "-m", "initial"]);
+        let trees: TempDir = tempfile::tempdir().expect("tempdir");
+        let tree: PathBuf = fs::canonicalize(trees.path())
+            .expect("canonical")
+            .join("wt");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                tree.to_str().expect("utf-8"),
+            ],
+        );
+        fs::write(tree.join("b.txt"), "needle on the branch\n").expect("write");
+        let repos: Vec<WatchRepoConfig> = vec![
+            toml::from_str(&format!(
+                "name = \"demo\"\nworkdir = '{}'\n",
+                repo.root.display()
+            ))
+            .expect("repo config"),
+        ];
+        let input = json!({"pattern": "needle"});
+        // The tree sits outside every watched workdir: declined until the
+        // tree joins the workdirs.
+        assert_eq!(
+            grep_answer(&input, Some(&tree), &repo.workdirs(), &no_recall),
+            None
+        );
+        let workdirs = with_tree(repo.workdirs(), Some(&tree), &repos);
+        let answer = grep_answer(&input, Some(&tree), &workdirs, &no_recall).expect("answers");
+        assert!(answer.text.contains("b.txt"), "got: {}", answer.text);
         assert!(!answer.text.contains("a.txt"));
     }
 

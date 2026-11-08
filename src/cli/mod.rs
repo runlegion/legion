@@ -733,6 +733,9 @@ pub(crate) enum Commands {
     /// against `watch.toml` and re-indexes that repo. Used by the
     /// PostToolUse re-index hook (#281) so edits keep the index fresh.
     /// `--repo` is optional in `--file` mode.
+    ///
+    /// Run inside a linked worktree of the repo (or with `--file` in one),
+    /// it indexes that worktree under its own path instead (#1503).
     Index {
         /// Repo name (must be present in watch.toml). Optional when --file,
         /// --status, or --logs is supplied.

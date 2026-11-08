@@ -111,7 +111,8 @@ impl Database {
     /// List non-deleted SCIP indexes filtered by optional repo and language.
     /// `None` on either field disables that filter; `(None, None)` returns
     /// every live index. Used by `legion sym` query dispatch (#282) so a
-    /// single call covers `--repo`/`--lang` scoping.
+    /// single call covers `--repo`/`--lang` scoping. With no repo, a
+    /// worktree's index is left out (#1503).
     pub fn list_scip_indexes_filtered(
         &self,
         repo: Option<&str>,
@@ -135,7 +136,7 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
+        let mut rows = stmt
             .query_map(rusqlite::params_from_iter(param_refs), |row| {
                 Ok(crate::scip::ScipIndex {
                     id: row.get(0)?,
@@ -148,6 +149,9 @@ impl Database {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        if repo.is_none() {
+            rows.retain(|r| !crate::inventory::is_tree_key(&r.repo));
+        }
         Ok(rows)
     }
 

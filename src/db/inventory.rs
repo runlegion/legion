@@ -330,8 +330,8 @@ impl Database {
     /// Return inventory rows matching the optional filter, ordered by
     /// `(repo, path)`.
     ///
-    /// `None` on any filter field disables that restriction. All three
-    /// `None` returns every row in the table.
+    /// `None` on any filter field disables that restriction, except that
+    /// with no repo a worktree's rows are left out (#1503).
     ///
     /// Read path for `sym tree` (#706) and `sym etc find-file` (#709).
     pub fn list_file_inventory(
@@ -360,7 +360,7 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
+        let mut rows = stmt
             .query_map(rusqlite::params_from_iter(param_refs), |row| {
                 Ok(FileInventoryEntry {
                     repo: row.get(0)?,
@@ -373,6 +373,9 @@ impl Database {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        if filter.repo.is_none() {
+            rows.retain(|r| !crate::inventory::is_tree_key(&r.repo));
+        }
         Ok(rows)
     }
 

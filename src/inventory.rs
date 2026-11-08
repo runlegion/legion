@@ -232,6 +232,13 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     joined.canonicalize().ok()
 }
 
+/// True when an index key is a worktree's canonical path rather than a
+/// registered repo name (#1503). A listing over every repo leaves these out,
+/// so a tree's index never answers for its registered checkout.
+pub fn is_tree_key(repo: &str) -> bool {
+    Path::new(repo).is_absolute()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
