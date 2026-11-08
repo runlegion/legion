@@ -19,7 +19,7 @@ Operator, 2026-11-07: "store should be just the core store, everything else is o
 
 7. **STORE-7.** Hearings and aliases are removed (no reader builds them either).
 8. **STORE-8.** `seen` is removed. If something needs it later, a slow-lane reader can derive it from the log.
-9. **STORE-9.** Amend moves to `rannoch-processor-amend`, a processor, built with the harness, not before it. Changing a fact's key is a rekey, not an amend (operator: "so a rekey?").
+9. **STORE-9.** Amend moves to `rannoch-processor-amend`, a processor, built with the harness, not before it. There is no rekey: in a temporal store a changed key is the old key trashed and the new key written, and history keeps both (operator, 2026-11-08: "I still do t see a need for rekey in a temporal store").
 10. **STORE-10.** No trim.
 
 ## Crates
@@ -32,6 +32,5 @@ Operator, 2026-11-07: "store should be just the core store, everything else is o
 
 ## Open, for the operator
 
-1. Whether a rekey is its own event in the core store (it ends the old key, writes the new one, and keeps the old-to-new mapping every later write checks), with amend changing properties only.
 
-2. Whether STORE-11 (the crate split) lands before the store changes, as a change with no behaviour difference.
+1. Whether STORE-11 (the crate split) lands before the store changes, as a change with no behaviour difference.
