@@ -18,7 +18,7 @@ Background: rannoch's store is append-only, and its timeline is its events in or
 
 ## Trash
 
-1. **TRASH-1. Trashing is an event.** The trash processor SHALL send a cloud event naming the fact and the reason. It goes through the inbox and onto the timeline like any other event.
+1. **TRASH-1. Trashing is an event.** The trash processor (`rannoch-processor-trash`) SHALL send a cloud event of type `rannoch.trashed`, past tense like `rannoch.ended` and `rannoch.corrected` (operator: "whats wrong with trash?"), naming the fact and the reason. It goes through the inbox and onto the timeline like any other event.
 2. **TRASH-2. Trash marks dead and moves on.** The trash event's write SHALL be one more version of the fact, saying dead, known at the trash event. It SHALL NOT change the timeline: as known before the trash, the fact reads as it was; as known after, dead.
 3. **TRASH-3. Trash disconnects the node.** The trash event SHALL end each of the node's links, one more link version each, known at the trash event, so the live graph never reaches a dead node. As known before the trash, the links read as they were.
 4. **TRASH-4. Nothing is deleted or updated by trash.** Every write trash makes is an append.
@@ -34,4 +34,4 @@ Background: rannoch's store is append-only, and its timeline is its events in or
 
 ## Open, for the operator
 
-1. The trash event's type name.
+1. Whether trash ends the node's inbound links (those other facts' events made) as well as its own.
