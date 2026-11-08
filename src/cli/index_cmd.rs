@@ -1161,6 +1161,12 @@ pub(crate) fn tree_of(dir: &Path, repos: &[watch::WatchRepoConfig]) -> Option<Tr
         return None;
     }
     let repo = watch::registered_repo_for(repos, &invoking.canon)?;
+    // A nested submodule or another repo's worktree sits under a workdir
+    // too: only one sharing the repo's git common dir is its tree.
+    let workdir = resolve_repo_workdir(repos, &repo)?;
+    if inventory::git_common_dir(&workdir)? != invoking.common_dir {
+        return None;
+    }
     Some(Tree {
         repo,
         path: invoking.canon,
@@ -2220,6 +2226,29 @@ mod worktree_divergence_tests {
         let other = tempfile::tempdir().unwrap();
         git_in(other.path(), &["init", "-q", "-b", "main"]);
         assert!(tree_of(&wt, &[registered("other", other.path())]).is_none());
+    }
+
+    #[test]
+    fn another_repos_tree_nested_in_a_registered_workdir_is_not_its_tree() {
+        let (outer, _) = primary_with_tree();
+        let inner = tempfile::tempdir().unwrap();
+        git_in(inner.path(), &["init", "-q", "-b", "main"]);
+        git_in(
+            inner.path(),
+            &["commit", "--allow-empty", "-q", "-m", "inner"],
+        );
+        let nested = outer.path().join("nested");
+        git_in(
+            inner.path(),
+            &[
+                "worktree",
+                "add",
+                nested.to_str().unwrap(),
+                "-b",
+                "inner-branch",
+            ],
+        );
+        assert!(tree_of(&nested, &[registered("outer", outer.path())]).is_none());
     }
 
     #[test]
