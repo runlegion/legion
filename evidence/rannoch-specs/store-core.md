@@ -10,7 +10,7 @@ Operator, 2026-11-07: "store should be just the core store, everything else is o
 
 1. **STORE-1.** One write per fact: a changed fact appends a version; an unchanged fact writes nothing.
 2. **STORE-2.** Append-only: no version or link version is ever deleted or updated.
-3. **STORE-3.** The current row: the version with the highest axis value; between different facts at the same axis point, the latest known-at. Each version records the event that made it.
+3. **STORE-3.** Every class keeps history on its declared axis (an integer, a time, or arrival order) with known-at from the event's clock; there is no class without history (operator: "it's a bitemrporal store, none is silly"). The current row: the version with the highest axis value; between different facts at the same axis point, the latest known-at. Each version records the event that made it.
 4. **STORE-4.** Links, and a link's changes (ended, corrected) as more link versions.
 5. **STORE-5.** The trash event's write: a version saying dead, known at the trash event, and the node's links ended (spec-trash TRASH-2, TRASH-3).
 6. **STORE-6.** Reads: the current row, as of an axis point, and as known at a time, answered from the versions.
@@ -19,7 +19,7 @@ Operator, 2026-11-07: "store should be just the core store, everything else is o
 
 7. **STORE-7.** Hearings and aliases are removed (no reader builds them either).
 8. **STORE-8.** `seen` is removed. If something needs it later, a slow-lane reader can derive it from the log.
-9. **STORE-9.** Amend and rename move to `rannoch-processor-amend`, a processor, built with the harness, not before it.
+9. **STORE-9.** Amend moves to `rannoch-processor-amend`, a processor, built with the harness, not before it. Changing a fact's key is a rekey, not an amend (operator: "so a rekey?").
 10. **STORE-10.** No trim.
 
 ## Crates
@@ -32,4 +32,6 @@ Operator, 2026-11-07: "store should be just the core store, everything else is o
 
 ## Open, for the operator
 
-1. Whether STORE-11 (the crate split) lands before the store changes, as a change with no behaviour difference.
+1. Whether a rekey is its own event in the core store (it ends the old key, writes the new one, and keeps the old-to-new mapping every later write checks), with amend changing properties only.
+
+2. Whether STORE-11 (the crate split) lands before the store changes, as a change with no behaviour difference.
