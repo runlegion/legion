@@ -1,5 +1,66 @@
 # Legion Changelog
 
+## 0.44.9
+
+The judgment-in-the-agents release. On 0.44.8 a PR could not open until a separate
+simplify pass had recorded a clean gate, `legion verify` demoted a Pass to Uncertain when
+its evidence lacked certain words, and review and verify were pinned to Sonnet while the
+builders ran on the session's model. Simplify is gone: `legion pr create` needs only the
+pr-write gate, and review now reports the structural problems simplify used to look for.
+Verify records each verdict as the agent gave it. Review and verify run on the session's
+model, and the rusty and typey builders read their past size predictions before making a
+new one.
+
+Patch release: fixes and one additive check within the existing pr, verify and plugin
+pipeline. One subcommand is removed, `legion quality-gate check`, which existed only to
+validate simplify articulations. No wire-format change and no schema migration; the
+`quality_gates` table is unchanged and `SCHEMA_VERSION` stays 3.
+
+### New
+
+- **Review checks the diff for structure** (PR #1511, #1502). `plugin/agents/legion-review.md`
+  and the `legion-review` skill add a Structure dimension (MED): duplicate logic,
+  unnecessary abstraction, stringly-typed state and other structural problems in code the
+  diff adds, each reported as a finding with its file and what is wrong. A structural
+  problem counts as a finding both with Gherkin scenarios, where it joins the "real
+  defects" question, and without them, alongside unmet criteria and broken repo rules.
+  This takes over the work the removed simplify pass did.
+
+### Fixed
+
+- **`legion pr create` no longer requires a simplify gate** (PR #1510, #1501). The command
+  now checks only that a clean `legion-pr-write` gate is recorded on HEAD; `--skip-gates`
+  skips that one gate and audits the skip as before. Skills, agents, `/legion-release`,
+  `scripts/release.sh` and the site docs no longer tell anyone to run simplify, and the
+  architecture docs describe three pipeline skills: pr-write, review, verify.
+- **Verify records verdicts as given** (PR #1512, #1507). `decide` and `decide_spec_multi`
+  in `src/verify.rs` no longer run `is_vacuous_evidence`, which demoted a Pass to
+  Uncertain when its evidence restated the criterion, carried none of a fixed list of
+  marker words, or, for a no-warnings build criterion, cited anything but a CI run. Any
+  Fail blocks, any Uncertain needs a human, and all Pass records a clean gate, whatever
+  the evidence says. The legion-verify agent and skill now state the job directly: read
+  the issue and the spec, learn what was supposed to be built, score the result against
+  the scenarios and the intent, and signal drift.
+- **Review and verify run on the session's model** (PR #1513, #1508). The `model: sonnet`
+  line is removed from `plugin/agents/legion-review.md` and
+  `plugin/agents/legion-verify.md`, so the stages that judge the work run on the same
+  model as the builders that do it.
+- **rusty and typey read the uncertainty record before predicting** (PR #1514, #1509). In
+  step 3 of `plugin/agents/rusty.md` and `plugin/agents/typey.md`, each builder now runs
+  `legion uncertainty predictions --state witnessed` and `legion uncertainty calibration`
+  for its surface before emitting a size prediction, lets those outcomes set the
+  prediction and its confidence, and says in its summary what it read or that the record
+  was empty.
+
+### Removed
+
+- **The `legion-simplify` skill and `legion quality-gate check`** (PR #1510, #1501). With
+  structural review folded into legion-review, nothing needed simplify or the code that
+  served only it: the `quality-gate check` subcommand and its articulation validator
+  (`src/simplify_check.rs`), the changed-file resolver it used, the review-to-simplify
+  witness in `src/gate_trust.rs` with its witness-conflict telemetry record, and the
+  `simplify` entry in the commit audit's gate state. `legion quality-gate record` remains.
+
 ## 0.44.8
 
 The worktree-sym release. On 0.44.7 `legion sym` and `legion index` always worked on the
