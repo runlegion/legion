@@ -1,5 +1,33 @@
 # Legion Changelog
 
+## 0.44.10
+
+The finished-means-measured release. On 0.44.9 the rusty and typey builders counted their
+work finished once the gates were green, and their instructions framed a long local run as
+a cost, so a builder whose issue had a criterion measured on real data started that run in
+the background and reported before it ended. The PR arrived without its numbers and needed
+a resume round. Builders also wrote run output to the session scratchpad they shared, and
+one build overwrote another issue's verify evidence. Both builders now count work finished
+only when every acceptance criterion has its evidence, wait for their own real-data runs,
+and keep a run's output in the checkout they were given.
+
+Patch release: a fix to two agent definitions within the existing plugin, no code change,
+no wire-format change and no schema migration.
+
+### Fixed
+
+- **rusty and typey are finished when every criterion has its evidence** (PR #1520, #1519).
+  Step 4 of `plugin/agents/rusty.md` and `plugin/agents/typey.md` no longer defines finished
+  as the gates green. It is now every acceptance criterion with its evidence: the gates (the
+  three cargo gates for rusty, the `typecheck`, `test` and `lint` scripts for typey), and the
+  numbers for any criterion measured on real data, from a run the builder waited for. rusty's
+  line that a full local run "repeats" CI "while your context stays open" is gone; both
+  definitions now say CI does not run a real-data criterion, so that run is the builder's,
+  however long it takes. Everything a run writes (logs, databases, measured output) goes in
+  the builder's own checkout rather than a shared scratchpad, and the step 5 report lists
+  each criterion's evidence instead of the gates. The sentences were rewritten in place; no
+  new section was added and no other agent definition changed.
+
 ## 0.44.9
 
 The judgment-in-the-agents release. On 0.44.8 a PR could not open until a separate
