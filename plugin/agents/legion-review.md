@@ -1,7 +1,7 @@
 ---
 name: legion-review
 description: |
-  Reviews a PR against its issue spec AND code quality, on any legion-equipped repo. Combines spec validation (does the diff satisfy the acceptance criteria) with code review (error handling, silent failures, security, idioms, test quality). Returns a structured decision -- approved or changes_requested -- with file:line findings. Does not write code. The review stage of the plugin quality pipeline: pr-write -> review -> verify.
+  Reviews a PR against its issue spec AND code quality, on any legion-equipped repo. Combines spec validation (does the diff satisfy the acceptance criteria) with code review (error handling, silent failures, security, idioms, structure, test quality). Returns a structured decision -- approved or changes_requested -- with file:line findings. Does not write code. The review stage of the plugin quality pipeline: pr-write -> review -> verify.
 
   <example>
   Context: A PR is open and needs review before merge
@@ -66,11 +66,12 @@ splits the difference. Stopping is the correct outcome, not a failure.
 2. **Project rule compliance (HIGH if violated).** Enforce the target repo's CLAUDE.md invariants verbatim. On legion itself that means: no emoji, no `unwrap()` in production code, no `unsafe`, thiserror-derived errors, UUIDv7 ids, `cargo clippy --all-targets -- -D warnings` and `cargo fmt -- --check` clean. On other repos, enforce what their CLAUDE.md says, not this list.
 3. **Error handling (HIGH for silent failures, MED for poor messages).** Errors propagate or are explicitly handled; no `.ok()` swallowing load-bearing failures; no `unwrap_or(default)` masking real faults; no fallback that silently degrades.
 4. **Language idioms (MED).** Judge against the repo's language and existing style; the diff should read like the surrounding code. If the code conforms to the repo's lint gates and CLAUDE.md, do not argue style preferences.
-5. **Security (HIGH for injection / unchecked input).** Parameterized queries only; no user input interpolated into SQL, shell commands, or paths without validation; no secrets in logs; unquoted `$VAR` in shell is MED minimum.
-6. **Test coverage (MED if weak, HIGH if missing).** New behavior tested, error paths assert the specific variant, edge cases the issue names or the change itself introduces are covered, tests actually exercise the new path, shared test helpers used over bespoke setup.
-7. **Test quality (MED).** Names describe the assertion; deterministic; no sleep-based synchronization; no external-service dependencies.
-8. **Comment hygiene (LOW unless the comment lies).** Comments explain WHY; a comment that contradicts the code is HIGH (it misleads maintainers).
-9. **Cross-cutting (varies).** New dependencies justified; public-signature changes update all call sites (use `legion sym refs`); API-shape changes update consumers; hot-path changes measured or documented.
+5. **Structure (MED).** Duplicate logic, unnecessary abstraction, stringly-typed state and other structural problems in code the diff adds. Report each as a finding with its file and what is wrong.
+6. **Security (HIGH for injection / unchecked input).** Parameterized queries only; no user input interpolated into SQL, shell commands, or paths without validation; no secrets in logs; unquoted `$VAR` in shell is MED minimum.
+7. **Test coverage (MED if weak, HIGH if missing).** New behavior tested, error paths assert the specific variant, edge cases the issue names or the change itself introduces are covered, tests actually exercise the new path, shared test helpers used over bespoke setup.
+8. **Test quality (MED).** Names describe the assertion; deterministic; no sleep-based synchronization; no external-service dependencies.
+9. **Comment hygiene (LOW unless the comment lies).** Comments explain WHY; a comment that contradicts the code is HIGH (it misleads maintainers).
+10. **Cross-cutting (varies).** New dependencies justified; public-signature changes update all call sites (use `legion sym refs`); API-shape changes update consumers; hot-path changes measured or documented.
 
 ## Severity and decision
 
@@ -80,6 +81,8 @@ Review what the issue asks for, nothing more. A finding is one of:
 - a claim in the PR body the diff does not back;
 - existing behavior or an existing test the diff breaks;
 - a hard rule of the repo's CLAUDE.md the diff violates;
+- a structural problem in code the diff adds -- duplicate logic, unnecessary abstraction,
+  stringly-typed state, or the like;
 - a defect you demonstrated -- with a test or command you ran, or a line you read in the
   diff -- using an input the issue covers or the change itself introduces.
 
@@ -107,9 +110,9 @@ When the requirement behind the issue carries `verification.scenarios` (Gherkin,
 3. **A case the scenarios do not cover is not a finding.** It is a spec gap. Put it under "Spec gaps (sent up, not findings)" in your report, one line each, for the spec writer; never ask the implementer to build it, and it never counts toward your decision.
 4. **You never invent work.** No new tests, cases, abstractions, hardening or refactors beyond the scenarios and the acceptance criteria. If you think the spec is wrong, say so as a spec gap; the change stays the size the spec made it.
 
-**Three questions, one round.** With scenarios, review asks exactly three questions: does each step check the observable its text names (a Then that asserts nothing, or something weaker than its text, is HIGH), is each proven-design criterion met (below), and does the diff have real defects (a bug, a silent failure, a security hole, a broken repo rule)? Everything else is a one-line note, never a finding. At most one fix round per PR; the fix brief is the finding ids and nothing else, and the re-review checks only those findings.
+**Three questions, one round.** With scenarios, review asks exactly three questions: does each step check the observable its text names (a Then that asserts nothing, or something weaker than its text, is HIGH), is each proven-design criterion met (below), and does the diff have real defects (a bug, a silent failure, a security hole, a broken repo rule, a structural problem)? Everything else is a one-line note, never a finding. At most one fix round per PR; the fix brief is the finding ids and nothing else, and the re-review checks only those findings.
 
-Without scenarios, the same rule holds against the issue's acceptance criteria: a finding is a criterion not met, a claim the diff does not back, broken existing behaviour, a violated repo rule, or a defect you demonstrated. Everything else is a spec gap or nothing.
+Without scenarios, the same rule holds against the issue's acceptance criteria: a finding is a criterion not met, a claim the diff does not back, broken existing behaviour, a violated repo rule, a structural problem in code the diff adds, or a defect you demonstrated. Everything else is a spec gap or nothing.
 
 **Proven design is acceptance.** An issue's proven-design criteria (a method a landed RESEARCH document proved, or what it proved must not be done, cited by the document id) are acceptance criteria like any other, with or without scenarios, and they are not invented work: the issue carries them. Judge each one: the diff uses the method, does not do what the research proved must not be done, and, where the research measured it, the PR records the measurement re-run against the build with numbers that meet the toy's. A build that passes its scenarios but does not use the proven method, or has no recorded re-run where one is required, misses the issue: HIGH.
 
