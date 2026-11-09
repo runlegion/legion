@@ -18,7 +18,7 @@ Legion proposed, not confirmed:
 - The type names a row id, not a step number (`flow.<file>.<row id>`), so editing a file does not misroute events in flight.
 - No runner component: a lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits with its position.
 
-Operator said (2026-11-09), on an event's state: "the event should have -1|0|1|2 for it's 'status'", stored as an int "for speed". Read as -1 binned, 0 added, 1 in progress, 2 processed (legion's reading, to confirm). Then: "then it's temporal" (a status change is appended, never updated, as STORE-2), and "we don't need to do in-progress events, those can goto paper log". So: 0 is the `_events` row existing; 1 is not kept anywhere (the paper log was the stdout log LANES-6 cut; operator: "if it's cut. leave it cut. flows don't log I guess"); 2 and -1 are each one row appended to `_event_status (seq, status, known_at)`, -1 with its reason, in the heartbeat transaction. The body never changes. Legion proposed, not confirmed: one reader per type; a reader keeps in memory the lowest event it has not processed, derived from `_event_status` at start, so finding its next event does not walk every processed one.
+Operator said (2026-11-09), on an event's state: "the event should have -1|0|1|2 for it's 'status'", stored as an int "for speed". Read as -1 binned, 0 added, 1 in progress, 2 processed (legion's reading, to confirm). Then: "then it's temporal" (a status change is appended, never updated, as STORE-2), and "we don't need to do in-progress events, those can goto paper log". So: 0 is the `_events` row existing; 1 is not kept anywhere (the paper log was the stdout log LANES-6 cut; operator: "if it's cut. leave it cut. flows don't log I guess"); 2 and -1 are each one row appended to `_event_status (seq, reader, status, known_at)`, -1 with its reason, in the heartbeat transaction. The body never changes. A type has many readers (operator: "they are flows that could me 10000s and 1000s of different combos"), so status is kept per reader. Legion proposed, not confirmed: a reader keeps in memory the lowest event it has not processed, derived from `_event_status` at start, so finding its next event does not walk every processed one.
 
 Retries, operator 2026-11-09: "-1 and time? retry x times per x time"; "make the policy settings in the settings file". Each failed attempt appends a -1 row with its time and reason; attempts are the count of -1 rows; dead (the bin) is N of them. Legion proposed, not confirmed: backoff counts from the last failure, on wall time; whether a reader moves past an event waiting out its backoff is a setting (unordered flows skip ahead, ordered ones wait). The settings file is the build configuration LANES-3 names, which does not exist yet; legion proposes `rannoch.toml` at the app crate's root, read by `build.rs` into constants: the lanes (crate and types), and the retry policy (attempts, backoff, skip-ahead) as a default with overrides by type.
 
@@ -31,7 +31,7 @@ Operator said (2026-11-09): `rannoch-processor` is "the generic for rannoch-proc
 
 What the shape makes unneeded is the bookkeeping that covers a place saved apart from its effects. Nothing outside rannoch depends on it (kessel and eavesdrop reference rannoch only from their toys).
 
-Scope is open: the operator asked to cut "the fat that crept in last session". Only the rows marked #237, #241 or #243 came from that session (2026-11-07 and 11-08); the rows marked "before #237" are older and are listed because the shape makes them unneeded too.
+Scope: everything below, older rows included (operator, 2026-11-09: "everything.").
 
 | Cut | Where (9ffb233) | Added | Why it goes |
 |---|---|---|---|
@@ -65,15 +65,15 @@ Predictions are written and committed here before any code, as with every toy.
 - A poison event lands in the bin once, and the position moves past it.
 - Facts a second, against today's fill path and the two-lane toy's 33,000.
 - Log rows and bytes per fact, and what finished flows leave in `_events`.
-- The status's cost: facts a second with one `_event_status` row appended per event against positions only; whether a reader's next event and the bin are found by a seek, from `EXPLAIN QUERY PLAN`; and how long a reader takes to find its lowest unprocessed event at start.
+- The status's cost: facts a second with one `_event_status` row appended per event per reader, at 1, 10 and 100 readers of one type, against positions only; whether a reader's next event and the bin are found by a seek, from `EXPLAIN QUERY PLAN`; and how long a reader takes to find its lowest unprocessed event at start.
 
 **T2, a direct Rust reader.** The same Westwind work as T1's chain, written as Rust on a lane with no flow and its own parsing. To measure: facts a second and log rows per fact against T1, so the cost of declaring a step as data is known.
 
-## Open, for the operator
+## Decided, 2026-11-09
 
-1. What happens to a finished flow's events in a log that keeps everything: kept, purged by the app's rule, or written to a memory lane that never reaches `_events`. T1's log measurement informs it.
-2. Every step durable, or only a change of lane or a wait.
-3. Retry defaults, operator 2026-11-09: "10, 20m? yes": 10 attempts, 20 minutes, skip-ahead on. 20m is the whole window (operator: "ya total window"): exponential backoff from the first failure, capped so the 10 attempts end inside 20 minutes, then the event is dead.
-4. When flow files are read: compiled into Rust at build (legion's proposal, to fit LANES-3), or kept as data in a watched folder, staged and made live by a signed request after a trial against history (the 2026-10-21 programs design; flows.md open question 6).
-5. Whether rannoch dedupes by CE id at accept, so a replay writes nothing new. That is an addition, not a cut.
-6. The surgery's scope (above).
+1. Finished flows' events are kept: "IT IS TEMPORAL".
+2. Every step is durable: "yes".
+3. Retry defaults: 10 attempts inside a 20-minute total window ("10, 20m? yes"; "ya total window"), exponential backoff from the first failure, then dead; skip-ahead on.
+4. When flow files are read is legion's call (operator: "not a detail I care about"): compiled into Rust at build by `build.rs`, from the folder the settings file names, so it follows LANES-3 and nothing is configured at run time.
+5. rannoch dedupes by CE id at accept: "yes". An event whose `source` and `id` (the pair CloudEvents makes unique) are already in `_events` writes nothing, so a replayed step does not run its next step again. This is an addition, built with the surgery.
+6. The surgery covers everything listed: "everything."
