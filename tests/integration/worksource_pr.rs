@@ -1041,6 +1041,45 @@ fn quality_gate_record_refuses_empty_details() {
     );
 }
 
+/// #1516: a `--details-json` that parses to an empty payload, or whose
+/// `notes` is blank, is empty evidence -- refused, nothing recorded.
+#[test]
+fn quality_gate_record_refuses_empty_object_details() {
+    assert_empty_payload_refused("{}");
+}
+
+/// #1516: see `quality_gate_record_refuses_empty_object_details`.
+#[test]
+fn quality_gate_record_refuses_blank_notes_details() {
+    assert_empty_payload_refused(r#"{"notes":""}"#);
+}
+
+fn assert_empty_payload_refused(details: &str) {
+    let gate_repo = gate_fixture_repo();
+    let dir = tempfile::tempdir().unwrap();
+    let (_stdout, stderr) = run_fail(legion_cmd_in(dir.path(), gate_repo.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+        "--details-json",
+        details,
+    ]));
+    assert!(
+        stderr.contains("--details-json is missing or empty"),
+        "expected an empty-details refusal for {details}, got: {stderr}"
+    );
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("expected JSON array");
+    assert!(
+        arr.is_empty(),
+        "a refused record must not write a row, got: {arr:?}"
+    );
+}
+
 /// #1516: a bare test name is evidence -- its wording is not judged (#1507).
 #[test]
 fn quality_gate_record_records_bare_test_name_details() {

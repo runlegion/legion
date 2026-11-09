@@ -189,6 +189,25 @@ pub(crate) enum QualityGateAction {
     },
 }
 
+/// #1516: true when a parsed `--details-json` carries no evidence: null, a
+/// blank string, an empty object or array, or an object whose `evidence` or
+/// `notes` is present but blank. No key is required.
+fn details_value_is_empty(value: &serde_json::Value) -> bool {
+    let blank = |v: &serde_json::Value| match v {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+        _ => false,
+    };
+    blank(value)
+        || value.as_object().is_some_and(|o| {
+            ["evidence", "notes"]
+                .iter()
+                .any(|k| o.get(*k).is_some_and(blank))
+        })
+}
+
 pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()> {
     match action {
         QualityGateAction::Record {
@@ -201,7 +220,14 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 
             // #1516: a gate never records on empty evidence. What the
             // details say is not judged (#1507), only that there are some.
-            if details_json.as_deref().is_none_or(|d| d.trim().is_empty()) {
+            // A payload that parses to nothing (`{}`, `null`, `""`, `[]`) or
+            // carries a blank `evidence`/`notes` is empty too; a payload that
+            // is not JSON (a bare test name) is not judged here.
+            if details_json.as_deref().is_none_or(|d| {
+                d.trim().is_empty()
+                    || serde_json::from_str::<serde_json::Value>(d)
+                        .is_ok_and(|v| details_value_is_empty(&v))
+            }) {
                 eprintln!(
                     "[legion] error: cannot record a gate for skill '{skill}' -- \
                      --details-json is missing or empty (#1516). Pass the evidence or notes \
