@@ -22,7 +22,7 @@ Three passes, two partials, no fails.
 
 ## The test leaked
 
-The answer keys sit in legion's evidence folder, which is indexed. Need 5 reported that a search returned ANSWERS-2.md and that it did not open it; the others did not say. Need 4's pass came from store-core.md, the right source, but a look at the key cannot be ruled out. Next round: commit only a hash of the key before the run, and the key itself after scoring.
+The answer keys sit in legion's evidence folder, which is indexed. Need 5 reported that a search returned ANSWERS-2.md and that it did not open it. Need 4, in its final report, said it did not open the prepare-test answer keys; its pass came from store-core.md. Needs 1 to 3 did not say. Next round: commit only a hash of the key before the run, and the key itself after scoring.
 
 ## Found along the way (unverified by legion)
 
