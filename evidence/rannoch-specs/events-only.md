@@ -73,7 +73,7 @@ Predictions are written and committed here before any code, as with every toy.
 
 1. What happens to a finished flow's events in a log that keeps everything: kept, purged by the app's rule, or written to a memory lane that never reaches `_events`. T1's log measurement informs it.
 2. Every step durable, or only a change of lane or a wait.
-3. Retry defaults, operator 2026-11-09: "10, 20m? yes": 10 attempts, 20 minutes, skip-ahead on. Open: whether 20m is the wait between tries (about 3 hours for 10) or the whole window with exponential backoff inside it (legion's reading and preference).
+3. Retry defaults, operator 2026-11-09: "10, 20m? yes": 10 attempts, 20 minutes, skip-ahead on. 20m is the whole window (operator: "ya total window"): exponential backoff from the first failure, capped so the 10 attempts end inside 20 minutes, then the event is dead.
 4. When flow files are read: compiled into Rust at build (legion's proposal, to fit LANES-3), or kept as data in a watched folder, staged and made live by a signed request after a trial against history (the 2026-10-21 programs design; flows.md open question 6).
 5. Whether rannoch dedupes by CE id at accept, so a replay writes nothing new. That is an addition, not a cut.
 6. The surgery's scope (above).
