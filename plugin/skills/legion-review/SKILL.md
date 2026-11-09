@@ -2,8 +2,8 @@
 name: legion-review
 description: |
   The review stage of the quality pipeline: pr-write -> review -> verify. Fans
-  out independent review dimensions over an open PR (spec-vs-diff, correctness, quality,
-  security), adversarially verifies every HIGH/MED finding before reporting it, and records
+  out independent review dimensions over an open PR (spec-vs-diff, correctness, quality and
+  structure, security), adversarially verifies every HIGH/MED finding before reporting it, and records
   the result via `legion quality-gate record --skill legion-review` so downstream gates can
   require a clean review on HEAD. Run after `legion pr create`, before team sign-off and
   /legion:legion-verify.
@@ -32,7 +32,7 @@ without guessing.
 
 2. **Weigh the change before you spend on it.** Read the diff's file list and size first; the review is sized to what changed, not run in full every time.
    - **Prose only** (docs, changelog, comments, skill and agent text, README): review it yourself, in one pass, with no agents and no refuters. Check it against the issue, check that it does not contradict itself or the code, and that every command, path and link it names is real. Security applies only to a command the text tells someone to run.
-   - **Small code** (under ~100 changed lines, or config): check the diff against the issue yourself, in one pass, then run the harness review at its small setting (`/code-review low`) for correctness, with no agent of your own. Its findings pass the same scope line as every dimension: a case, test or hardening the spec and the issue do not name is a spec gap, never a finding. You still decide and record the gate (steps 4 and 5); the harness review records nothing. Grade its findings yourself: a correctness bug inside the spec's scope is HIGH, a cleanup is LOW. They skip the refuters in step 3, because the small setting already reports only what it is confident of. Say so in the report.
+   - **Small code** (under ~100 changed lines, or config): check the diff against the issue and for structural problems yourself, in one pass, then run the harness review at its small setting (`/code-review low`) for correctness, with no agent of your own. Its findings pass the same scope line as every dimension: a case, test or hardening the spec and the issue do not name is a spec gap, never a finding. You still decide and record the gate (steps 4 and 5); the harness review records nothing. Grade its findings yourself: a correctness bug inside the spec's scope is HIGH, a cleanup is LOW. They skip the refuters in step 3, because the small setting already reports only what it is confident of. Say so in the report.
    - **Everything else:** fan out, below, with only the dimensions the diff touches. `security` runs when the diff handles input, shell, secrets, files or the network; a diff that touches none of those skips it and says so.
 
    Tests, builds and lints are verify's and CI's work, not review's: never run the suite to review prose.
@@ -45,7 +45,8 @@ without guessing.
    - `spec`: acceptance-criteria-vs-diff, scope creep, claims the diff does not implement
    - `correctness`: error handling, silent failures, and edge cases the issue names or the
      change introduces
-   - `quality`: repo CLAUDE.md invariants, idioms, and whether the tests that exist check what they claim (not tests you would add)
+   - `quality`: repo CLAUDE.md invariants, idioms, structural problems in code the diff adds
+     (duplicate logic, unnecessary abstraction, stringly-typed state), and whether the tests that exist check what they claim (not tests you would add)
    - `security`: injection, unchecked input, secrets, shell quoting -- in code the diff adds
 
    Every dimension prompt carries the same scope line, verbatim: "The authority is the spec's
@@ -129,7 +130,7 @@ without guessing.
 Inherited from the legion-review agent definition and non-negotiable: every finding cites
 file:line; claims the diff does not implement are HIGH; a finding is only what the agent
 definition lists -- the issue unmet, a false PR claim, broken existing behavior, a hard-rule
-violation, or a demonstrated defect in a case the issue covers or the change introduces;
+violation, a structural problem in code the diff adds, or a demonstrated defect in a case the issue covers or the change introduces;
 a constructed case outside the issue or its scenarios is a one-line spec gap, never a
 finding, never a HIGH, and never a new issue; no style arguments beyond the repo's own CLAUDE.md and lint gates; no
 code is written or fixed by this skill -- the fix loop belongs to the implementer.
@@ -144,7 +145,8 @@ of exactly two things:
 - the diff diverges from the authority -- it does less, more, or other than the spec or the
   issue requires; or
 - the code has a real defect -- a bug, a silent failure, a security hole, a CLAUDE.md
-  violation, or a test the authority requires that is missing or cannot fail. When the
+  violation, a structural problem it adds (duplicate logic, unnecessary abstraction,
+  stringly-typed state), or a test the authority requires that is missing or cannot fail. When the
   requirement carries scenarios, they are the definition of done: a scenario that fails or
   has no step code is HIGH, and "a missing test" means only that, never a test you would
   like to see.
