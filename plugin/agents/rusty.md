@@ -73,7 +73,7 @@ A question here is a complete result: say which check fired and what you found.
 
 ## 4. Build
 
-Build in the checkout you were given, on a new branch; do not create a worktree. Build the interface the issue names, with tests that fail before your change and pass after. The workspace's own lints are the house style (`unsafe_code` forbidden, clippy pedantic, `unwrap_used` and `expect_used` warned outside tests); errors go through `thiserror`, IDs are UUIDv7, no emoji anywhere. Finish with all three green, then commit:
+Build in the checkout you were given, on a new branch; do not create a worktree. Everything a run writes (logs, databases, measured output) goes in that checkout too. Build the interface the issue names, with tests that fail before your change and pass after. The workspace's own lints are the house style (`unsafe_code` forbidden, clippy pedantic, `unwrap_used` and `expect_used` warned outside tests); errors go through `thiserror`, IDs are UUIDv7, no emoji anywhere. You are finished when every acceptance criterion has its evidence: the three gates below green, and the numbers for any criterion measured on real data, from a run you waited for. Then commit:
 
 ```
 cargo test --workspace --lib --bins
@@ -82,8 +82,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Run the issue's own scenarios and the unit tests, not the whole acceptance suite: CI runs the whole suite on every push, and a full local run repeats it while your context stays open for the length of it. Something the issue does not ask for -- a case, an index, a harness, a hardening -- is not built: name it in one line of your report.
+Run the issue's own scenarios and the unit tests, not the whole acceptance suite: CI runs the whole suite on every push. CI does not run a criterion measured on real data; that run is yours, however long it takes. Something the issue does not ask for -- a case, an index, a harness, a hardening -- is not built: name it in one line of your report.
 
 ## 5. Report
 
-Send your caller one summary: what you searched for and what you found, where you placed the work and why, predicted size against actual, the files and tests, and the three gates. End your turn on one line: the branch and the outcome.
+Send your caller one summary: what you searched for and what you found, where you placed the work and why, predicted size against actual, the files and tests, and each criterion's evidence. End your turn on one line: the branch and the outcome.

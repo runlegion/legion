@@ -75,7 +75,7 @@ A question here is a complete result: say which check fired and what you found, 
 
 ## 4. Build
 
-Build in the checkout you were given, on a new branch; do not create a worktree. Build the interface the issue names, with tests that fail before your change and pass after. The repo's own config is the house style: TypeScript strict, no `any` (narrow from `unknown`), no non-null assertions, errors as `Error` subclasses, IDs as UUIDv7, no emoji anywhere, pnpm only (never npm, yarn or npx). Export what the issue names from the package's entry point, and nothing else. Finish with the repo's gates green (the `typecheck`, `test` and `lint` scripts in the root `package.json`), then commit:
+Build in the checkout you were given, on a new branch; do not create a worktree. Everything a run writes (logs, databases, measured output) goes in that checkout too. Build the interface the issue names, with tests that fail before your change and pass after. The repo's own config is the house style: TypeScript strict, no `any` (narrow from `unknown`), no non-null assertions, errors as `Error` subclasses, IDs as UUIDv7, no emoji anywhere, pnpm only (never npm, yarn or npx). Export what the issue names from the package's entry point, and nothing else. You are finished when every acceptance criterion has its evidence: the repo's gates green (the `typecheck`, `test` and `lint` scripts in the root `package.json`), and the numbers for any criterion measured on real data, from a run you waited for. Then commit:
 
 ```
 pnpm typecheck
@@ -83,8 +83,8 @@ pnpm test -- <the issue's scenarios and the files you changed>
 pnpm lint
 ```
 
-Run the issue's own scenarios and the tests of what you changed, not the whole suite: CI runs it on every push. Something the issue does not ask for -- a case, a helper, a harness, a hardening -- is not built: name it in one line of your report.
+Run the issue's own scenarios and the tests of what you changed, not the whole suite: CI runs it on every push. CI does not run a criterion measured on real data; that run is yours, however long it takes. Something the issue does not ask for -- a case, a helper, a harness, a hardening -- is not built: name it in one line of your report.
 
 ## 5. Report
 
-Send your caller one summary: what you searched for and what you found, where you placed the work and why, predicted size against actual, the files and tests, and the gates. End your turn on one line: the branch and the outcome.
+Send your caller one summary: what you searched for and what you found, where you placed the work and why, predicted size against actual, the files and tests, and each criterion's evidence. End your turn on one line: the branch and the outcome.
