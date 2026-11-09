@@ -37,6 +37,7 @@ Scope is open: the operator asked to cut "the fat that crept in last session". O
 | Fill's worker place (`rannoch.fill`), its failed rows, `_fill` try limit, retries | `rannoch-store/src/lib.rs` (FILL, 19 refs) | before #237 | Fill keeps a position; an event it cannot apply becomes a bin CE with its reason |
 | `take_failures`, `on_failure`, `processed`, `remove_worker`, `state` passthroughs | `rannoch-queue-mem/src/lib.rs` | before #237 | They pass through the cuts above; `Failure::Event` at commit stays (it is accept's) |
 | `done`, `failed` on `Trickle` | `rannoch-queue-trickle/src/lib.rs:44,48` | #241 | As the contract |
+| `rannoch-processor-bin` | `crates/` | scaffold | Operator, 2026-11-09: "bin should not be a processor ... it's part of the queue". A lane that fails an event bins it and moves its position past it, in one commit; a row's `else: bin` fails the event to the queue |
 | `rannoch-harness` | `crates/` | scaffold | Empty, and the lanes run the rows; open whether it is kept as the place lanes call rows from |
 
 Added, because the cuts need them:
@@ -67,7 +68,7 @@ Predictions are written and committed here before any code, as with every toy.
 
 1. What happens to a finished flow's events in a log that keeps everything: kept, purged by the app's rule, or written to a memory lane that never reaches `_events`. T1's log measurement informs it.
 2. Every step durable, or only a change of lane or a wait.
-3. Fill's failures: does a bin CE replace retries, or does fill keep a retry before the bin.
+3. Failures in the queue: retries before the bin (as Sidekiq: a few retries with backoff, then the dead set; a retry could be the event re-sent with its attempt count and a delay), or straight to the bin. And whether the bin is a `rannoch.binned` event carrying the original cursor, lane and reason (legion's proposal: read with `next_of`, sent back by accepting the original body again) or a table of its own.
 4. When flow files are read: compiled into Rust at build (legion's proposal, to fit LANES-3), or kept as data in a watched folder, staged and made live by a signed request after a trial against history (the 2026-10-21 programs design; flows.md open question 6).
 5. Whether rannoch dedupes by CE id at accept, so a replay writes nothing new. That is an addition, not a cut.
 6. The surgery's scope (above).
