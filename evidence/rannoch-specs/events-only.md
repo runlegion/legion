@@ -20,6 +20,8 @@ Legion proposed, not confirmed:
 
 Operator said (2026-11-09), on an event's state: "the event should have -1|0|1|2 for it's 'status'", stored as an int "for speed". Read as -1 binned, 0 added, 1 in progress, 2 processed (legion's reading, to confirm). Then: "then it's temporal" (a status change is appended, never updated, as STORE-2), and "we don't need to do in-progress events, those can goto paper log". So: 0 is the `_events` row existing; 1 is not kept anywhere (the paper log was the stdout log LANES-6 cut; operator: "if it's cut. leave it cut. flows don't log I guess"); 2 and -1 are each one row appended to `_event_status (seq, status, known_at)`, -1 with its reason, in the heartbeat transaction. The body never changes. Legion proposed, not confirmed: one reader per type; a reader keeps in memory the lowest event it has not processed, derived from `_event_status` at start, so finding its next event does not walk every processed one.
 
+Retries, operator 2026-11-09: "-1 and time? retry x times per x time"; "make the policy settings in the settings file". Each failed attempt appends a -1 row with its time and reason; attempts are the count of -1 rows; dead (the bin) is N of them. Legion proposed, not confirmed: backoff counts from the last failure, on wall time; whether a reader moves past an event waiting out its backoff is a setting (unordered flows skip ahead, ordered ones wait). The settings file is the build configuration LANES-3 names, which does not exist yet; legion proposes `rannoch.toml` at the app crate's root, read by `build.rs` into constants: the lanes (crate and types), and the retry policy (attempts, backoff, skip-ahead) as a default with overrides by type.
+
 Operator said (2026-11-09): `rannoch-processor` is "the generic for rannoch-processors-* only": the contract each step kind meets, not a runner. A step kind (`rannoch-processor-host`, `-emit`, `-wait`, ...) meets it: CE and row in, CEs out.
 - A step reads the body as borrowed bytes; only a guard or template that reads a field parses `data`.
 - Rust code that handles its own events needs no flow: it reads its types from a lane.
@@ -71,7 +73,7 @@ Predictions are written and committed here before any code, as with every toy.
 
 1. What happens to a finished flow's events in a log that keeps everything: kept, purged by the app's rule, or written to a memory lane that never reaches `_events`. T1's log measurement informs it.
 2. Every step durable, or only a change of lane or a wait.
-3. Failures in the queue: retries before the bin (as Sidekiq: a few retries with backoff, then the dead set; a retry could be the event re-sent with its attempt count and a delay), or straight to the bin. And whether the bin is a `rannoch.binned` event carrying the original cursor, lane and reason (legion's proposal: read with `next_of`, sent back by accepting the original body again) or a table of its own.
+3. Retry defaults: the number of attempts, the backoff, and whether skip-ahead is on by default.
 4. When flow files are read: compiled into Rust at build (legion's proposal, to fit LANES-3), or kept as data in a watched folder, staged and made live by a signed request after a trial against history (the 2026-10-21 programs design; flows.md open question 6).
 5. Whether rannoch dedupes by CE id at accept, so a replay writes nothing new. That is an addition, not a cut.
 6. The surgery's scope (above).
