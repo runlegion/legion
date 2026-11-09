@@ -962,6 +962,8 @@ fn quality_gate_record_prints_id() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]))
     .trim()
     .to_string();
@@ -983,6 +985,8 @@ fn quality_gate_record_refuses_clean_for_check_gated_skill() {
         "legion-pr-write",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     assert!(
         stderr.contains("check validator"),
@@ -996,6 +1000,66 @@ fn quality_gate_record_refuses_clean_for_check_gated_skill() {
         arr.is_empty(),
         "a refused record must not write a row, got: {arr:?}"
     );
+}
+
+/// #1516: `quality-gate record` refuses a record with missing, empty, or
+/// whitespace-only `--details-json`, and records nothing.
+#[test]
+fn quality_gate_record_refuses_empty_details() {
+    let gate_repo = gate_fixture_repo();
+    let dir = tempfile::tempdir().unwrap();
+    let base = [
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+    ];
+
+    for extra in [
+        &[][..],
+        &["--details-json", ""][..],
+        &["--details-json", "  \n"][..],
+    ] {
+        let (_stdout, stderr) = run_fail(
+            legion_cmd_in(dir.path(), gate_repo.path())
+                .args(base)
+                .args(extra),
+        );
+        assert!(
+            stderr.contains("--details-json is missing or empty"),
+            "expected an empty-details refusal for {extra:?}, got: {stderr}"
+        );
+    }
+
+    let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("expected JSON array");
+    assert!(
+        arr.is_empty(),
+        "a refused record must not write a row, got: {arr:?}"
+    );
+}
+
+/// #1516: a bare test name is evidence -- its wording is not judged (#1507).
+#[test]
+fn quality_gate_record_records_bare_test_name_details() {
+    let gate_repo = gate_fixture_repo();
+    let dir = tempfile::tempdir().unwrap();
+
+    let id = run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
+        "quality-gate",
+        "record",
+        "--skill",
+        "legion-review",
+        "--result",
+        "clean",
+        "--details-json",
+        "tests::retry_path",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&id);
 }
 
 /// #780: `record --result issues` is still allowed for a check-gated skill --
@@ -1296,6 +1360,8 @@ fn quality_gate_pending_finding_is_scoped_to_its_repo() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ];
     run_ok(legion_cmd_in(dir.path(), repo_b.path()).args(clean));
     let (_stdout, stderr) = run_fail(legion_cmd_in(dir.path(), repo_a.path()).args(clean));
@@ -2766,6 +2832,8 @@ fn quality_gate_list_shows_recorded_rows() {
         "legion-pr-write",
         "--result",
         "issues",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
@@ -2774,6 +2842,8 @@ fn quality_gate_list_shows_recorded_rows() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list"]));
@@ -2811,6 +2881,8 @@ fn quality_gate_list_filter_by_skill() {
         "legion-pr-write",
         "--result",
         "issues",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
@@ -2819,6 +2891,8 @@ fn quality_gate_list_filter_by_skill() {
         "legion-review",
         "--result",
         "issues",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
 
     let stdout =
@@ -2852,6 +2926,8 @@ fn quality_gate_list_filter_by_result() {
         "s",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
@@ -2914,6 +2990,8 @@ fn quality_gate_void_marks_row_and_stays_visible_in_list() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]))
     .trim()
     .to_string();
@@ -2966,6 +3044,8 @@ fn quality_gate_void_links_superseding_row() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]))
     .trim()
     .to_string();
@@ -2976,6 +3056,8 @@ fn quality_gate_void_links_superseding_row() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]))
     .trim()
     .to_string();
@@ -3108,6 +3190,8 @@ fn quality_gate_stats_shows_per_skill_aggregates() {
         "legion-review",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
@@ -3153,6 +3237,8 @@ fn quality_gate_stats_json_shape() {
         "s",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     // #1008: each issues run's --findings-count 1 needs a matching
     // --details-json entry or the contradiction guard refuses it. Distinct
@@ -3211,6 +3297,8 @@ fn quality_gate_stats_filter_by_skill() {
         "legion-pr-write",
         "--result",
         "issues",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
@@ -3219,6 +3307,8 @@ fn quality_gate_stats_filter_by_skill() {
         "legion-review",
         "--result",
         "issues",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
 
     let stdout = run_ok(legion_cmd(dir.path()).args([
@@ -3383,6 +3473,59 @@ fn verify_issue_requires_amendment_done_when_criteria() {
     );
 }
 
+/// #1516: a pass with whitespace-only evidence refuses the run, naming the
+/// criterion, and records nothing; a bare test name as evidence records.
+#[cfg(unix)]
+#[test]
+fn verify_issue_refuses_pass_with_empty_evidence() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), AMENDED_ISSUE_STUB);
+    let verify_args = |path: &std::path::Path| {
+        let mut cmd = pr_read_cmd(data_dir.path(), plugin_root.path());
+        cmd.args([
+            "verify",
+            "--repo",
+            "stub",
+            "--issue",
+            "7",
+            "--verdicts-file",
+        ])
+        .arg(path);
+        cmd
+    };
+    let with_evidence = |evidence: &str| {
+        let mut v: Vec<serde_json::Value> = serde_json::from_str(&amended_verdicts(6)).unwrap();
+        for entry in &mut v {
+            entry["evidence"] = serde_json::json!("tests::slug_view");
+        }
+        v[1]["evidence"] = serde_json::json!(evidence);
+        serde_json::Value::Array(v).to_string()
+    };
+
+    let verdicts = data_dir.path().join("verdicts.json");
+    std::fs::write(&verdicts, with_evidence(" \t")).unwrap();
+    let (_stdout, stderr) = run_fail(&mut verify_args(&verdicts));
+    assert!(
+        stderr.contains("carry empty evidence")
+            && stderr.contains("A test shows an unknown slug exits non-zero"),
+        "expected an empty-evidence refusal naming the criterion, got: {stderr}"
+    );
+    let list = run_ok(legion_cmd(data_dir.path()).args(["quality-gate", "list", "--json"]));
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
+    assert!(
+        rows.is_empty(),
+        "a refused verify must record nothing, got: {rows:?}"
+    );
+
+    std::fs::write(&verdicts, with_evidence("tests::slug_view")).unwrap();
+    let stdout = run_ok(&mut verify_args(&verdicts));
+    assert!(stdout.contains("verify PASS"), "got: {stdout}");
+    let list = run_ok(legion_cmd(data_dir.path()).args(["quality-gate", "list", "--json"]));
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
+    assert_eq!(rows.len(), 1, "a bare test name must record, got: {rows:?}");
+}
+
 // -- #933: issues trace to their requirement --------------------------------
 
 /// A `view-issue` stub whose body carries a `## Traces to` bullet naming
@@ -3469,6 +3612,41 @@ fn verify_issue_traced_requirement_resolves_spec_criteria_and_proceeds() {
     );
 
     let verdicts = data_dir.path().join("verdicts.json");
+
+    // #1516: a pass with no artifacts is empty evidence -- refused, nothing
+    // recorded.
+    std::fs::write(
+        &verdicts,
+        serde_json::json!([{
+            "spec_doc_id": "FR-TRACE-ISSUE-1",
+            "spec_revision": 1,
+            "criterion_id": criterion_id,
+            "verdict": "pass",
+            "artifacts": []
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let (_stdout, stderr) = run_fail(pr_read_cmd(data_dir.path(), plugin_root.path()).args([
+        "verify",
+        "--repo",
+        "stub",
+        "--issue",
+        "9",
+        "--verdicts-file",
+        verdicts.to_str().unwrap(),
+    ]));
+    assert!(
+        stderr.contains("carry empty evidence") && stderr.contains("ships the retry path"),
+        "expected an empty-artifacts refusal naming the criterion, got: {stderr}"
+    );
+    let list = run_ok(legion_cmd(data_dir.path()).args(["quality-gate", "list", "--json"]));
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
+    assert!(
+        rows.is_empty(),
+        "a refused verify must record nothing, got: {rows:?}"
+    );
+
     std::fs::write(
         &verdicts,
         serde_json::json!([{
@@ -3865,6 +4043,8 @@ fn issue_close_refused_when_verify_verdict_is_not_clean() {
         "legion-verify:issue-owner/stub#42",
         "--result",
         "issues",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
 
     let (_stdout, stderr) = run_fail(
@@ -3901,6 +4081,8 @@ fn issue_close_allowed_when_verify_verdict_is_clean() {
         "legion-verify:issue-owner/stub#42",
         "--result",
         "clean",
+        "--details-json",
+        r#"{"notes":"fixture"}"#,
     ]));
 
     let stdout = run_ok(

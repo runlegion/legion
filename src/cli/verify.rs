@@ -45,7 +45,8 @@ pub(crate) enum QualityGateAction {
         #[arg(long, default_value = "0")]
         findings_count: u64,
 
-        /// Raw JSON details from the skill (full findings array)
+        /// Raw JSON details from the skill (full findings array). Required:
+        /// a record with no evidence or notes is refused (#1516).
         #[arg(long)]
         details_json: Option<String>,
     },
@@ -197,6 +198,17 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             details_json,
         } => {
             let gate_result = GateResult::from_str(&result)?;
+
+            // #1516: a gate never records on empty evidence. What the
+            // details say is not judged (#1507), only that there are some.
+            if details_json.as_deref().is_none_or(|d| d.trim().is_empty()) {
+                eprintln!(
+                    "[legion] error: cannot record a gate for skill '{skill}' -- \
+                     --details-json is missing or empty (#1516). Pass the evidence or notes \
+                     for this result in --details-json."
+                );
+                return Err(error::LegionError::ExitWith(1));
+            }
 
             // #780: a "clean" verdict for a skill with a check validator can
             // only be earned by passing that validator. Refusing here closes
@@ -1080,6 +1092,12 @@ fn handle_verify_issue(
                  {{criterion, verdict, evidence}}): {e}"
             ))
         })?;
+        let empty: Vec<&str> = results
+            .iter()
+            .filter(|r| r.verdict == verify::AcVerdict::Pass && r.evidence.trim().is_empty())
+            .map(|r| r.criterion.as_str())
+            .collect();
+        refuse_empty_pass_evidence(&empty)?;
         let decision = verify::decide(&acceptance, &results);
         let results_value = serde_json::to_value(&results)?;
 
@@ -1103,6 +1121,23 @@ fn handle_verify_issue(
              {{spec_doc_id, spec_revision, criterion_id, verdict, artifacts}}): {e}"
         ))
     })?;
+    // A spec verdict's evidence is its artifacts: none with a ref is empty.
+    let empty: Vec<&str> = results
+        .iter()
+        .filter(|r| {
+            r.verdict == verify::AcVerdict::Pass
+                && r.artifacts.iter().all(|a| a.reference.trim().is_empty())
+        })
+        .map(|r| {
+            requirements
+                .iter()
+                .filter(|q| q.doc_id == r.spec_doc_id)
+                .flat_map(|q| &q.criteria)
+                .find(|c| c.id == r.criterion_id)
+                .map_or(r.criterion_id.as_str(), |c| c.text.as_str())
+        })
+        .collect();
+    refuse_empty_pass_evidence(&empty)?;
     let decision = verify::decide_spec_multi(&requirements, &results);
     let results_value = serde_json::to_value(&results)?;
 
@@ -1114,6 +1149,24 @@ fn handle_verify_issue(
         decision,
         results_value,
     )
+}
+
+/// Refuse a verify run in which a pass carries empty evidence (#1516),
+/// naming each such criterion. Runs before any gate is recorded, so a
+/// refused run records nothing.
+fn refuse_empty_pass_evidence(criteria: &[&str]) -> error::Result<()> {
+    if criteria.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "[legion] error: verify refused -- {} pass verdict(s) carry empty evidence (#1516); \
+         nothing was recorded:",
+        criteria.len()
+    );
+    for c in criteria {
+        eprintln!("  - {c}");
+    }
+    Err(error::LegionError::ExitWith(1))
 }
 
 /// What a verify verdict is bound to: a work-source issue (#913). #931
