@@ -41,6 +41,12 @@ validate simplify articulations. No wire-format change and no schema migration; 
   the evidence says. The legion-verify agent and skill now state the job directly: read
   the issue and the spec, learn what was supposed to be built, score the result against
   the scenarios and the intent, and signal drift.
+- **No gate records on empty evidence** (PR #1517, #1516). `legion verify` exits with an error,
+  and records nothing, when a criterion's verdict is pass and its evidence is empty or only
+  whitespace, naming the criterion. `legion quality-gate record` exits with an error, and
+  records nothing, when its `--details-json` is missing, blank or empty, or carries blank
+  evidence or notes. A record with any non-empty evidence records as before; nothing judges
+  its wording.
 - **Review and verify run on the session's model** (PR #1513, #1508). The `model: sonnet`
   line is removed from `plugin/agents/legion-review.md` and
   `plugin/agents/legion-verify.md`, so the stages that judge the work run on the same
