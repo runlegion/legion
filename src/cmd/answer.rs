@@ -872,8 +872,10 @@ mod tests {
         git(&repo.root, &["add", "."]);
         git(&repo.root, &["commit", "-q", "-m", "initial"]);
         let trees: TempDir = tempfile::tempdir().expect("tempdir");
-        let tree: PathBuf = fs::canonicalize(trees.path())
-            .expect("canonical")
+        // Not fs::canonicalize: on Windows it returns a `\\?\C:\` verbatim path, which
+        // `git worktree add` cannot create.
+        let tree: PathBuf = std::path::absolute(trees.path())
+            .expect("absolute")
             .join("wt");
         git(
             &repo.root,
