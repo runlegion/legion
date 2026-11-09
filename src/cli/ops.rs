@@ -277,7 +277,7 @@ pub(crate) enum UncertaintyAction {
         #[arg(long, conflicts_with_all = ["skill", "commit"])]
         id: Option<String>,
         /// Gate skill name the verdict was recorded under (e.g.
-        /// "legion-simplify", "legion-review").
+        /// "legion-pr-write", "legion-review").
         #[arg(long, required_unless_present = "id")]
         skill: Option<String>,
         /// Commit hash the gate verdict was recorded against: the full sha,

@@ -56,11 +56,11 @@ so.
 
 If `--dry-run` was passed, stop here and report what would have happened.
 
-**4b. Earn the gates.** On `release/NEW`, run `/legion:legion-simplify` and then
-`/legion:legion-pr-write`. This is not ceremony to work around a tool -- it is
-the point of the change. Both gates are keyed to the release commit's hash and
-`legion pr create` refuses without a clean row for each, which is exactly what
-every feature branch faces. Do not reach for `--skip-gates`.
+**4b. Earn the gate.** On `release/NEW`, run `/legion:legion-pr-write`. This is
+not ceremony to work around a tool -- it is the point of the change. The gate is
+keyed to the release commit's hash and `legion pr create` refuses without a
+clean row for it, which is exactly what every feature branch faces. Do not reach
+for `--skip-gates`.
 
 **4c. Open and enqueue.** `legion pr create --repo legion --title "chore(release):
 NEW" --head release/NEW --body-file <the body you validated>`, then `legion pr
@@ -145,8 +145,8 @@ changed (internal refactor, test-only, CI), it should say so and write nothing -
 not every release needs docs.
 
 If writer-legion produced doc changes, take them through shingle's normal gate
-flow from inside the worktree (issue -> simplify gate -> pr-write -> `legion pr
-create --repo shingle`), or extend the open docs PR if one is already on that
+flow from inside the worktree (issue -> pr-write -> `legion pr create --repo
+shingle`), or extend the open docs PR if one is already on that
 branch. `legion push` resolves the checkout holding the branch itself, so it
 works from the worktree unchanged. Report the PR URL.
 

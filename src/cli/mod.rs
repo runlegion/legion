@@ -1082,8 +1082,8 @@ pub(crate) enum Commands {
     ///
     /// Commits only the staged index (no `-a`, nothing is staged for you)
     /// and audit-logs every attempt -- refusals included -- with the
-    /// resolved checkout, pre/post HEAD, card id, and the simplify /
-    /// pr-write gate state of the commit being built on.
+    /// resolved checkout, pre/post HEAD, card id, and the pr-write gate
+    /// state of the commit being built on.
     Commit {
         /// Repository name (identifies the calling agent for the audit log)
         #[arg(long)]

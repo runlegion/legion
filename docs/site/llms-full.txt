@@ -583,7 +583,7 @@ QUALITY-GATE
 
 Records a quality-gate result (clean/issues plus findings) keyed on the current
 HEAD commit, so it cannot be faked via a file flag. The skill runners
-(legion-simplify, legion-pr-write, legion-review, legion-verify) record here;
+(legion-pr-write, legion-review, legion-verify) record here;
 `legion pr create` and `legion done` verify these gates before proceeding.
 Results live in the HEAD-keyed quality_gates table.
 
@@ -609,10 +609,10 @@ Manages the full pull-request lifecycle via work-source plugins.
         create          Create a PR. Requires --repo and --title; optional
                         --body, --base, --head, --draft, --labels, --reviewer,
                         --task (kanban card to link; stores PR URL on the card).
-                        Gates on clean legion-simplify AND legion-pr-write quality
-                        gates on HEAD. --skip-gates is bootstrap-only (use when
-                        the branch IS the simplify skill); writes an audit row so
-                        it cannot be done silently.
+                        Gates on a clean legion-pr-write quality gate on HEAD.
+                        --skip-gates is bootstrap-only (use when the branch IS
+                        the pr-write skill); writes an audit row so it cannot
+                        be done silently.
         list            List open PRs with review status.
         checks          Show CI check status; exits non-zero if any check is not
                         in a known passing or in-flight state (fail-closed on
@@ -1154,8 +1154,8 @@ incrementally via has_column checks):
        to report alive | stale | absent.
 
 Additional tables not covered by the numbered migration sequence:
-    quality_gates       HEAD-keyed gate results (legion-simplify, legion-pr-write,
-                        legion-review, legion-verify) that pr create and done
+    quality_gates       HEAD-keyed gate results (legion-pr-write, legion-review,
+                        legion-verify) that pr create and done
                         verify.
     scip_indexes        (v0.10.0) Persistent SCIP protobuf index storage keyed on
                         (repo, lang) with sha2 content addressing; the backing
@@ -1534,18 +1534,12 @@ PLUGIN SKILLS
         doctrine. Order: recall -> consult -> then grep/glob/read.
         Allowed tools: Bash, Read.
 
-    legion-simplify     User-invocable (/legion:legion-simplify).
-        Reviews the branch diff for duplicate logic, needless abstraction, and
-        stringly-typed state. Emits structured JSON findings and records the
-        simplify gate via `legion quality-gate record` that `legion pr create`
-        requires. Run on every feature branch before the PR.
-
     legion-pr-write     (v0.16.2) User-invocable (/legion:legion-pr-write).
         Composes the PR body as an articulation-as-verification forcing function:
         map each acceptance criterion to the change satisfying it with evidence;
         state what was deliberately not done; validate with
-        `legion pr write-check`. Records a clean legion-pr-write gate on success.
-        Run after /legion:legion-simplify, before review.
+        `legion pr write-check`. Records a clean legion-pr-write gate on success
+        that `legion pr create` requires. Run before review.
 
     legion-review       (v0.17.2) User-invocable (/legion:legion-review).
         The review gate between pr-write and verify. Orchestrates parallel
@@ -1680,8 +1674,8 @@ PROJECT LAYOUT
         commands/       Slash command skills
         agents/         Agent definitions (legion-prime, dungeon-master,
                         legion-explore, legion-review)
-        skills/         Skill definitions (legion-memory, legion-simplify,
-                        legion-pr-write, legion-review, legion-verify)
+        skills/         Skill definitions (legion-memory, legion-pr-write,
+                        legion-review, legion-verify)
         verbs/          TOML verb manifests defining wake shapes (v0.17.0)
         channel/        MCP server for real-time team channel (TypeScript/Bun)
     install.sh          Standalone installer (curl|bash)

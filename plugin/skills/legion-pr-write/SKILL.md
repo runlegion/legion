@@ -7,7 +7,7 @@ description: |
   mapping makes you re-read your own diff as a reader and catch what you talked past while
   coding. Validate the body with `legion pr write-check`, which refuses an empty or
   boilerplate mapping and records the gate `legion pr create` requires. Run this after
-  `/legion:legion-simplify`, before review.
+  the build, before review.
 version: 1.0.0
 user-invocable: true
 allowed-tools: Bash, Read, Write
@@ -15,13 +15,12 @@ allowed-tools: Bash, Read, Write
 
 # Legion PR-Write
 
-The step between simplify and review. You write the PR body that maps the issue's
+The step between the build and review. You write the PR body that maps the issue's
 acceptance criteria to your change, then validate it. The body you produce is the claim
 set the verify gate (#520) and the human reviewer read -- so write it for a reader who
 has not seen your work.
 
-`legion pr create` will not open the PR until this gate is clean on HEAD (alongside the
-simplify gate).
+`legion pr create` will not open the PR until this gate is clean on HEAD.
 
 ## Procedure
 

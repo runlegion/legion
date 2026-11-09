@@ -217,7 +217,7 @@ For issues that touch code, the acceptance criteria must name specific assertion
 
 Every issue has a `## Acceptance criteria` section: one `- ` line per criterion, in the requirement's wording, each naming an observable the verifier can check. `legion pr write-check` reads criteria only from that heading, and the PR body maps one entry to each. When the canonical template lacks the heading, add it after the last section that describes the work and say so in your report.
 
-Steps the gates already record (tests pass, simplify, review, PR created, verify) are not criteria; do not list them.
+Steps the gates already record (tests pass, review, PR created, verify) are not criteria; do not list them.
 
 ### 3. No wishful scope
 

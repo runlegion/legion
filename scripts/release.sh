@@ -41,10 +41,9 @@
 #   7. Pushes that branch via `legion push`, then STOPS. Nothing is tagged.
 #
 # The release is deliberately TWO invocations, with an agent's work between
-# them. Earning the legion-simplify and legion-pr-write gates on the release
-# commit and opening the PR cannot be done by a script: both gates are keyed to
-# the commit's hash and a clean verdict only exists once their CHECK validators
-# have run. So the orchestrator runs the gates, `legion pr create` and `legion
+# them. Earning the legion-pr-write gate on the release commit and opening the
+# PR cannot be done by a script: the gate is keyed to the commit's hash and a
+# clean verdict only exists once its CHECK validator has run. So the orchestrator runs the gates, `legion pr create` and `legion
 # pr merge` (see plugin/commands/legion-release.md step 4), and then calls:
 #
 #   scripts/release.sh <X.Y.Z> --finish=<pr-number>
@@ -683,10 +682,9 @@ main() {
 
   # -- finish mode: phases 7b-9 of an already-staged release -----------------
   # Split from the staging run because the step between them -- earning the
-  # legion-simplify and legion-pr-write gates on the release commit and opening
-  # the PR -- is an AGENT's job, not a script's: both gates are keyed to the
-  # commit hash, and a clean verdict can only be recorded through their CHECK
-  # validators. That is the point of #844, not a workaround for it: the release
+  # legion-pr-write gate on the release commit and opening the PR -- is an
+  # AGENT's job, not a script's: the gate is keyed to the commit hash, and a
+  # clean verdict can only be recorded through its CHECK validator. That is the point of #844, not a workaround for it: the release
   # commit passes the same gates every other change passes.
   if [ "$MODE" = "finish" ]; then
     local F_TAG F_TAG_MESSAGE
@@ -833,7 +831,7 @@ Co-Authored-By: ${CO_AUTHORED_BY}"
 
   if [ "$DRY_RUN" = "1" ]; then
     printf '[dry-run] legion push --repo %s --branch %s\n' "$WORK_REPO" "$RELEASE_PR_BRANCH" >&2
-    printf '[dry-run] then: simplify + pr-write gates, legion pr create, legion pr merge\n' >&2
+    printf '[dry-run] then: pr-write gate, legion pr create, legion pr merge\n' >&2
     printf '[dry-run] then: %s\n' "$FINISH_CMD" >&2
     printf '[dry-run] which waits for the queue, verifies origin/%s carries %s, tags that sha as %s and pushes ONLY the tag\n' \
       "$RELEASE_BRANCH" "$NEW" "$TAG" >&2
@@ -848,12 +846,12 @@ Co-Authored-By: ${CO_AUTHORED_BY}"
     || fail "'legion push' failed for ${RELEASE_PR_BRANCH} -- the release commit exists locally but is not on the remote. Fix the push, then re-run it; nothing has been tagged."
 
   # -- 7b. hand off to the gates, then come back via --finish ----------------
-  # Deliberately NOT done here: the legion-simplify and legion-pr-write gates
-  # are keyed to the release commit's hash and can only be earned through their
-  # CHECK validators, which is an agent's job. That is exactly the point -- the
+  # Deliberately NOT done here: the legion-pr-write gate is keyed to the
+  # release commit's hash and can only be earned through its CHECK validator,
+  # which is an agent's job. That is exactly the point -- the
   # release commit passes the same gates every other change passes.
   info "release ${NEW} is STAGED, not shipped: ${RELEASE_PR_BRANCH} is pushed and nothing is tagged."
-  info "next: run the legion-simplify and legion-pr-write gates on this branch, then"
+  info "next: run the legion-pr-write gate on this branch, then"
   info "      legion pr create --repo ${WORK_REPO} --title 'chore(release): ${NEW}' --head ${RELEASE_PR_BRANCH}"
   info "      legion pr merge --repo ${WORK_REPO} --number <pr-number>"
   info "      ${FINISH_CMD}"
