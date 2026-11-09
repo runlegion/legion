@@ -1,11 +1,12 @@
 ---
 name: legion-verify
 description: |
-  The final evidence gate before finished work is called done. Read the issue's acceptance
-  criteria, the diff, and the test output, and emit one verdict per criterion -- pass, fail, or
+  The final evidence gate before finished work is called done. Read the issue and the spec, learn
+  what was supposed to be built, score the result of the work against the scenarios and the intent
+  of the spec and issue, and signal drift. Emit one verdict per criterion -- pass, fail, or
   uncertain -- each with cited evidence (a test name, a file:line, an observable behavior).
-  `legion verify --issue` records the verdict and decides the work's fate: all-pass records a
-  clean gate, any fail hard-blocks, any uncertain (or a pass with no evidence) needs a human. For
+  `legion verify --issue` records the verdicts as given and decides the work's fate: all-pass
+  records a clean gate, any fail hard-blocks, any uncertain needs a human. For
   a solo engineering team this is the QA the operator does not have -- run it after review, before
   close.
 version: 1.1.0
@@ -15,8 +16,10 @@ allowed-tools: Bash, Read, Write
 
 # Legion Verify
 
-The terminal gate. Build, PR-write, and review came before; verify confirms the work
-actually satisfies what the issue asked for, criterion by criterion, with evidence. It is
+The terminal gate. Build, PR-write, and review came before. Your job: read the issue and the
+spec, learn what was supposed to be built, score the result of the work against the scenarios
+and the intent of the spec and issue, and signal drift. You score criterion by criterion, with
+evidence. It is
 non-skippable: `legion issue close` refuses an issue that has acceptance criteria until verify
 records a clean verdict.
 
@@ -54,21 +57,9 @@ never `pass` -- verify never asserts an unprovable claim.
    - `uncertain` -- you cannot mechanically confirm it (e.g. a performance or UX claim with no
      test). Do not round up to pass.
 
-   **Vacuous evidence is not evidence.** The gate mechanically rejects two patterns as vacuous
-   (demoting `pass` to `uncertain` automatically), and you must reject them in your judgment too
-   when the heuristic cannot decide:
-
-   - *Restatement*: the evidence text is a copy or near-copy of the criterion. Example: criterion
-     "returns error on empty input", evidence "returns error on empty input" -- that is not proof,
-     it is repetition. Cite the test that confirmed it instead.
-   - *No assertion marker*: the evidence describes only what the code does, not what was confirmed.
-     Example: "added match arm for empty case" names an implementation detail, not a verification.
-     Instead, cite a test name (`tests::empty_input_returns_error`), a file:line (`src/lib.rs:42`),
-     or an observed outcome ("running `legion verify` with no AC exits 1 and prints NoCheckableAc").
-
-   The mechanical heuristic is a floor, not a ceiling. Where it cannot decide, you judge. When in
-   doubt, mark the criterion `uncertain` and let a human adjudicate -- that is the gate working
-   correctly, not a failure.
+   The judgment is yours: `legion verify` records each verdict as you give it and never demotes
+   one by the wording of its evidence. When in doubt, mark the criterion `uncertain` and let a
+   human adjudicate -- that is the gate working correctly, not a failure.
 
 4. **Write the verdicts** to a JSON file (e.g. `/tmp/verdicts-<n>.json`) -- a list, one
    object per criterion. The shape depends on the issue's trace.
@@ -97,8 +88,7 @@ never `pass` -- verify never asserts an unprovable claim.
    `spec_revision` is the requirement's current revision; a stale value is refused with the
    expected revision named. `kind` is `test`, `diff` or `command`; `artifacts` may be omitted.
 
-   Provide one entry per criterion. A `pass` with empty or vacuous evidence is treated as
-   `uncertain` (see "Judge each criterion" above for what counts as vacuous).
+   Provide one entry per criterion.
 
 5. **Record the verdict:**
 
@@ -106,7 +96,7 @@ never `pass` -- verify never asserts an unprovable claim.
    legion verify --repo <repo> --issue <n> --verdicts-file /tmp/verdicts-<n>.json
    ```
 
-   - All `pass` (with evidence) -> records a clean `legion-verify:issue-<repo>#<n>` gate; the
+   - All `pass` -> records a clean `legion-verify:issue-<repo>#<n>` gate; the
      issue's close gate is unblocked.
    - Any `fail` -> exits non-zero; close stays blocked. Finish the work and re-verify.
    - Any `uncertain` -> exits non-zero for a human to adjudicate; close stays blocked.

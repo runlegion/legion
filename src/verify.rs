@@ -12,9 +12,8 @@
 // per-criterion verdicts it:
 //   - refuses an issue with no checkable criteria (forces SOLID issues),
 //   - refuses to proceed unless every criterion has a verdict,
-//   - never lets an unprovable criterion pass -- a Pass with no cited evidence
-//     or with only vacuous evidence is downgraded to Uncertain ("never assert
-//     an unprovable criterion"),
+//   - records each verdict as the agent gave it; nothing here demotes a
+//     verdict by the wording of its evidence (#1507),
 //   - maps the verdict set to one routing decision: any Fail hard-blocks
 //     ->Done; any Uncertain (no Fail) routes the card to NeedsInput; all Pass
 //     proceeds.
@@ -154,9 +153,8 @@ pub enum AcVerdict {
 pub struct AcResult {
     pub criterion: String,
     pub verdict: AcVerdict,
-    /// A test name, a file:line, or an observable behavior. Required for a
-    /// Pass to stand; a Pass with empty or vacuous evidence is treated as
-    /// Uncertain.
+    /// A test name, a file:line, or an observable behavior, as the agent
+    /// cited it. Recorded as given.
     pub evidence: String,
 }
 
@@ -246,108 +244,6 @@ impl VerifyDecision {
     }
 }
 
-/// Returns true when the evidence string is vacuous: it carries no real proof
-/// that the criterion was exercised.
-///
-/// Two conditions count as vacuous:
-///
-/// 1. **Restatement** -- the evidence is a substring of the criterion
-///    (case-insensitive), meaning the agent copied the criterion text rather
-///    than citing proof. Example: criterion "returns error on empty input",
-///    evidence "returns error on empty input" -- vacuous.
-///
-/// 2. **No assertion marker** -- the evidence contains none of the tokens that
-///    a real test or observable behavior would carry:
-///    - a test path token ("::" or "fn " or a source path containing "/")
-///    - "assert" (as in an assertion that ran)
-///    - a file:line reference (a digit immediately after ":")
-///    - observable-behavior language ("returns", "panics", "output", "exits",
-///      "prints", "emits", "displays")
-///
-/// A no-warnings build criterion (#1481) is the exception: the only evidence that
-/// proves it is a CI run on the verified head that built with warnings as
-/// errors and succeeded (`proves_no_warnings_by_ci`); anything else is
-/// vacuous for it.
-///
-/// The heuristic is intentionally narrow and conservative: false-negatives
-/// (letting a weak-but-real citation through) are acceptable. False-positives
-/// (flagging real evidence as vacuous) are not. Where the heuristic cannot
-/// decide, the verify SKILL instructs the agent to apply human judgment.
-///
-/// This function is a pure predicate: it never panics, and handles empty
-/// strings and unicode safely.
-fn is_vacuous_evidence(criterion: &str, evidence: &str) -> bool {
-    let ev = evidence.trim();
-    if ev.is_empty() {
-        // Also handled by the empty-evidence check in effective(); treat as
-        // vacuous so both checks compose cleanly.
-        return true;
-    }
-
-    let ev_lower: String = ev.to_lowercase();
-    let crit_lower: String = criterion.trim().to_lowercase();
-
-    if (crit_lower.contains("no warning") || crit_lower.contains("without warning"))
-        && (crit_lower.contains("build") || crit_lower.contains("compile"))
-    {
-        return !proves_no_warnings_by_ci(&ev_lower);
-    }
-
-    // Condition 1: evidence is a substring of the criterion (restatement).
-    if !crit_lower.is_empty() && crit_lower.contains(ev_lower.as_str()) {
-        return true;
-    }
-
-    // Condition 2: no assertion marker present.
-    let has_marker = ev_lower.contains("::")
-        || ev_lower.contains("fn ")
-        || ev_lower.contains('/')
-        || ev_lower.contains("assert")
-        || ev_lower.contains("returns")
-        || ev_lower.contains("panics")
-        || ev_lower.contains("output")
-        || ev_lower.contains("exits")
-        || ev_lower.contains("prints")
-        || ev_lower.contains("emits")
-        || ev_lower.contains("displays")
-        // file:line: a ":" followed immediately by one or more ASCII digits
-        || has_file_line_ref(ev);
-
-    !has_marker
-}
-
-/// True when lowercased evidence names a CI run, the head it ran on (a commit
-/// hash: 7 to 40 hex characters with at least one letter, so a numeric run id
-/// never stands in for it), a warnings-as-errors build, and success (#1481).
-fn proves_no_warnings_by_ci(ev_lower: &str) -> bool {
-    let names_head = ev_lower
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|t| {
-            (7..=40).contains(&t.len())
-                && t.chars().all(|c| c.is_ascii_hexdigit())
-                && t.chars().any(|c| c.is_ascii_alphabetic())
-        });
-    let warnings_as_errors = ["-d warnings", "deny(warnings)", "warnings as errors"]
-        .iter()
-        .any(|m| ev_lower.contains(m));
-    let succeeded = ["success", "succeeded", "green", "passed"]
-        .iter()
-        .any(|m| ev_lower.contains(m));
-    ev_lower.contains("ci run") && names_head && warnings_as_errors && succeeded
-}
-
-/// True when the string contains a colon followed immediately by at least one
-/// ASCII digit, which is the typical file:line pattern (e.g. "src/verify.rs:84").
-fn has_file_line_ref(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len().saturating_sub(1) {
-        if bytes[i] == b':' && bytes[i + 1].is_ascii_digit() {
-            return true;
-        }
-    }
-    false
-}
-
 /// Decide a card's fate from its acceptance criteria and the agent's verdicts.
 ///
 /// `acceptance` is the criterion list (one per item). `results` is one verdict
@@ -363,23 +259,11 @@ pub fn decide(acceptance: &[String], results: &[AcResult]) -> VerifyDecision {
         };
     }
 
-    // A Pass with no cited evidence, or with only vacuous evidence (a
-    // restatement of the criterion or text with no assertion marker), is not a
-    // provable pass -- demote it to Uncertain so it routes to a human instead
-    // of rubber-stamping ->Done.
-    let effective = |r: &AcResult| -> AcVerdict {
-        if r.verdict == AcVerdict::Pass
-            && (r.evidence.trim().is_empty() || is_vacuous_evidence(&r.criterion, &r.evidence))
-        {
-            AcVerdict::Uncertain
-        } else {
-            r.verdict
-        }
-    };
-
+    // Verdicts are recorded as the agent gave them (#1507): the judgment is
+    // the agent's, and nothing here demotes one by its evidence's wording.
     let failed: Vec<String> = results
         .iter()
-        .filter(|r| effective(r) == AcVerdict::Fail)
+        .filter(|r| r.verdict == AcVerdict::Fail)
         .map(|r| r.criterion.clone())
         .collect();
     if !failed.is_empty() {
@@ -388,7 +272,7 @@ pub fn decide(acceptance: &[String], results: &[AcResult]) -> VerifyDecision {
 
     let uncertain: Vec<String> = results
         .iter()
-        .filter(|r| effective(r) == AcVerdict::Uncertain)
+        .filter(|r| r.verdict == AcVerdict::Uncertain)
         .map(|r| r.criterion.clone())
         .collect();
     if !uncertain.is_empty() {
@@ -420,10 +304,8 @@ pub struct TracedRequirement {
 ///
 /// Coverage is computed by **id set**, not by count: two verdicts citing the
 /// same criterion id satisfy that one id twice and leave every other
-/// criterion uncovered. Evidence and pass/fail/uncertain accounting mirror
-/// `decide()`'s vacuous-evidence rule for the legacy prose format (#549,
-/// HIGH-1 review fix): a reference must clear `is_vacuous_evidence` against
-/// the criterion text, not merely be non-empty.
+/// criterion uncovered. Pass/fail/uncertain accounting mirrors `decide()`:
+/// each verdict counts as the agent gave it (#1507).
 ///
 /// Criteria are keyed by `(doc_id, criterion_id)` throughout -- never by
 /// criterion id alone. Criterion ids are only unique WITHIN one document
@@ -521,21 +403,9 @@ pub fn decide_spec_multi(
         return VerifyDecision::Incomplete { unaddressed };
     }
 
-    let effective = |r: &SpecAcResult| -> AcVerdict {
-        let criterion_text = text_for(r);
-        let has_evidence = r.artifacts.iter().any(|a| {
-            !a.outcome.trim().is_empty() && !is_vacuous_evidence(&criterion_text, &a.reference)
-        });
-        if r.verdict == AcVerdict::Pass && !has_evidence {
-            AcVerdict::Uncertain
-        } else {
-            r.verdict
-        }
-    };
-
     let failed: Vec<String> = results
         .iter()
-        .filter(|r| effective(r) == AcVerdict::Fail)
+        .filter(|r| r.verdict == AcVerdict::Fail)
         .map(&text_for)
         .collect();
     if !failed.is_empty() {
@@ -544,7 +414,7 @@ pub fn decide_spec_multi(
 
     let uncertain: Vec<String> = results
         .iter()
-        .filter(|r| effective(r) == AcVerdict::Uncertain)
+        .filter(|r| r.verdict == AcVerdict::Uncertain)
         .map(&text_for)
         .collect();
     if !uncertain.is_empty() {
@@ -628,19 +498,6 @@ mod tests {
     }
 
     #[test]
-    fn pass_without_evidence_is_uncertain_never_pass() {
-        let ac = vec!["A".to_owned()];
-        // Claims Pass but cites nothing -- not a provable pass.
-        let results = vec![res("A", AcVerdict::Pass, "   ")];
-        assert_eq!(
-            decide(&ac, &results),
-            VerifyDecision::NeedsInput {
-                uncertain: vec!["A".to_owned()]
-            }
-        );
-    }
-
-    #[test]
     fn empty_acceptance_is_blocked() {
         assert_eq!(decide(&[], &[]), VerifyDecision::NoCheckableAc);
     }
@@ -655,203 +512,17 @@ mod tests {
         );
     }
 
-    // --- #1481: a green CI run proves a no-warnings criterion ---
-
-    const NO_WARNINGS: &str = "The workspace builds with no warnings.";
-
-    fn no_warnings_decision(evidence: &str) -> VerifyDecision {
-        decide(
-            &[NO_WARNINGS.to_owned()],
-            &[res(NO_WARNINGS, AcVerdict::Pass, evidence)],
-        )
-    }
-
     #[test]
-    fn green_warnings_as_errors_ci_run_on_head_proves_no_warnings() {
-        // Verbatim evidence from rannoch #206 and #213, both recorded uncertain.
-        for evidence in [
-            "CI run 42093029057 at f9146ff: RUSTFLAGS=-D warnings, cargo fmt --check, cargo \
-             clippy --workspace --all-targets --all-features, cargo nextest run --workspace all \
-             green on check and three platform jobs.",
-            "CI run 42105551115 on head 5f70c42: check and platforms (ubuntu, macos, windows) \
-             all SUCCESS; job runs cargo clippy --workspace --all-targets --all-features under \
-             RUSTFLAGS=-D warnings; 94 tests passed under nextest.",
-        ] {
-            assert_eq!(
-                no_warnings_decision(evidence),
-                VerifyDecision::Proceed,
-                "{evidence}"
-            );
-        }
-    }
-
-    #[test]
-    fn no_warnings_without_such_a_ci_run_stays_uncertain() {
-        let uncertain = VerifyDecision::NeedsInput {
-            uncertain: vec![NO_WARNINGS.to_owned()],
-        };
-        for evidence in [
-            // failed
-            "CI run 42093029057 at f9146ff: RUSTFLAGS=-D warnings, clippy failed.",
-            // no warnings-as-errors build
-            "CI run 42093029057 at f9146ff: all jobs green.",
-            // no head: the run id alone is not a commit
-            "CI run 42093029057: RUSTFLAGS=-D warnings, all jobs green.",
-            // not a CI run
-            "src/lib.rs:10 sets deny(warnings); cargo build passed locally at f9146ff",
-            "https://github.com/runlegion/rannoch/actions",
-        ] {
-            assert_eq!(no_warnings_decision(evidence), uncertain, "{evidence}");
-        }
-    }
-
-    #[test]
-    fn a_behavioural_no_warning_criterion_passes_on_its_test_evidence() {
-        let crit = "emits no warning when the checkout is the registered one";
-        assert_eq!(
-            decide(
-                &[crit.to_owned()],
-                &[res(
-                    crit,
-                    AcVerdict::Pass,
-                    "tests/integration/worktree_guard.rs:617 asserts stderr is empty"
-                )],
-            ),
-            VerifyDecision::Proceed
-        );
-    }
-
-    // --- vacuous evidence tests (added by #549) ---
-
-    #[test]
-    fn vacuous_evidence_restatement_is_uncertain() {
-        // Evidence that exactly restates the criterion is not proof.
+    fn pass_with_a_bare_test_name_records_as_pass() {
+        // #1507: the CLI records the agent's verdict as given; a bare test
+        // name was demoted to Uncertain by the old evidence word list.
         let ac = vec!["returns error on empty input".to_owned()];
         let results = vec![res(
             "returns error on empty input",
             AcVerdict::Pass,
-            "returns error on empty input",
-        )];
-        assert_eq!(
-            decide(&ac, &results),
-            VerifyDecision::NeedsInput {
-                uncertain: vec!["returns error on empty input".to_owned()]
-            }
-        );
-    }
-
-    #[test]
-    fn vacuous_evidence_echo_is_uncertain() {
-        // Evidence that describes only what the code does (no test path, no
-        // assertion, no observable behavior) is vacuous.
-        let ac = vec!["handles the empty case".to_owned()];
-        let results = vec![res(
-            "handles the empty case",
-            AcVerdict::Pass,
-            "added match arm for empty case",
-        )];
-        assert_eq!(
-            decide(&ac, &results),
-            VerifyDecision::NeedsInput {
-                uncertain: vec!["handles the empty case".to_owned()]
-            }
-        );
-    }
-
-    #[test]
-    fn real_evidence_passes() {
-        // A test path with "::" is real evidence.
-        let ac = vec!["returns error on empty input".to_owned()];
-        let results = vec![res(
-            "returns error on empty input",
-            AcVerdict::Pass,
-            "tests::empty_input_returns_error",
+            "empty_input_is_refused",
         )];
         assert_eq!(decide(&ac, &results), VerifyDecision::Proceed);
-    }
-
-    #[test]
-    fn file_line_evidence_passes() {
-        // A file:line reference is real evidence.
-        let ac = vec!["is_vacuous_evidence demotes restatements".to_owned()];
-        let results = vec![res(
-            "is_vacuous_evidence demotes restatements",
-            AcVerdict::Pass,
-            "src/verify.rs:84",
-        )];
-        assert_eq!(decide(&ac, &results), VerifyDecision::Proceed);
-    }
-
-    #[test]
-    fn observable_behavior_passes() {
-        // Observable-behavior language is real evidence.
-        let ac = vec!["exits non-zero on no AC".to_owned()];
-        let results = vec![res(
-            "exits non-zero on no AC",
-            AcVerdict::Pass,
-            "running legion verify --card X on a card with no AC exits 1 and prints NoCheckableAc",
-        )];
-        assert_eq!(decide(&ac, &results), VerifyDecision::Proceed);
-    }
-
-    // --- is_vacuous_evidence unit tests ---
-
-    #[test]
-    fn is_vacuous_empty_evidence() {
-        assert!(is_vacuous_evidence("some criterion", ""));
-        assert!(is_vacuous_evidence("some criterion", "   "));
-    }
-
-    #[test]
-    fn is_vacuous_restatement_case_insensitive() {
-        assert!(is_vacuous_evidence(
-            "Returns Error On Empty Input",
-            "returns error on empty input"
-        ));
-    }
-
-    #[test]
-    fn is_vacuous_partial_restatement_substring() {
-        // Evidence is a substring of the criterion -- still vacuous.
-        assert!(is_vacuous_evidence(
-            "returns error on empty input and logs",
-            "returns error on empty input"
-        ));
-    }
-
-    #[test]
-    fn is_not_vacuous_test_path() {
-        assert!(!is_vacuous_evidence(
-            "some criterion",
-            "tests::my_function_works"
-        ));
-    }
-
-    #[test]
-    fn is_not_vacuous_file_line() {
-        assert!(!is_vacuous_evidence("some criterion", "src/lib.rs:42"));
-    }
-
-    #[test]
-    fn is_not_vacuous_assert_language() {
-        assert!(!is_vacuous_evidence(
-            "some criterion",
-            "assert_eq! confirms the value is zero"
-        ));
-    }
-
-    #[test]
-    fn is_not_vacuous_observable_behavior() {
-        assert!(!is_vacuous_evidence(
-            "some criterion",
-            "the command exits with code 1"
-        ));
-    }
-
-    #[test]
-    fn is_vacuous_unicode_safe() {
-        // Unicode text with no assertion markers is vacuous; must not panic.
-        assert!(is_vacuous_evidence("critere", "\u{00e9}l\u{00e8}ve"));
     }
 
     // --- GateResult tests ---
@@ -1212,22 +883,6 @@ mod tests {
             decide_spec_multi(&requirements, &results),
             VerifyDecision::Block {
                 failed: vec!["second thing".to_owned()]
-            }
-        );
-    }
-
-    /// A Pass with no artifact carrying both a reference and an outcome is
-    /// demoted to Uncertain, mirroring `decide()`'s vacuous-evidence rule
-    /// (parity check for `decide_spec_multi`'s own `effective` closure,
-    /// which the deleted single-document `decide_spec` used to cover).
-    #[test]
-    fn decide_spec_multi_pass_with_no_artifacts_is_uncertain() {
-        let requirements = vec![traced("doc-1", 1, vec![crit("crit-1", "does the thing")])];
-        let results = vec![spec_res("doc-1", 1, "crit-1", AcVerdict::Pass, vec![])];
-        assert_eq!(
-            decide_spec_multi(&requirements, &results),
-            VerifyDecision::NeedsInput {
-                uncertain: vec!["does the thing".to_owned()]
             }
         );
     }

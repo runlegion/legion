@@ -1199,10 +1199,10 @@ pub(crate) enum Commands {
     /// Record a verify verdict for finished work -- the terminal evidence
     /// gate (#520, #913). Reads per-criterion verdicts (pass/fail/uncertain +
     /// evidence) as JSON from --verdicts-file or stdin, loads the work's
-    /// acceptance criteria, and decides its fate: every criterion Pass with
-    /// evidence records a clean gate; any Fail hard-blocks; any Uncertain (or
-    /// a Pass with no evidence) needs a human. Work with no acceptance
-    /// criteria is blocked outright.
+    /// acceptance criteria, and decides its fate from the verdicts as given:
+    /// every criterion Pass records a clean gate; any Fail hard-blocks; any
+    /// Uncertain needs a human. Work with no acceptance criteria is blocked
+    /// outright.
     ///
     /// Verify GitHub-issue work -- issues are the work source of record
     /// (#931 removed the legacy kanban --card path; the card is gone).
