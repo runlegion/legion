@@ -34,12 +34,12 @@ Scope: "everything." Nothing outside rannoch depends on these (kessel and eavesd
 |---|---|---|
 | `done`, `failed`, `State` on the lane contract | `rannoch-queue/src/lib.rs` | Status rows |
 | `hand_out`, `_places`, `_work`, `handed`, `processed`, `remove_worker`, `in_progress` | `rannoch-store/src/inbox.rs` | The next event of a lane's types with no status row |
-| Fill's worker place (`rannoch.fill`), its failed rows, `_fill` try limit, its retries | `rannoch-store/src/lib.rs` | Status rows and the retry policy |
+| Fill's worker place (`rannoch.fill`), its failed rows, `_fill` try limit, its retries | `rannoch-store/src/lib.rs` | Status rows |
 | `take_failures`, `on_failure`, `processed`, `remove_worker`, `state` passthroughs | `rannoch-queue-mem/src/lib.rs` | Nothing; `Failure::Event` at commit stays (it is accept's) |
 | `done`, `failed` on `Trickle` | `rannoch-queue-trickle/src/lib.rs` | Status rows |
 | `rannoch-processor-bin`, `rannoch-harness` | `crates/` | The queue, and the lanes running rows |
 
-Added: `_event_status`, and the retry policy in the settings file.
+Added: `_event_status`. The fast lane reads by type, as the trickle lane does (operator, 2026-11-09: "sure. we can change later if this ends up being a bottleneck"). Nothing else is added: retries and the settings file come after the surgery (operator: "this is after, why would you code in a clearing action?"); until then a failure appends one -1 row and the event is not run again.
 
 Kept: `_events` with its type column and index (#243), `_positions`, `accept`, `accept_from`, the heartbeat, the ontology check at accept, the core store (#238), `Trickle<T: Types>`, `rannoch-processor` and the `rannoch-processor-*` step kinds, `rannoch-worker`.
 
