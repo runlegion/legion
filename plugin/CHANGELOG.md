@@ -1,5 +1,40 @@
 # Legion Changelog
 
+## 0.44.8
+
+The worktree-sym release. On 0.44.7 `legion sym` and `legion index` always worked on the
+repo's registered checkout, so an agent in a git worktree searched the main checkout's
+code rather than its own branch's, and a harness Grep in a worktree went unanswered by
+legion-cmd. Builders all work in worktrees. Run inside a linked worktree of a registered
+repo, sym now answers from that worktree's own index, and reindexes it first when it is
+out of date. The main checkout's index is never written from a worktree.
+
+Patch release: one fix within the existing sym, index and legion-cmd surfaces. No new
+flag, no wire-format change and no schema migration; a worktree's index is stored in the
+existing tables under its canonical path, and `SCHEMA_VERSION` stays 3.
+
+### Fixed
+
+- **sym answers for the worktree it runs in** (PR #1504, #1503). A new `tree_of` in
+  `src/cli/index_cmd.rs` recognises a linked worktree of a registered repo: a checkout
+  that shares the repo's git common dir and is not itself a registered workdir, so a
+  nested submodule or another repo's worktree under a registered workdir does not count.
+  Inside one, `legion sym` and `sym etc` with no `--repo`, or with the tree's own repo,
+  read the tree's index, stored under the tree's canonical path as its key; an explicit
+  `--repo` naming another repo is left alone. Before answering, sym checks that the
+  index was built at the tree's HEAD and that every file still matches the paths, sizes
+  and mtimes the index walked, so an edit, a new file or a deletion all trigger a
+  reindex. `find-content` scans the tree's files directly and `extract` reads one file,
+  so neither waits on an index. `legion index`, including `--file` mode from the
+  reindex-on-edit hook, indexes the worktree under its own key in a worktree. Listings
+  over every repo (`list_scip_indexes_filtered`, `list_file_inventory` with no repo)
+  leave tree keys out, so a tree's index never answers for its registered checkout.
+  legion-cmd adds the tree to the workdirs it answers a harness Grep over, by the same
+  rule. The #1010 divergence warning, which only flagged that sym was answering for the
+  wrong checkout, is removed. Tests show a branch-only symbol found in the worktree and
+  absent from the main checkout, a changed file reindexed on the next sym call, and the
+  main checkout's index unchanged.
+
 ## 0.44.7
 
 The one-line-guidance release. On 0.44.6 every prompt carried the six-line turn-kind
