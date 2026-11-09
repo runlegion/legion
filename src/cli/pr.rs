@@ -49,8 +49,8 @@ pub(crate) enum PrAction {
         #[arg(long)]
         task: Option<String>,
 
-        /// Skip the legion-simplify quality gate check.
-        /// FOR BOOTSTRAP ONLY -- use when the branch IS the simplify skill itself.
+        /// Skip the legion-pr-write quality gate check.
+        /// FOR BOOTSTRAP ONLY -- use when the branch IS the pr-write skill itself.
         /// An audit entry is written so this cannot be done silently.
         #[arg(long)]
         skip_gates: bool,
@@ -138,8 +138,8 @@ pub(crate) enum PrAction {
     ///
     /// The honest alternative to close+recreate when a re-review finds a PR
     /// body that misdescribes its own diff: close+recreate loses the review
-    /// thread and forces re-recording the legion-simplify and legion-pr-write
-    /// gates on the new HEAD. `pr edit` corrects the live PR instead.
+    /// thread and forces re-recording the legion-pr-write gate on the new
+    /// HEAD. `pr edit` corrects the live PR instead.
     ///
     /// When `--body-file` is given, the new body runs the same structural
     /// pr-write validation `pr write-check` runs (against `--issue`'s
@@ -377,9 +377,8 @@ fn render_traced_requirement_criteria(
 /// `--closes` exists for `pr create`, not for editing a live PR).
 ///
 /// This IS `legion-pr-write`'s check validator (#780): `pr_write::validate_pr_body`
-/// plays the same role `simplify_check::validate_articulation` plays for
-/// `legion-simplify` -- a structural gate the result must pass before the
-/// row is written -- so the row it records always carries VALIDATED
+/// is a structural gate the result must pass before the row is written --
+/// so the row it records always carries VALIDATED
 /// provenance, mirroring `cli::verify`'s `Check` action.
 #[allow(clippy::too_many_arguments)]
 fn validate_and_record_pr_write_gate(
@@ -460,12 +459,12 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             // of which silently swallowed open failures.
             let database = open_db()?;
 
-            // Quality gates: verify legion-simplify AND legion-pr-write ran
-            // clean on HEAD before calling the work source. This runs before
-            // worksource resolution so the gate error is always surfaced,
-            // even if the worksource is not configured. --skip-gates is a
-            // bootstrap escape hatch for the branch that ships the skills
-            // themselves; it writes an audit entry so it cannot be done silently.
+            // Quality gate: verify legion-pr-write ran clean on HEAD before
+            // calling the work source. This runs before worksource resolution
+            // so the gate error is always surfaced, even if the worksource is
+            // not configured. --skip-gates is a bootstrap escape hatch for the
+            // branch that ships the skill itself; it writes an audit entry so
+            // it cannot be done silently.
             if skip_gates {
                 audit(
                     &database,
@@ -476,9 +475,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                         target_ref: "pending",
                         task_id: task.as_deref(),
                         source_type: "unknown",
-                        details: Some(
-                            r#"{"skills":["legion-simplify","legion-pr-write"],"reason":"bootstrap"}"#,
-                        ),
+                        details: Some(r#"{"skills":["legion-pr-write"],"reason":"bootstrap"}"#),
                         outcome: "skipped",
                     },
                 );
@@ -487,40 +484,31 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
                 let (commit_hash, _branch) = git_head_commit_and_branch()?;
                 let short_hash: &str = &commit_hash[..commit_hash.len().min(8)];
 
-                // Both forcing-function gates must be clean on HEAD before the
-                // PR opens: simplify (structural quality) and pr-write (the
-                // articulated criterion-to-work mapping the verify gate later
-                // audits). Each is recorded by its own skill on the current
-                // commit, so a post-gate commit invalidates them (re-run).
-                // The first element is the quality-gate DB key written by
-                // `legion quality-gate record --skill` and read by
-                // `get_quality_gate`; it must stay bare. Only the second --
-                // the invocation hint printed to the agent -- carries the
-                // `legion:` plugin prefix that Claude Code 2.1.216 restored.
-                for (skill, run_hint) in [
-                    ("legion-simplify", "/legion:legion-simplify"),
-                    ("legion-pr-write", "/legion:legion-pr-write"),
-                ] {
-                    match database.get_quality_gate(&commit_hash, skill)? {
-                        None => {
-                            eprintln!(
-                                "[legion] error: no clean {skill} gate on HEAD ({short_hash}). \
-                                 Run {run_hint} before creating the PR."
-                            );
-                            return Err(error::LegionError::ExitWith(1));
-                        }
-                        Some(gate) if gate.result != GateResult::Clean => {
-                            eprintln!(
-                                "[legion] error: {skill} recorded issues on HEAD ({short_hash}), \
-                                 {} findings. Fix them and re-run the skill before creating the PR.",
-                                gate.findings_count
-                            );
-                            return Err(error::LegionError::ExitWith(1));
-                        }
-                        Some(_) => {
-                            // Gate is clean -- continue to the next.
-                        }
+                // The pr-write gate (the articulated criterion-to-work mapping
+                // the verify gate later audits) must be clean on HEAD before
+                // the PR opens. It is recorded on the current commit, so a
+                // post-gate commit invalidates it (re-run). `skill` is the
+                // quality-gate DB key read by `get_quality_gate` and must stay
+                // bare; only `run_hint` -- the invocation hint printed to the
+                // agent -- carries the `legion:` plugin prefix.
+                let (skill, run_hint) = ("legion-pr-write", "/legion:legion-pr-write");
+                match database.get_quality_gate(&commit_hash, skill)? {
+                    None => {
+                        eprintln!(
+                            "[legion] error: no clean {skill} gate on HEAD ({short_hash}). \
+                             Run {run_hint} before creating the PR."
+                        );
+                        return Err(error::LegionError::ExitWith(1));
                     }
+                    Some(gate) if gate.result != GateResult::Clean => {
+                        eprintln!(
+                            "[legion] error: {skill} recorded issues on HEAD ({short_hash}), \
+                             {} findings. Fix them and re-run the skill before creating the PR.",
+                            gate.findings_count
+                        );
+                        return Err(error::LegionError::ExitWith(1));
+                    }
+                    Some(_) => {}
                 }
             }
 
@@ -764,8 +752,7 @@ pub(crate) fn handle(action: PrAction) -> error::Result<()> {
             }
 
             // Load the issue's acceptance criteria, validate the body, and
-            // record the gate on HEAD so `legion pr create` can gate on it,
-            // exactly as it does for legion-simplify.
+            // record the gate on HEAD so `legion pr create` can gate on it.
             let (commit_hash, branch) = git_head_commit_and_branch()?;
             let database = open_db()?;
             let report = validate_and_record_pr_write_gate(

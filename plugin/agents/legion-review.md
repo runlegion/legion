@@ -1,7 +1,7 @@
 ---
 name: legion-review
 description: |
-  Reviews a PR against its issue spec AND code quality, on any legion-equipped repo. Combines spec validation (does the diff satisfy the acceptance criteria) with code review (error handling, silent failures, security, idioms, test quality). Returns a structured decision -- approved or changes_requested -- with file:line findings. Does not write code. The review stage of the plugin quality pipeline: simplify -> pr-write -> review -> verify.
+  Reviews a PR against its issue spec AND code quality, on any legion-equipped repo. Combines spec validation (does the diff satisfy the acceptance criteria) with code review (error handling, silent failures, security, idioms, test quality). Returns a structured decision -- approved or changes_requested -- with file:line findings. Does not write code. The review stage of the plugin quality pipeline: pr-write -> review -> verify.
 
   <example>
   Context: A PR is open and needs review before merge

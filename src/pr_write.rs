@@ -234,14 +234,6 @@ fn split_entries(mapping: &str) -> Vec<String> {
 /// leaving the explanatory prose to be word-counted. The heading restates the
 /// criterion and the evidence line is checked separately, so neither should
 /// count toward the substance threshold.
-///
-/// pr-write-only (#669): `simplify_check` deliberately does NOT share this
-/// stripper. Dropping the `Evidence:` line is correct here because pr-write
-/// checks that line's presence separately from the word count, but in
-/// simplify articulation an `Evidence:` line IS the within-file locator
-/// (see `simplify_check::entry_body`), so stripping it there silently
-/// discarded a legitimate entry's substance. Sharing this function again
-/// would reintroduce that leak.
 pub(crate) fn strip_evidence_lines(entry: &str) -> String {
     entry
         .lines()
@@ -258,8 +250,7 @@ pub(crate) fn strip_evidence_lines(entry: &str) -> String {
 /// with a line) OR a behavioral cue word, since a PR mapping may legitimately
 /// cite "observable behavior changed" as evidence that an acceptance criterion
 /// is met. The goal is to confirm the agent pointed at something checkable, not
-/// to validate the citation itself (that is the verify gate's job). The simplify
-/// gate does NOT use this -- it uses the stricter `has_within_file_locator`.
+/// to validate the citation itself (that is the verify gate's job).
 pub(crate) fn has_evidence(entry: &str) -> bool {
     let lower = entry.to_lowercase();
     if lower.contains("evidence:")
@@ -276,46 +267,6 @@ pub(crate) fn has_evidence(entry: &str) -> bool {
             w,
             "test" | "tests" | "behavior" | "behaviour" | "behavioral"
         )
-    })
-}
-
-/// True when an entry cites a **within-file locator**: an explicit `Evidence:`
-/// line, a `fn`/`::` symbol, a source path carrying a line number (`foo.rs:42`),
-/// or a bare line reference (`line 42` / `lines 40 and 92`). Stricter than
-/// `has_evidence`'s located branch in two ways: a behavioral cue word does not
-/// count, and a BARE filename does not count.
-///
-/// The simplify gate uses this (read against the entry body). The `### <path>`
-/// heading already names the file, so restating "src/foo.rs reads cleanly" in
-/// prose is not a locator -- the agent must point at a line or a symbol it
-/// actually read. `pub(crate)` so the two gates share one tokenizer and the
-/// strict bar cannot silently drift from the generous one.
-pub(crate) fn has_within_file_locator(entry: &str) -> bool {
-    let lower = entry.to_lowercase();
-    if lower.contains("evidence:") {
-        return true;
-    }
-    entry.contains("::")
-        || entry.contains("fn ")
-        || has_source_path_with_line(entry)
-        || has_line_reference(entry)
-}
-
-/// True when the entry cites a line within the file in natural prose --
-/// "line 42", "lines 40 and 92". The `### <path>` heading already names the
-/// file, so a line number alone is a within-file locator. Accepting this keeps
-/// the natural review-prose style ("the duplication at lines 40 and 92") valid
-/// without forcing the joined `foo.rs:42` form.
-fn has_line_reference(entry: &str) -> bool {
-    let toks: Vec<&str> = entry.split_whitespace().collect();
-    toks.windows(2).any(|w| {
-        let kw = w[0].trim_end_matches([':', '.', ',']).to_lowercase();
-        (kw == "line" || kw == "lines")
-            && w[1]
-                .trim_start_matches(['(', '[', '#'])
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit())
     })
 }
 
@@ -340,24 +291,6 @@ fn has_source_path(entry: &str) -> bool {
         SOURCE_EXTS
             .iter()
             .any(|ext| tok.ends_with(ext) || tok.contains(&format!("{ext}:")))
-    })
-}
-
-/// True when the entry mentions a source path WITH a real line number
-/// (`bar.ts:42`). A bare filename (`bar.ts`) and an empty line suffix
-/// (`bar.ts:`) both fail -- the colon must be followed by a digit. This is the
-/// within-file half of the path check, used by the stricter simplify locator.
-fn has_source_path_with_line(entry: &str) -> bool {
-    source_tokens(entry).any(|tok| {
-        SOURCE_EXTS.iter().any(|ext| {
-            let needle = format!("{ext}:");
-            tok.match_indices(&needle).any(|(i, _)| {
-                tok[i + needle.len()..]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_digit())
-            })
-        })
     })
 }
 
@@ -721,30 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn within_file_locator_excludes_bare_path_and_behavioral() {
-        // Within-file locators: symbol, path:line, or an Evidence: line.
-        assert!(has_within_file_locator("see src/foo.rs:12"));
-        assert!(has_within_file_locator("covered by foo::bar"));
-        assert!(has_within_file_locator("added fn validate_thing"));
-        assert!(has_within_file_locator("Evidence: the lone match arm"));
-        // Bare line references in natural prose are within-file locators (the
-        // heading names the file), so the review-prose style stays valid.
-        assert!(has_within_file_locator(
-            "the duplication at lines 40 and 92"
-        ));
-        assert!(has_within_file_locator("removed the dead branch at line 7"));
-        // NOT a within-file locator: a bare filename (which just repeats the
-        // simplify heading), an empty line suffix, "line" without a number, or a
-        // behavioral cue word.
-        assert!(!has_within_file_locator("src/foo.rs reads cleanly"));
-        assert!(!has_within_file_locator("src/foo.rs: reads cleanly"));
-        assert!(!has_within_file_locator("lines of boilerplate everywhere"));
-        assert!(!has_within_file_locator(
-            "the observable behavior is unchanged"
-        ));
-        assert!(!has_within_file_locator("tested manually, looks clean"));
-        // has_evidence stays generous for pr-write: a bare path and a
-        // behavioral cue both still count.
+    fn evidence_accepts_bare_path_and_behavioral_cue() {
         assert!(has_evidence("src/foo.rs reads cleanly"));
         assert!(has_evidence("the observable behavior is unchanged"));
     }

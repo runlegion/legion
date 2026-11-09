@@ -5,14 +5,10 @@
 //! Three concerns live here:
 //!   - `FindingSeverity` / `FindingStatus`: the closed enums the findings
 //!     ledger is typed over.
-//!   - Structured extraction: `RawFinding` plus the two parse entry points
-//!     (`extract_findings_from_value` for `--details-json`'s `findings` key,
-//!     `parse_findings_array` for `--findings-json`'s bare array) that turn a
-//!     skill's structured JSON output into rows `db::findings::insert_finding`
-//!     can persist. Deliberately does NOT parse prose -- the legion-simplify
-//!     articulation's "Verdict: finding (duplication, MED)" convention is not
-//!     rigid enough to extract from reliably; that skill must emit
-//!     `--findings-json` instead (see plugin/skills/legion-simplify/SKILL.md).
+//!   - Structured extraction: `RawFinding` plus `extract_findings_from_value`
+//!     (for `--details-json`'s `findings` key), which turn a skill's
+//!     structured JSON output into rows `db::findings::insert_finding` can
+//!     persist. Deliberately does NOT parse prose.
 //!   - Resolution + refusal: `reconcile_pending_findings` (git-log-based
 //!     resolution detection: a commit after a finding's origin that touches
 //!     the flagged file resolves it) and `evaluate_refusal` (the pure
@@ -182,19 +178,6 @@ pub fn extract_findings_from_value(value: &serde_json::Value) -> Vec<RawFinding>
     extracted
 }
 
-/// Parse a bare JSON array of findings, e.g. `legion quality-gate check
-/// --findings-json`'s payload. Unlike `extract_findings_from_value`, a
-/// malformed top-level payload (not a JSON array at all) IS an error -- the
-/// caller passed `--findings-json` explicitly, so garbage there should be
-/// loud, not silently treated as "no findings".
-pub fn parse_findings_array(raw: &str) -> Result<Vec<RawFinding>> {
-    serde_json::from_str::<Vec<RawFinding>>(raw).map_err(|e| {
-        LegionError::WorkSource(format!(
-            "--findings-json is not a JSON array of findings: {e}"
-        ))
-    })
-}
-
 // --- Refusal predicate ---
 
 /// The result of evaluating the PENDING set for a (branch, skill) pair
@@ -253,8 +236,7 @@ pub fn resolving_commit(touching_commits_oldest_first: &[String]) -> Option<&Str
 /// (inclusive). File-level touch detection, not line-level -- `git log -L`
 /// line-tracking is fragile as unrelated edits shift line numbers, so this
 /// checks "did any commit since the finding was raised modify this file at
-/// all", the same granularity `cli::util::git_changed_files` already uses
-/// for the simplify coverage set.
+/// all".
 ///
 /// Returns an empty vec (not an error) when the range is empty
 /// (`origin_commit == head_commit`) or git reports no matching commits. A
@@ -265,7 +247,7 @@ pub fn resolving_commit(touching_commits_oldest_first: &[String]) -> Option<&Str
 /// `Some` (tests, against an isolated fixture repo); `None` runs against the
 /// process's current directory, which is always correct in production since
 /// every `legion` CLI invocation already runs from inside the repo it is
-/// operating on (matching `cli::util::git_changed_files`'s convention).
+/// operating on.
 pub fn commits_touching_file_in_range(
     repo_dir: Option<&std::path::Path>,
     origin_commit: &str,
@@ -303,9 +285,9 @@ pub fn commits_touching_file_in_range(
 /// (`Database::mark_finding_resolved`). Best-effort per finding -- a git
 /// failure on one finding is logged to stderr and does not abort
 /// reconciling the rest, since a transient git error on one stale finding
-/// must not itself block a gate record/check that has nothing to do with
+/// must not itself block a gate record that has nothing to do with
 /// it. Returns the number of findings resolved. Called unconditionally at
-/// the top of both `quality-gate record` and `quality-gate check`, before
+/// the top of `quality-gate record`, before
 /// `evaluate_refusal` ever runs, so a fix landed in an earlier commit is
 /// never mistaken for still-pending.
 pub fn reconcile_pending_findings(
@@ -442,21 +424,6 @@ mod tests {
         let findings = extract_findings_from_value(&value);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].file, "src/foo.rs");
-    }
-
-    #[test]
-    fn parse_findings_array_parses_bare_array() {
-        let raw =
-            r#"[{"file": "src/foo.rs", "line": 10, "severity": "MED", "summary": "dup logic"}]"#;
-        let findings = parse_findings_array(raw).unwrap();
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, "MED");
-    }
-
-    #[test]
-    fn parse_findings_array_rejects_non_array_payload() {
-        let err = parse_findings_array(r#"{"not": "an array"}"#).unwrap_err();
-        assert!(err.to_string().contains("--findings-json"));
     }
 
     // --- refusal predicate ---

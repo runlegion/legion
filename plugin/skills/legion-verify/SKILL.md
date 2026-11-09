@@ -15,7 +15,7 @@ allowed-tools: Bash, Read, Write
 
 # Legion Verify
 
-The terminal gate. Build, simplify, PR-write, and review came before; verify confirms the work
+The terminal gate. Build, PR-write, and review came before; verify confirms the work
 actually satisfies what the issue asked for, criterion by criterion, with evidence. It is
 non-skippable: `legion issue close` refuses an issue that has acceptance criteria until verify
 records a clean verdict.

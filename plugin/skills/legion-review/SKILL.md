@@ -1,7 +1,7 @@
 ---
 name: legion-review
 description: |
-  The review stage of the quality pipeline: simplify -> pr-write -> review -> verify. Fans
+  The review stage of the quality pipeline: pr-write -> review -> verify. Fans
   out independent review dimensions over an open PR (spec-vs-diff, correctness, quality,
   security), adversarially verifies every HIGH/MED finding before reporting it, and records
   the result via `legion quality-gate record --skill legion-review` so downstream gates can
@@ -92,7 +92,7 @@ without guessing.
    individual finding will never surface for disposition).
 
    The gate is keyed on HEAD, so a new commit after review invalidates it -- re-run after
-   fixes, exactly like the simplify gate.
+   fixes.
 
    **`--result clean` is refused (#773) in TWO cases, and the `approved && non-blocking findings`
    case -- the one this issue exists to close -- is the first, not the second:**
@@ -163,8 +163,6 @@ this diff. A choice already recorded with a reason is not a request for a ruling
 
 ## Relationship to the other gates
 
-- `/legion:legion-simplify` reviews the diff's structure before the PR exists; this skill
-  reviews the PR against its spec after it exists.
 - `legion pr write-check` validates the implementer's own claim mapping; this skill validates
   the claims themselves against the diff, independently.
 - `/legion:legion-verify` is the per-criterion evidence gate before Done; run it after this

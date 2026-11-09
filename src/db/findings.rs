@@ -1,5 +1,5 @@
 //! Quality-gate findings ledger (#773): a `quality_gate_findings` row per
-//! structured finding a gate run (`legion-simplify`, `legion-review`)
+//! structured finding a gate run (e.g. `legion-review`)
 //! surfaced, keyed to the `quality_gates.id` row that recorded it. Owns the
 //! `quality_gate_findings` DDL.
 //!

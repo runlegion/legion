@@ -15,7 +15,7 @@ The rule is already in memory. Memory is read at boot; this happens mid-run, at 
 
 Before any of these leave you:
 
-- a brief to an implementer or to a gate (simplify, pr-write, review, verify)
+- a brief to an implementer or to a gate (pr-write, review, verify)
 - `legion issue create` or `legion issue edit`
 - a finding disposition (`legion quality-gate finding-disposition`, `finding-ack`)
 - a statement to the operator of what the spec requires or allows

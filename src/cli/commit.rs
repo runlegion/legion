@@ -62,10 +62,7 @@ const COMMIT_TYPES: [&str; 8] = [
 /// Quality gates whose verdict is recorded on the audit row, in the order
 /// the pipeline runs them. Same skill keys `pr create` reads (`src/cli/pr.rs`),
 /// which is what makes the two surfaces comparable in the audit log.
-const RECORDED_GATES: [(&str, &str); 2] = [
-    ("simplify", "legion-simplify"),
-    ("pr_write", "legion-pr-write"),
-];
+const RECORDED_GATES: [(&str, &str); 1] = [("pr_write", "legion-pr-write")];
 
 /// Codepoint ranges rejected anywhere in a commit message.
 ///
@@ -1168,23 +1165,22 @@ mod tests {
     #[test]
     fn gate_state_distinguishes_clean_issues_and_absent() {
         let database = db::testutil::test_db();
-        let sha = "0123456789abcdef0123456789abcdef01234567";
-        record_gate(&database, sha, "legion-simplify", GateResult::Clean);
-        record_gate(&database, sha, "legion-pr-write", GateResult::Issues);
+        let clean = "0123456789abcdef0123456789abcdef01234567";
+        let issues = "89abcdef0123456789abcdef0123456789abcdef";
+        record_gate(&database, clean, "legion-pr-write", GateResult::Clean);
+        record_gate(&database, issues, "legion-pr-write", GateResult::Issues);
 
-        let gates = gate_state(&database, Some(sha));
-        assert_eq!(gates["simplify"], "clean");
+        assert_eq!(gate_state(&database, Some(clean))["pr_write"], "clean");
         // A gate that recorded ISSUES is neither clean nor absent -- the
         // whole reason this is three-valued rather than the two the issue
         // sketched.
-        assert_eq!(gates["pr_write"], "issues");
+        assert_eq!(gate_state(&database, Some(issues))["pr_write"], "issues");
     }
 
     #[test]
     fn gate_state_reports_absent_for_an_ungated_commit() {
         let database = db::testutil::test_db();
         let gates = gate_state(&database, Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"));
-        assert_eq!(gates["simplify"], "absent");
         assert_eq!(gates["pr_write"], "absent");
     }
 
@@ -1194,7 +1190,6 @@ mod tests {
         // there is nothing to look up rather than nothing recorded.
         let database = db::testutil::test_db();
         let gates = gate_state(&database, None);
-        assert_eq!(gates["simplify"], "absent");
         assert_eq!(gates["pr_write"], "absent");
     }
 

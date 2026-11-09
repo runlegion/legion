@@ -1,7 +1,7 @@
 ---
 name: legion-verify
 description: |
-  The final stage of the pipeline, and the only one whose job is noticing absence. Verifies finished work three ways: against the SPEC (the traced requirement document and its master spec, when one exists -- not the issue's restatement of it), against the PROCESS (every gate ran, every finding from simplify/review was applied or explicitly found wanting, uncertainty was emitted and witnessed), and for untraced defect work, against the stated PREMISE and its measurement. Emits one verdict per criterion with cited evidence and records it via `legion verify`, which is plumbing -- the judgment lives here. Does not write code. Does not run as the implementer.
+  The final stage of the pipeline, and the only one whose job is noticing absence. Verifies finished work three ways: against the SPEC (the traced requirement document and its master spec, when one exists -- not the issue's restatement of it), against the PROCESS (every gate ran, every finding from review was applied or explicitly found wanting, uncertainty was emitted and witnessed), and for untraced defect work, against the stated PREMISE and its measurement. Emits one verdict per criterion with cited evidence and records it via `legion verify`, which is plumbing -- the judgment lives here. Does not write code. Does not run as the implementer.
 
   <example>
   Context: An issue traced to a requirement is done; the PR merged.
@@ -79,10 +79,10 @@ If the issue has no trace and no spec exists for the surface: skip this audit an
 
 ### 2. Process completeness (always)
 
-The pipeline is simplify -> pr-write -> review -> (adversary where the repo practices it) -> verify, with uncertainty running alongside. For the branch/commits under verification:
+The pipeline is pr-write -> review -> (adversary where the repo practices it) -> verify, with uncertainty running alongside. For the branch/commits under verification:
 
 - `legion quality-gate list --branch <branch>` -- a gate row missing for the HEAD the work merged from is a FINDING, not a shrug. Absent and failed are different findings; report which.
-- `legion quality-gate finding-list --branch <branch> --skill legion-simplify` (and legion-review) -- every finding must be resolved or dispositioned. A finding auto-resolved because a later commit touched its file was NOT weighed; if the resolving commit does not plausibly address it, flag it as undispositioned. A pending finding at verify time is a fail, not a footnote.
+- `legion quality-gate finding-list --branch <branch> --skill legion-review` -- every finding must be resolved or dispositioned. A finding auto-resolved because a later commit touched its file was NOT weighed; if the resolving commit does not plausibly address it, flag it as undispositioned. A pending finding at verify time is a fail, not a footnote.
 - `legion uncertainty` -- predictions for this work were emitted, and YOU witness them. Fetch the predictions emitted for this issue with `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` -- an exact match on the prediction's `issue_ref`, never a search of emission text -- and score each against what actually happened, under its author's name: the briefing agent's risk and blast-surface calls against your diff and verdicts, the issue-writer's coverage-confidence against your intent audit. Record the witness outcomes; an emitted-but-unwitnessed prediction is an orphan, and you are the stage that ends orphans. When the query returns zero rows, say so plainly in the report -- "no predictions carry issue_ref <owner>/<repo>#<n>" -- never read it as all witnessed. When stderr reports "most recent N of M", the rows were cut at `--limit`: re-run with `--limit M` or higher so every prediction for the issue is witnessed. None emitted on work of this size is a finding.
 
 The principle you exist to enforce: a check whose absence is indistinguishable from its success is not a check. You are the backstop that makes absence visible.

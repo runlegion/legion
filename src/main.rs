@@ -32,7 +32,6 @@ mod reflect;
 mod scip;
 mod search;
 mod signal;
-mod simplify_check;
 mod stats;
 mod status;
 mod statusline;

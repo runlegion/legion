@@ -582,10 +582,6 @@ fn commit_writes_audit_row_with_shas_card_and_gates() {
     // No gates were recorded on the pre-commit HEAD, which is a real state
     // ("absent"), distinct from a gate that ran and found issues.
     assert!(
-        audit_out.contains("\\\"simplify\\\":\\\"absent\\\""),
-        "expected the simplify gate verdict in the details, got: {audit_out}"
-    );
-    assert!(
         audit_out.contains("\\\"pr_write\\\":\\\"absent\\\""),
         "expected the pr-write gate verdict in the details, got: {audit_out}"
     );

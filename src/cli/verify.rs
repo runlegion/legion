@@ -5,7 +5,7 @@ use std::str::FromStr;
 use clap::Subcommand;
 
 use crate::cli::util::{
-    current_repo_name, git_changed_files, git_head_commit_and_branch, open_db, read_file_or_stdin,
+    current_repo_name, git_head_commit_and_branch, open_db, read_file_or_stdin,
 };
 use crate::db::findings::{FindingFilter, NewFindingInput, QualityGateFinding};
 use crate::db::quality_gates::{
@@ -14,7 +14,7 @@ use crate::db::quality_gates::{
 use crate::finding_gate::{self, FindingSeverity, FindingStatus};
 use crate::gate_trust::emit_gate_trust;
 use crate::verify::{GateProvenance, GateResult};
-use crate::{card_parse, db, documents, error, gate_registry, simplify_check, verify, worksource};
+use crate::{card_parse, db, documents, error, gate_registry, verify, worksource};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QualityGateAction {
@@ -26,14 +26,14 @@ pub(crate) enum QualityGateAction {
     ///
     /// The row is recorded with ASSERTED provenance (#780): no validator
     /// backs it. For a skill with a check validator
-    /// (`gate_registry::has_check_validator` -- `legion-simplify`,
-    /// `legion-pr-write`), `--result clean` is REFUSED here -- a clean
-    /// verdict for those skills can only be earned via `quality-gate check`,
-    /// which validates a substantive articulation before recording. Skills
-    /// with no check validator (`legion-review`, a `legion-verify:<card_id>`
-    /// verdict) are unaffected: `record` is their only, legitimate path.
+    /// (`gate_registry::has_check_validator` -- `legion-pr-write`),
+    /// `--result clean` is REFUSED here -- a clean verdict for it can only be
+    /// earned via `legion pr write-check`, which validates the PR body before
+    /// recording. Skills with no check validator (`legion-review`, a
+    /// `legion-verify:<card_id>` verdict) are unaffected: `record` is their
+    /// only, legitimate path.
     Record {
-        /// Skill name (e.g., "legion-simplify")
+        /// Skill name (e.g., "legion-review")
         #[arg(long)]
         skill: String,
 
@@ -97,78 +97,6 @@ pub(crate) enum QualityGateAction {
         json: bool,
     },
 
-    /// Validate a simplify articulation file before recording the gate (#665).
-    ///
-    /// Resolves the changed-file set from
-    /// `git -c core.quotePath=false diff --name-status -M50% <base>...HEAD`
-    /// (three-dot merge-base range; `<base>` is `--base` when given, else
-    /// `main`, falling back to `origin/main...HEAD` when `main` is absent).
-    /// If no base ref resolves and HEAD has a parent commit, this hard-errors
-    /// rather than recording a gate against an empty set; an explicit
-    /// `--base` that does not resolve is likewise a hard error (#779). Pure
-    /// (zero-delta, R100) renames are auto-cleared from the coverage set --
-    /// their old/new path pairs are recorded in the gate's `details` JSON
-    /// instead of requiring an articulation entry, since a byte-identical
-    /// move carries no simplification risk by construction. Renames with a
-    /// content delta (R<100) still require an entry under the new path.
-    /// Parses the articulation file -- markdown with one `### <path>`
-    /// heading per changed file followed by prose -- and refuses when:
-    ///   - Coverage gap: a changed file has no `### <path>` entry (reports
-    ///     which files are unaddressed).
-    ///   - Boilerplate / thin: an entry's prose is below the substance threshold
-    ///     (reuses the same word-count heuristic as `pr write-check`).
-    ///
-    /// On pass: records a quality gate for HEAD under `--skill` with
-    /// `--result` as the gate outcome, and the resolved base ref on the
-    /// gate row's `base` column. On failure: lists each gap and exits
-    /// non-zero without recording a gate.
-    ///
-    /// Mirror of `legion pr write-check` for the simplify gate. The
-    /// `--result` flag carries the skill's own verdict (clean = no findings;
-    /// issues = real simplify findings were found). The validator gates on
-    /// articulation completeness and substance independently of that verdict:
-    /// a clean result still requires a complete articulation.
-    Check {
-        /// Skill name to record the gate under (e.g. "legion-simplify").
-        #[arg(long)]
-        skill: String,
-
-        /// Gate result from the skill run: "clean" or "issues".
-        #[arg(long, value_parser = ["clean", "issues"])]
-        result: String,
-
-        /// Path to the markdown articulation file. Reads stdin when omitted.
-        #[arg(long)]
-        articulation_file: Option<String>,
-
-        /// Number of skill findings (default 0; used when --result is "issues").
-        #[arg(long, default_value = "0")]
-        findings_count: u64,
-
-        /// Override the base ref the changed-file set is diffed against
-        /// (default: `main`, falling back to `origin/main`). For stacked
-        /// branches whose parent is an unmerged feature branch, pass that
-        /// branch so the coverage set is scoped to what this branch actually
-        /// changed rather than everything since `main` (#779). Must resolve
-        /// to a real ref -- an unresolvable `--base` is a hard error, same as
-        /// the no-base-ref case with no override. The resolved base is
-        /// recorded on the gate row regardless of whether it came from this
-        /// flag or the default resolution, so a too-narrow base stays
-        /// visible in the audit trail.
-        #[arg(long)]
-        base: Option<String>,
-
-        /// Structured findings for this run, as a JSON array of
-        /// `{file, line, severity, summary}` objects (#773). Optional -- a
-        /// `clean` verdict with zero findings omits it. Fed into the
-        /// finding-resolution ledger: prose in the articulation is NOT
-        /// parsed for findings (not reliable enough to extract from), so a
-        /// skill reporting `--result issues` should pass its real findings
-        /// here to be tracked toward resolution/disposition.
-        #[arg(long)]
-        findings_json: Option<String>,
-    },
-
     /// Disposition a single PENDING finding: mark it DISPOSITIONED with an
     /// explicit reason (#773). A disposition is not a fix -- it is a
     /// conscious "we are not fixing this, and here is why" -- so `--reason`
@@ -196,7 +124,7 @@ pub(crate) enum QualityGateAction {
         #[arg(long)]
         branch: String,
 
-        /// Skill the findings were raised under (e.g. "legion-simplify").
+        /// Skill the findings were raised under (e.g. "legion-review").
         #[arg(long)]
         skill: String,
 
@@ -240,11 +168,11 @@ pub(crate) enum QualityGateAction {
     /// voiding annotates the ledger, it never erases it.
     ///
     /// Use `--superseded-by` once the genuine replacement row exists (e.g.
-    /// after re-running `quality-gate check` on the same commit) to link the
+    /// after re-running the gate on the same commit) to link the
     /// voided row to what replaced it.
     Void {
         /// Id of the gate row to void (from `quality-gate list` or the id
-        /// printed by `record`/`check`).
+        /// printed by `record`).
         #[arg(long)]
         id: String,
 
@@ -274,15 +202,14 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // only be earned by passing that validator. Refusing here closes
             // the exact loophole a manufactured-clean row exploits -- self-
             // reporting "clean" via `record` for a skill whose real gate is
-            // `check`. Skills with no validator (legion-review, a
+            // its validator. Skills with no validator (legion-review, a
             // legion-verify:<card_id> verdict) are asserted by necessity and
             // unaffected.
             if gate_result == GateResult::Clean && gate_registry::has_check_validator(&skill) {
                 eprintln!(
                     "[legion] error: '{skill}' has a check validator -- a clean gate cannot be \
-                     recorded via 'quality-gate record'. Run 'quality-gate check --skill {skill} \
-                     --result clean ...' instead, which validates a substantive per-changed-file \
-                     articulation before recording."
+                     recorded via 'quality-gate record'. Run 'legion pr write-check' instead, \
+                     which validates the PR body before recording."
                 );
                 return Err(error::LegionError::ExitWith(1));
             }
@@ -374,10 +301,6 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             // No issue: a quality-gate row names only its branch, and a
             // branch name is not a mapping to an issue (#1279).
             emit_gate_trust(&database, &row, None);
-            // Phase 2b: a downstream legion-review verdict witnesses the
-            // upstream legion-simplify gate prediction for this commit -- review
-            // catching issues means simplify's clean verdict was wrong.
-            crate::gate_trust::maybe_witness_from_review(&database, &row);
 
             // #773: persist the findings extracted above, now that the gate
             // row (and its id) exists. Only reached once the refusal check
@@ -428,155 +351,6 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
             } else {
                 print_stats_table(&stats);
             }
-        }
-
-        QualityGateAction::Check {
-            skill,
-            result,
-            articulation_file,
-            findings_count,
-            base,
-            findings_json,
-        } => {
-            // Parse and validate the result flag before touching the FS.
-            let gate_result: GateResult = GateResult::from_str(&result)?;
-
-            // #773: parse --findings-json up front, before any FS/DB work --
-            // an explicitly-passed but malformed payload is a hard error
-            // (unlike the Record arm's --details-json, whose `findings` key
-            // is best-effort since most skills never set it).
-            let raw_findings = match findings_json.as_deref() {
-                Some(raw) => finding_gate::parse_findings_array(raw)?,
-                None => Vec::new(),
-            };
-
-            // #773/#1008: same self-contradiction guard as the Record arm,
-            // and it applies regardless of `--result` -- `--findings-json`
-            // already hard-errors on malformed JSON above, so this mainly
-            // catches the "omitted --findings-json entirely while
-            // --findings-count claims real findings" case, for a `clean` OR
-            // an `issues` request alike, for symmetry and defense in depth.
-            if findings_count_contradicts_extraction(findings_count, &raw_findings) {
-                eprintln!(
-                    "[legion] error: cannot record a gate for skill '{skill}' -- \
-                     --findings-count {findings_count} but --findings-json extracted none \
-                     (#773/#1008). Pass the findings via --findings-json so they are tracked, or \
-                     pass --findings-count 0 if there truly are none."
-                );
-                return Err(error::LegionError::ExitWith(1));
-            }
-
-            // #1403: a detached HEAD has no branch to key findings on; refuse
-            // before any other git or articulation work.
-            let (commit_hash, branch) = git_head_commit_and_branch()?;
-            refuse_detached_head(&branch)?;
-            let repo = current_repo_name()?;
-
-            // Resolve the changed-file set from git. `--base` overrides the
-            // default main/origin-main resolution (#779); an unresolvable
-            // `--base` hard-errors rather than falling back silently. Pure
-            // (R100) renames are cleared from `files` and carried separately
-            // in `cleared_renames` for the audit trail.
-            let changed = git_changed_files(base.as_deref())?;
-
-            // Read the articulation from --articulation-file or stdin.
-            let articulation =
-                read_file_or_stdin(articulation_file.as_deref(), "--articulation-file")?;
-
-            let report = simplify_check::validate_articulation(&changed.files, &articulation);
-
-            // The gate is only recorded when the articulation passes the
-            // structural validator. A failed articulation exits non-zero
-            // without recording so the gate on HEAD stays absent (pr create
-            // will refuse until a valid articulation is submitted).
-            if !report.ok {
-                let gap_count = report.findings.len();
-                eprintln!(
-                    "[legion] simplify-check FAILED for skill '{skill}' -- {gap_count} gap(s):"
-                );
-                for f in &report.findings {
-                    eprintln!("  - {f}");
-                }
-                eprintln!(
-                    "\nThe articulation must have one `### <path>` entry per changed file, \
-                     each with composed prose explaining which simplify checks were applied \
-                     and the reasoning for the clean-or-finding verdict. Fix the articulation \
-                     and re-run."
-                );
-                return Err(error::LegionError::ExitWith(1));
-            }
-
-            // Articulation is valid. Record the gate under HEAD.
-            // findings_count is the skill's own count (real simplify findings),
-            // not the validator's gap count (which is 0 when we reach here).
-            // It is valid for --result issues to carry --findings-count 0: the
-            // flag is informational, and the skill runner may not always surface
-            // a count. The gate result is what matters for `legion pr create`.
-            // Cleared (R100) renames are excluded from `report`'s coverage
-            // requirement but still surfaced here -- count + pairs -- so the
-            // exclusion is auditable rather than silent (#779).
-            let cleared_renames_json: Vec<serde_json::Value> = changed
-                .cleared_renames
-                .iter()
-                .map(|(old, new)| serde_json::json!({"old": old, "new": new}))
-                .collect();
-            let details = serde_json::json!({
-                "skill": skill,
-                "result": result,
-                "entry_count": report.entry_count,
-                "findings_count": findings_count,
-                "articulation": articulation,
-                "base": changed.base,
-                "cleared_renames_count": cleared_renames_json.len(),
-                "cleared_renames": cleared_renames_json,
-                "findings": raw_findings.iter().map(|f| serde_json::json!({
-                    "file": f.file, "line": f.line, "severity": f.severity, "summary": f.summary,
-                })).collect::<Vec<_>>(),
-            })
-            .to_string();
-
-            let database = open_db()?;
-
-            // #773: same reconcile-then-refuse gate as the Record arm, run
-            // here since legion-simplify records clean exclusively through
-            // Check (Record refuses a clean result for it, #780). Also mirrors
-            // the Record arm in considering THIS run's own `raw_findings`
-            // (parsed above from `--findings-json`) -- a clean verdict
-            // reported alongside real findings must be refused by the same
-            // call that reports them, not just a later one.
-            reconcile_and_refuse_if_findings_pending(
-                &database,
-                &repo,
-                &branch,
-                &skill,
-                &commit_hash,
-                gate_result == GateResult::Clean,
-                &raw_findings,
-            )?;
-
-            let row = database.record_quality_gate(&QualityGateInput {
-                branch: &branch,
-                commit_hash: &commit_hash,
-                skill: &skill,
-                result: gate_result,
-                findings_count,
-                details: Some(&details),
-                provenance: GateProvenance::Validated,
-                base: changed.base.as_deref(),
-            })?;
-            // No issue, as in the Record arm: the branch is all this knows.
-            emit_gate_trust(&database, &row, None);
-            persist_raw_findings(&database, &repo, &row, &raw_findings);
-
-            println!(
-                "[legion] simplify-check articulation accepted for skill '{skill}' \
-                 (result '{result}', {} file entries, {findings_count} skill findings, \
-                 base '{}', {} rename(s) auto-cleared). Gate id: {}",
-                report.entry_count,
-                changed.base.as_deref().unwrap_or("<none>"),
-                changed.cleared_renames.len(),
-                row.id,
-            );
         }
 
         QualityGateAction::FindingDisposition { id, reason } => {
@@ -659,18 +433,18 @@ pub(crate) fn handle_quality_gate(action: QualityGateAction) -> error::Result<()
 /// actually extracted into `raw_findings` -- the caller claims N>0 findings
 /// but ledger extraction produced none. Applies to ANY gate result, not only
 /// `clean`: an `--result issues` call with a malformed or schema-mismatched
-/// `--details-json`/`--findings-json` must be refused exactly like a `clean`
+/// `--details-json` must be refused exactly like a `clean`
 /// call is today, closing the fail-open gap where `findings_count` on the
 /// recorded gate row diverges from the persisted `quality_gate_findings`
 /// ledger with no error at record time (#1008). Refusing on this closes the
 /// fail-open gap a totally-malformed or entirely-mismatched-schema
-/// `--details-json`/`--findings-json` payload would otherwise leave open
+/// `--details-json` payload would otherwise leave open
 /// (extraction degrades to an empty vec rather than erroring, since a
 /// missing `findings` key is the legitimate common case for most skills)
 /// WITHOUT imposing hard-refusal on every malformed payload -- only when the
 /// skill's own count says findings should exist and none were found is
 /// there no ambiguity that something was dropped versus never existed.
-/// Shared, pure, and unit-testable by both the `Record` and `Check` arms.
+/// Pure and unit-testable apart from the `Record` arm.
 fn findings_count_contradicts_extraction(
     findings_count: u64,
     raw_findings: &[finding_gate::RawFinding],
@@ -678,7 +452,7 @@ fn findings_count_contradicts_extraction(
     findings_count > 0 && raw_findings.is_empty()
 }
 
-/// Refuse `quality-gate record` / `check` on a detached HEAD (#1403):
+/// Refuse `quality-gate record` on a detached HEAD (#1403):
 /// findings are keyed by branch, and `git rev-parse --abbrev-ref HEAD`
 /// prints the literal `HEAD` when there is none.
 fn refuse_detached_head(branch: &str) -> error::Result<()> {
@@ -767,7 +541,7 @@ fn resolve_gate_id(database: &db::Database, id: &str) -> error::Result<String> {
     }
 }
 
-/// The finding-resolution gate (#773), shared by the Record and Check arms.
+/// The finding-resolution gate (#773), run by the Record arm.
 ///
 /// Always reconciles the PENDING set for `branch`/`skill` against
 /// `head_commit` first (a fix landed in an earlier commit resolves the
@@ -777,7 +551,7 @@ fn resolve_gate_id(database: &db::Database, id: &str) -> error::Result<String> {
 ///     branch+skill) is empty -- no HIGH/MED left unresolved/undispositioned,
 ///     no LOW left un-acked, and
 ///   - `current_raw_findings` (THIS call's own structured findings, parsed by
-///     the caller from `--details-json`/`--findings-json` before this
+///     the caller from `--details-json` before this
 ///     function runs) is empty.
 ///
 /// The second half is not optional bookkeeping: legion-review's `approved`
@@ -1747,141 +1521,6 @@ mod tests {
         assert!(
             err.to_string().contains("criteria[1] is malformed"),
             "error must name the offending index, got: {err}"
-        );
-    }
-
-    // --- simplify-check gate tests (#665) ---
-
-    /// A valid articulation covering all changed files records a clean gate
-    /// in the quality_gates table under the given skill + commit.
-    #[test]
-    fn simplify_check_gate_recorded_on_valid_articulation() {
-        use std::collections::HashSet;
-
-        use crate::simplify_check::validate_articulation;
-        use crate::verify::GateResult;
-
-        let db = test_db();
-        let changed: HashSet<String> = ["src/foo.rs", "src/bar.rs"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let articulation = "### src/foo.rs\n\
-             Checked all six categories. No duplicate logic found: `fn handle_foo` \
-             at src/foo.rs:30 handles exactly one concern. No stringly-typed state; \
-             enums used throughout. Error handling propagates via the ? operator.\n\
-             ### src/bar.rs\n\
-             Reviewed for unnecessary abstraction and copy-paste variation. The \
-             single trait bound on `fn render` at src/bar.rs:88 is load-bearing -- \
-             removing it would require duplicating the impl block in three callers. \
-             Clean verdict: no simplify findings.\n";
-
-        let report = validate_articulation(&changed, articulation);
-        assert!(
-            report.ok,
-            "expected valid articulation, got {:?}",
-            report.findings
-        );
-
-        // Simulate what the handler does: record the gate.
-        let row = db
-            .record_quality_gate(&QualityGateInput {
-                branch: "feat/665-simplify-articulation",
-                commit_hash: "deadbeefdeadbeef",
-                skill: "legion-simplify",
-                result: GateResult::Clean,
-                findings_count: 0,
-                details: Some(&serde_json::json!({"articulation": articulation}).to_string()),
-                provenance: GateProvenance::Validated,
-                base: None,
-            })
-            .expect("record_quality_gate failed");
-        assert!(!row.id.is_empty());
-
-        // Verify it can be retrieved by the commit + skill pair.
-        let fetched = db
-            .get_quality_gate("deadbeefdeadbeef", "legion-simplify")
-            .expect("get_quality_gate failed")
-            .expect("expected Some gate row");
-        assert_eq!(fetched.result, GateResult::Clean);
-        assert_eq!(fetched.skill, "legion-simplify");
-    }
-
-    /// A missing-coverage gap causes the validator to refuse. The gate should
-    /// NOT be recorded (the handler exits non-zero before touching the DB).
-    #[test]
-    fn simplify_check_refuses_missing_coverage() {
-        use std::collections::HashSet;
-
-        use crate::simplify_check::validate_articulation;
-
-        let changed: HashSet<String> = ["src/foo.rs", "src/missing.rs"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let articulation = "### src/foo.rs\n\
-             Checked all six simplify categories. No findings: each function \
-             is focused on a single concern, types are explicit, error handling \
-             propagates via ? throughout the module.\n";
-
-        let report = validate_articulation(&changed, articulation);
-        assert!(!report.ok, "expected refusal for missing coverage");
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| f.contains("src/missing.rs") && f.contains("missing coverage")),
-            "expected a missing-coverage finding naming src/missing.rs, got {:?}",
-            report.findings
-        );
-    }
-
-    /// A boilerplate entry (restates category names without reasoning, under
-    /// the word threshold) causes the validator to refuse.
-    #[test]
-    fn simplify_check_refuses_boilerplate_entry() {
-        use std::collections::HashSet;
-
-        use crate::simplify_check::validate_articulation;
-
-        let changed: HashSet<String> = ["src/foo.rs"].iter().map(|s| s.to_string()).collect();
-        // Entry only lists the check names -- not enough words or reasoning.
-        let articulation = "### src/foo.rs\nClean. No issues.\n";
-
-        let report = validate_articulation(&changed, articulation);
-        assert!(!report.ok, "expected refusal for thin entry");
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| f.contains("too thin") && f.contains("src/foo.rs")),
-            "expected a thin-entry finding, got {:?}",
-            report.findings
-        );
-    }
-
-    /// An articulation with real findings (issues result) still passes the
-    /// structural validator if coverage and substance are present.
-    #[test]
-    fn simplify_check_accepts_issues_result_with_substantive_articulation() {
-        use std::collections::HashSet;
-
-        use crate::simplify_check::validate_articulation;
-
-        let changed: HashSet<String> = ["src/foo.rs"].iter().map(|s| s.to_string()).collect();
-        let articulation = "### src/foo.rs\n\
-             Checked for duplicate logic: found two match arms at lines 47 and \
-             62 that share an identical body. Extracted into a helper \
-             `fn apply_default` to remove the copy-paste variation. No other \
-             issues found: stringly-typed state is absent, error handling uses \
-             ? throughout, no hand-rolled standard library duplication.\n";
-
-        let report = validate_articulation(&changed, articulation);
-        assert!(
-            report.ok,
-            "issues result with substantive articulation should pass the structural validator, \
-             got {:?}",
-            report.findings
         );
     }
 

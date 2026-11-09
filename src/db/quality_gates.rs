@@ -15,7 +15,7 @@ use crate::verify::{GateProvenance, GateResult};
 /// `quality_gates` table (#200).
 pub(super) fn create_tables(conn: &Connection) -> Result<()> {
     // Migration 12: Quality gates for PR creation guard (#200).
-    // Records results from skill runners (e.g. legion-simplify) so
+    // Records results from skill runners (e.g. legion-pr-write) so
     // `legion pr create` can verify a clean gate before opening a PR.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS quality_gates (
@@ -48,11 +48,9 @@ pub(super) fn create_tables(conn: &Connection) -> Result<()> {
 /// conservative default, since treating an unknown row as VALIDATED would
 /// be exactly the ground-truth leak #780 closes.
 ///
-/// The `base` column (#779) follows: `--base` override for `legion
-/// quality-gate check`. Nullable -- existing rows and gates recorded
-/// without an explicit `--base` (the default main/origin-main resolution,
-/// or non-`check` gate kinds like `record` and `legion-verify`) have no
-/// base to record. Recording the resolved base ref on the row (rather than
+/// The `base` column (#779) follows: the base ref a gate's changed-file set
+/// was diffed against. Nullable -- gates recorded without one (`record`,
+/// `pr write-check`, `legion-verify`) have no base to record. Recording the resolved base ref on the row (rather than
 /// only inside the `details` JSON blob) keeps a too-narrow `--base`
 /// visible to the same `quality-gate list`/`stats` surfaces that already
 /// query columns, consistent with the issue's auditability-over-trust
@@ -148,11 +146,11 @@ pub struct QualityGateInput<'a> {
     pub result: GateResult,
     pub findings_count: u64,
     pub details: Option<&'a str>,
-    /// Whether this verdict was VALIDATED (via `quality-gate check`) or
-    /// merely ASSERTED (via `quality-gate record`, #780). The caller states
-    /// this explicitly rather than it being inferred, so the write site that
-    /// knows which code path it is (the `Check` handler vs. the `Record`
-    /// handler) is the single source of truth for it.
+    /// Whether this verdict was VALIDATED (via a check validator such as
+    /// `pr write-check`) or merely ASSERTED (via `quality-gate record`,
+    /// #780). The caller states this explicitly rather than it being
+    /// inferred, so the write site that knows which code path it is is the
+    /// single source of truth for it.
     pub provenance: GateProvenance,
     /// The `--base` ref used to compute the changed-file set (#779), when
     /// the caller resolved one. `None` for gate kinds that never compute a
@@ -253,7 +251,7 @@ impl Database {
     /// Void a gate row: mark it `voided_at`/`void_reason` so a known-false
     /// verdict is retired without deleting history (#780). Optionally names
     /// the row that supersedes it -- typically a re-laid genuine row from a
-    /// fresh `quality-gate check` run, recorded separately and linked back
+    /// fresh validated run, recorded separately and linked back
     /// here once its id is known.
     ///
     /// A voided row drops out of the "live" lookups (`get_quality_gate`,

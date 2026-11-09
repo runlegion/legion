@@ -1,6 +1,6 @@
 // Verify gate (#520).
 //
-// The final gate before a card reaches Done. After build, simplify, PR-write,
+// The final gate before a card reaches Done. After build, PR-write,
 // and review, verify confirms each acceptance criterion is actually satisfied
 // -- with cited evidence -- and emits a per-criterion verdict. For a solo
 // engineering team this is the QA the operator does not have: non-skippable,
@@ -67,8 +67,8 @@ impl FromStr for GateResult {
 }
 
 /// Provenance of a recorded quality-gate row (#780): whether the verdict was
-/// structurally VALIDATED (a coverage-and-substance articulation passed
-/// `quality-gate check`) or merely ASSERTED (written via `quality-gate
+/// structurally VALIDATED (a check validator such as `pr write-check`
+/// passed) or merely ASSERTED (written via `quality-gate
 /// record`, with no validator backing the claim).
 ///
 /// This is the distinction gate-trust and audits need to tell a proven clean
@@ -83,9 +83,8 @@ impl FromStr for GateResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GateProvenance {
-    /// Recorded via `quality-gate check`: the structural validator (coverage
-    /// of every changed file + non-boilerplate substance) passed before this
-    /// row was written.
+    /// Recorded via a check validator (e.g. `pr write-check`): the
+    /// structural validator passed before this row was written.
     Validated,
     /// Recorded via `quality-gate record`: no validator ran. Legitimate --
     /// and the only option -- for skills with no check validator

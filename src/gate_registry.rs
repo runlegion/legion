@@ -5,22 +5,15 @@
 //! exists, so `quality-gate record` is the only way to write their verdict --
 //! `legion-review`, and a card-keyed `legion-verify:<card_id>` verdict).
 //!
-//! Before this module, "which skills have a check validator" was implicit:
-//! `legion-simplify` and `legion-pr-write` were hardcoded, separately, in
-//! `cli/pr.rs`'s pre-create gate loop and `cli/verify.rs`'s `Check` action,
-//! with nothing tying them together. Two independent call sites now need the
-//! same list to stay in lockstep -- `quality-gate record`'s clean-refusal
-//! (cli/verify.rs) and gate-trust's ingestion guard (gate_trust.rs) -- so a
-//! third hardcoded copy would only grow the drift risk this module closes.
+//! Two independent call sites need the same list to stay in lockstep --
+//! `quality-gate record`'s clean-refusal (cli/verify.rs) and gate-trust's
+//! ingestion guard (gate_trust.rs) -- so the list lives here once.
 
-/// Skills that have a `legion quality-gate check` validator. A skill named
-/// here can never earn a "clean" verdict on the ledger via `quality-gate
-/// record` -- it must go through `check`, which validates a substantive,
-/// per-changed-file articulation before recording (see
-/// `crate::simplify_check::validate_articulation` for `legion-simplify`, and
-/// `crate::pr_write::validate_pr_body` via
+/// Skills that have a check validator. A skill named here can never earn a
+/// "clean" verdict on the ledger via `quality-gate record` -- it must go
+/// through its validator (`crate::pr_write::validate_pr_body` via
 /// `cli::pr::validate_and_record_pr_write_gate` for `legion-pr-write`).
-const CHECK_GATED_SKILLS: &[&str] = &["legion-simplify", "legion-pr-write"];
+const CHECK_GATED_SKILLS: &[&str] = &["legion-pr-write"];
 
 /// True when `skill` has a check validator (see `CHECK_GATED_SKILLS`).
 ///
@@ -38,8 +31,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simplify_and_pr_write_are_check_gated() {
-        assert!(has_check_validator("legion-simplify"));
+    fn pr_write_is_check_gated() {
         assert!(has_check_validator("legion-pr-write"));
     }
 

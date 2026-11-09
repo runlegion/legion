@@ -946,7 +946,7 @@ fn pr_view_surfaces_malformed_plugin_json_as_worksource_error() {
 /// `legion quality-gate record` writes a row and prints a UUIDv7 on stdout.
 ///
 /// Uses "legion-review" -- a skill with no check validator -- rather than
-/// "legion-simplify": since #780, `record --result clean` is refused for a
+/// "legion-pr-write": since #780, `record --result clean` is refused for a
 /// check-gated skill (see `quality_gate_record_refuses_clean_for_check_gated_skill`
 /// below), and this test exercises the generic record mechanics, not that
 /// distinction.
@@ -969,8 +969,8 @@ fn quality_gate_record_prints_id() {
 }
 
 /// #780: `quality-gate record --result clean` is refused for a skill with a
-/// check validator (legion-simplify, legion-pr-write) -- a clean gate for
-/// those can only be earned via `quality-gate check`.
+/// check validator (legion-pr-write) -- a clean gate for it can only be
+/// earned via `pr write-check`.
 #[test]
 fn quality_gate_record_refuses_clean_for_check_gated_skill() {
     let gate_repo = gate_fixture_repo();
@@ -980,7 +980,7 @@ fn quality_gate_record_refuses_clean_for_check_gated_skill() {
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "clean",
     ]));
@@ -1015,7 +1015,7 @@ fn quality_gate_record_allows_issues_for_check_gated_skill() {
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "issues",
         "--findings-count",
@@ -1046,7 +1046,7 @@ fn quality_gate_record_with_details() {
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "issues",
         "--findings-count",
@@ -1259,46 +1259,6 @@ fn quality_gate_record_refuses_detached_head() {
     );
 }
 
-/// #1403: `quality-gate check` from a detached HEAD exits 1 naming
-/// `git switch`, and records no gate row and no finding row.
-#[test]
-fn quality_gate_check_refuses_detached_head() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo = gate_fixture_repo();
-    run_git_fixture(repo.path(), &["checkout", "-q", "--detach"]);
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), "# Simplify articulation\n").unwrap();
-
-    let (_stdout, stderr) = run_fail(legion_cmd_in(dir.path(), repo.path()).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "issues",
-        "--findings-count",
-        "1",
-        "--findings-json",
-        r#"[{"file":"x.rs","line":1,"severity":"MED","summary":"x"}]"#,
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stderr.contains("git switch"),
-        "expected the detached-HEAD refusal, got: {stderr}"
-    );
-
-    let gates = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list", "--json"]));
-    let gates: Vec<serde_json::Value> = serde_json::from_str(&gates).expect("JSON array");
-    assert!(gates.is_empty(), "no gate row may be recorded: {gates:?}");
-    let findings = run_ok(legion_cmd(dir.path()).args(["quality-gate", "finding-list", "--json"]));
-    let findings: Vec<serde_json::Value> = serde_json::from_str(&findings).expect("JSON array");
-    assert!(
-        findings.is_empty(),
-        "no finding row may be recorded: {findings:?}"
-    );
-}
-
 /// #1403: a PENDING finding recorded in repo A does not refuse a clean gate
 /// for the same branch name and skill in repo B, and still refuses it in A.
 /// `finding-list --repo` filters by repo and `--json` carries `repo`.
@@ -1386,18 +1346,18 @@ fn pr_create_refuses_without_quality_gate() {
     // The gate KEY stays bare -- it is the `quality_gates.skill` value written by
     // `legion quality-gate record` and read by `get_quality_gate`.
     assert!(
-        stderr.contains("no clean legion-simplify gate"),
+        stderr.contains("no clean legion-pr-write gate"),
         "error should name the bare gate key, got: {stderr}"
     );
     // The invocation HINT carries the `legion:` plugin prefix. Claude Code 2.1.216
     // restored the prefix on plugin skills declaring `name:` frontmatter, so the bare
     // form no longer resolves and must not regress back into the hint.
     assert!(
-        stderr.contains("/legion:legion-simplify"),
+        stderr.contains("/legion:legion-pr-write"),
         "error should guide toward the prefixed skill invocation, got: {stderr}"
     );
     assert!(
-        !stderr.contains("Run /legion-simplify"),
+        !stderr.contains("Run /legion-pr-write"),
         "run hint must not use the bare skill name, which no longer resolves: {stderr}"
     );
 }
@@ -1426,12 +1386,54 @@ fn pr_create_skip_gates_bypasses_gate_check() {
         .output()
         .unwrap();
 
-    // Should fail, but NOT with the "no clean legion-simplify gate" message.
+    // Should fail, but NOT with the "no clean legion-pr-write gate" message.
     // It fails later because no watch.toml entry exists for "no-such-repo".
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !stderr.contains("no clean legion-simplify gate"),
+        !stderr.contains("no clean legion-pr-write gate"),
         "skip-gates should bypass gate error, got: {stderr}"
+    );
+}
+
+/// #1501: `legion pr create` opens the PR with a clean pr-write gate on HEAD
+/// and no simplify gate. The gate is earned through `pr write-check` (a clean
+/// pr-write row cannot be recorded any other way), then `pr create` reaches
+/// the stub's `create-pr` verb and prints the new PR's url.
+#[cfg(unix)]
+#[test]
+fn pr_create_succeeds_with_pr_write_gate_and_no_simplify_gate() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let plugin_root = tempfile::tempdir().unwrap();
+    let stub = r##"#!/bin/bash
+set -e
+case "${1:-}" in
+  view-issue)
+    cat <<'BODY'
+{"url":"https://example.com/issues/7","number":7,"title":"stub issue","body":"Why it matters.\n\n## Acceptance criteria\n- crit one\n- crit two\n","labels":[],"assignees":null,"state":"OPEN"}
+BODY
+    ;;
+  create-pr)
+    echo '{"url":"https://example.com/pull/99","number":99}'
+    ;;
+  *)
+    echo "stub: unknown subcommand $1" >&2
+    exit 2
+    ;;
+esac
+"##;
+    setup_pr_read_stub(data_dir.path(), plugin_root.path(), stub);
+
+    let body_file = data_dir.path().join("pr-body.md");
+    std::fs::write(&body_file, substantive_body()).unwrap();
+    run_ok(pr_read_cmd(data_dir.path(), plugin_root.path()).args(write_check_args(&body_file)));
+
+    let stdout = run_ok(
+        pr_read_cmd(data_dir.path(), plugin_root.path())
+            .args(["pr", "create", "--repo", "stub", "--title", "My PR"]),
+    );
+    assert!(
+        stdout.contains("https://example.com/pull/99"),
+        "pr create should open the PR with only the pr-write gate, got: {stdout}"
     );
 }
 
@@ -2744,9 +2746,9 @@ fn quality_gate_list_empty_json_prints_empty_array() {
 
 /// `legion quality-gate list` shows recorded rows in the human table.
 ///
-/// legion-simplify records "issues" and legion-review records "clean": since
+/// legion-pr-write records "issues" and legion-review records "clean": since
 /// #780, `record --result clean` is refused for a check-gated skill
-/// (legion-simplify has one), so the mix is swapped from a legion-simplify
+/// (legion-pr-write has one), so the mix is swapped from a legion-pr-write
 /// row's usual verdict -- this test only cares that both result strings
 /// render, not which skill carries which.
 #[test]
@@ -2761,7 +2763,7 @@ fn quality_gate_list_shows_recorded_rows() {
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "issues",
     ]));
@@ -2776,8 +2778,8 @@ fn quality_gate_list_shows_recorded_rows() {
 
     let stdout = run_ok(legion_cmd(dir.path()).args(["quality-gate", "list"]));
     assert!(
-        stdout.contains("legion-simplify"),
-        "expected simplify row in list output, got: {stdout}"
+        stdout.contains("legion-pr-write"),
+        "expected pr-write row in list output, got: {stdout}"
     );
     assert!(
         stdout.contains("legion-review"),
@@ -2799,14 +2801,14 @@ fn quality_gate_list_filter_by_skill() {
     let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
-    // legion-simplify records "issues" (#780: "clean" is refused for a
+    // legion-pr-write records "issues" (#780: "clean" is refused for a
     // check-gated skill via `record`) -- irrelevant to this test, which
     // filters on skill name, not result.
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "issues",
     ]));
@@ -2826,8 +2828,8 @@ fn quality_gate_list_filter_by_skill() {
         "expected review row, got: {stdout}"
     );
     assert!(
-        !stdout.contains("legion-simplify"),
-        "simplify row should be filtered out, got: {stdout}"
+        !stdout.contains("legion-pr-write"),
+        "pr-write row should be filtered out, got: {stdout}"
     );
 }
 
@@ -3036,7 +3038,7 @@ fn quality_gate_list_json_emits_array_with_details() {
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "issues",
         "--findings-count",
@@ -3052,7 +3054,7 @@ fn quality_gate_list_json_emits_array_with_details() {
     assert_eq!(arr.len(), 1, "expected one row");
 
     let row = &arr[0];
-    assert_eq!(row["skill"].as_str().unwrap(), "legion-simplify");
+    assert_eq!(row["skill"].as_str().unwrap(), "legion-pr-write");
     assert_eq!(row["result"].as_str().unwrap(), "issues");
     assert_eq!(row["findings_count"].as_u64().unwrap(), 1);
     // details field must be present in JSON output.
@@ -3088,7 +3090,7 @@ fn quality_gate_stats_empty_json_prints_empty_array() {
 /// `legion quality-gate stats` shows per-skill aggregates in the human table.
 ///
 /// Uses "legion-review" -- a mixed clean/issues run pair recorded via
-/// `record` -- rather than "legion-simplify": #780 refuses `record --result
+/// `record` -- rather than "legion-pr-write": #780 refuses `record --result
 /// clean` for a check-gated skill, and legion-review has no check validator,
 /// so it is the real skill this recording pattern is legitimate for.
 #[test]
@@ -3199,14 +3201,14 @@ fn quality_gate_stats_filter_by_skill() {
     let gate_repo = gate_fixture_repo();
     let dir = tempfile::tempdir().unwrap();
 
-    // legion-simplify records "issues" (#780: "clean" is refused for a
+    // legion-pr-write records "issues" (#780: "clean" is refused for a
     // check-gated skill via `record`) -- irrelevant to this test, which
     // filters on skill name, not result.
     run_ok(legion_cmd_in(dir.path(), gate_repo.path()).args([
         "quality-gate",
         "record",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--result",
         "issues",
     ]));
@@ -3223,720 +3225,12 @@ fn quality_gate_stats_filter_by_skill() {
         "quality-gate",
         "stats",
         "--skill",
-        "legion-simplify",
+        "legion-pr-write",
         "--json",
     ]));
     let arr: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("expected JSON array");
     assert_eq!(arr.len(), 1, "expected only one skill row");
-    assert_eq!(arr[0]["skill"].as_str().unwrap(), "legion-simplify");
-}
-
-// ---------------------------------------------------------------------------
-// quality-gate check end-to-end tests (#665).
-//
-// These tests require a real git repo so `git_changed_files` can probe base
-// refs and run `git diff`. Each test creates a temp repo with a `main` branch
-// and a feature branch, writes an articulation file to a second tempdir, and
-// runs `legion quality-gate check` via `legion_cmd` against a separate data dir.
-// ---------------------------------------------------------------------------
-
-/// Set up a minimal git repo with a `main` branch (one seed commit) and a
-/// feature branch with one changed file (`src/foo.rs`). Returns the repo dir.
-///
-/// Every git invocation runs via `run_git_fixture`: explicit tempdir
-/// `current_dir` plus per-invocation `-c user.name`/`-c user.email`/`-c
-/// commit.gpgsign=false` -- never a `git config` write -- so the fixture
-/// cannot poison the enclosing real checkout's config (#723).
-fn setup_git_repo_with_feature_branch() -> tempfile::TempDir {
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    run_git_fixture(rp, &["init", "-b", "main"]);
-
-    // Seed commit on main so `main` resolves as a real ref.
-    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    run_git_fixture(rp, &["add", "README.md"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    // Feature branch: add one changed file.
-    run_git_fixture(rp, &["checkout", "-b", "feat/test"]);
-    std::fs::create_dir_all(rp.join("src")).unwrap();
-    std::fs::write(rp.join("src/foo.rs"), "// changed\n").unwrap();
-    run_git_fixture(rp, &["add", "src/foo.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "add foo"]);
-
-    repo
-}
-
-/// Build a substantive articulation that covers `src/foo.rs` with enough prose
-/// to clear the word-count threshold.
-fn good_articulation_for_foo() -> String {
-    "# Simplify articulation\n\n\
-     ### src/foo.rs\n\
-     Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
-     hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
-     No issues found: `fn foo` at src/foo.rs:1 has a single responsibility and the \
-     error handling propagates via the `?` operator throughout.\n"
-        .to_string()
-}
-
-/// quality-gate check: a valid articulation passes, records exactly one gate
-/// row for HEAD, and the row is visible via `quality-gate list --json`.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_passing_articulation_records_gate_row() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = setup_git_repo_with_feature_branch();
-    let data_dir = tempfile::tempdir().unwrap();
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
-
-    let stdout = run_ok(legion_cmd_in(data_dir.path(), repo.path()).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stdout.contains("accepted"),
-        "expected acceptance message, got: {stdout}"
-    );
-
-    // Exactly one gate row must be recorded.
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    let arr = rows.as_array().expect("expected array");
-    assert_eq!(
-        arr.len(),
-        1,
-        "expected exactly one gate row, got: {list_out}"
-    );
-    assert_eq!(arr[0]["result"].as_str().unwrap(), "clean");
-    // #779: the resolved base is recorded even on the default (no --base)
-    // path, not only on an explicit override -- "which base the
-    // articulation covered" must be visible for every gate, not just the
-    // unusual ones.
-    assert_eq!(
-        arr[0]["base"].as_str(),
-        Some("main"),
-        "expected the default-resolved base 'main' recorded on the gate row, got: {list_out}"
-    );
-}
-
-/// quality-gate check: a failing articulation (missing coverage) exits non-zero
-/// AND records NO gate row. This is the security-relevant path: the absence of
-/// a row is what blocks `legion pr create` from proceeding.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_failing_articulation_exits_nonzero_and_records_no_row() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = setup_git_repo_with_feature_branch();
-    let data_dir = tempfile::tempdir().unwrap();
-    // Articulation is empty -- no entries at all, so src/foo.rs is uncovered.
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), "# No entries\n").unwrap();
-
-    let (_stdout, stderr) = run_fail(legion_cmd_in(data_dir.path(), repo.path()).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stderr.contains("FAILED") || stderr.contains("missing coverage"),
-        "expected failure message in stderr, got: {stderr}"
-    );
-
-    // No row must have been recorded -- the gate on HEAD is absent.
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    let arr = rows.as_array().expect("expected array");
-    assert_eq!(
-        arr.len(),
-        0,
-        "expected zero gate rows after articulation refusal, got: {list_out}"
-    );
-}
-
-/// quality-gate check: when run outside a git repo, git_changed_files returns
-/// a hard error and the command exits non-zero without recording a gate row.
-/// This exercises the "git not in work tree" branch introduced in #665.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_outside_git_repo_exits_nonzero() {
-    // /tmp is never inside a git repo.
-    let outside_git = std::path::PathBuf::from("/tmp");
-    let data_dir = tempfile::tempdir().unwrap();
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
-
-    let (_stdout, stderr) = run_fail(legion_cmd_in(data_dir.path(), &outside_git).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    // The error must name git or the work-tree context.
-    assert!(
-        stderr.contains("git") || stderr.contains("work-tree") || stderr.contains("repo"),
-        "expected a git/repo error for non-git directory, got: {stderr}"
-    );
-
-    // No gate row must have been recorded.
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    assert_eq!(
-        rows.as_array().unwrap().len(),
-        0,
-        "expected zero gate rows after git failure, got: {list_out}"
-    );
-}
-
-/// quality-gate check: when run in a git repo that has no main/origin/main ref
-/// AND HEAD has a parent commit, the command exits non-zero with a descriptive
-/// error. This exercises the "base ref missing but HEAD has parent" hard-error
-/// branch -- the path that previously passed vacuously.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_no_base_ref_with_parent_commit_exits_nonzero() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    // Use a non-standard default branch name so neither `main` nor
-    // `origin/main` is present. The repo has two commits (seed + feature),
-    // so HEAD does have a parent.
-    run_git_fixture(rp, &["init", "-b", "trunk"]);
-    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    run_git_fixture(rp, &["add", "README.md"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-    std::fs::write(rp.join("change.rs"), "// changed\n").unwrap();
-    run_git_fixture(rp, &["add", "change.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "feature"]);
-
-    let data_dir = tempfile::tempdir().unwrap();
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
-
-    let (_stdout, stderr) = run_fail(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stderr.contains("main") || stderr.contains("base ref"),
-        "expected error about missing base ref, got: {stderr}"
-    );
-
-    // No gate row recorded.
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    assert_eq!(
-        rows.as_array().unwrap().len(),
-        0,
-        "expected zero gate rows after base-ref-missing error, got: {list_out}"
-    );
-}
-
-/// quality-gate check: a genuine initial commit (no `main`/`origin/main` ref
-/// AND HEAD has no parent) passes vacuously -- but must not do so silently.
-/// #669: the vacuous-pass branch now warns on stderr even though the command
-/// exits zero and records a clean gate.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_initial_commit_vacuous_pass_warns_on_stderr() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    // A non-standard branch name (neither `main` nor `origin/main`) with a
-    // single commit -- HEAD has no parent, so this is a genuine initial
-    // commit, not a misconfigured base ref.
-    run_git_fixture(rp, &["init", "-b", "trunk"]);
-    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    run_git_fixture(rp, &["add", "README.md"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    let data_dir = tempfile::tempdir().unwrap();
-    // The changed-file set is empty on this path, so an articulation with no
-    // entries at all is vacuously accepted.
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), "# No changed files\n").unwrap();
-
-    let out = run_ok_output(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("initial commit") && stderr.contains("vacuously"),
-        "expected the vacuous-pass path to warn on stderr, got: {stderr}"
-    );
-
-    // The gate is still recorded -- this is a pass, just a noted one.
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    assert_eq!(
-        rows.as_array().unwrap().len(),
-        1,
-        "expected one gate row recorded on the vacuous pass, got: {list_out}"
-    );
-}
-
-/// quality-gate check: non-ASCII file paths with core.quotePath are handled
-/// correctly. The path returned by git (unescaped, with core.quotePath=false)
-/// must match the `### <path>` heading, and the articulation must pass.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_non_ascii_path_roundtrips_correctly() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    run_git_fixture(rp, &["init", "-b", "main"]);
-    // Seed commit on main.
-    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    run_git_fixture(rp, &["add", "README.md"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    // Feature branch: add a file with a non-ASCII name.
-    run_git_fixture(rp, &["checkout", "-b", "feat/nonascii"]);
-    std::fs::create_dir_all(rp.join("src")).unwrap();
-    // Use a UTF-8 filename. The file system must support this; macOS and
-    // Linux UTF-8 locales both do.
-    let nonascii_name = "src/cafe\u{0301}.rs"; // NFC: src/café.rs (combining acute)
-    std::fs::write(rp.join(nonascii_name), "// non-ascii\n").unwrap();
-    run_git_fixture(rp, &["add", nonascii_name]);
-    run_git_fixture(rp, &["commit", "-m", "add non-ascii file"]);
-
-    // Ask git what name it reports (with core.quotePath=false).
-    let reported_path = run_git_fixture_output(
-        rp,
-        &[
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "--name-only",
-            "main...HEAD",
-        ],
-    );
-    // The path must be non-empty and not octal-quoted.
-    assert!(
-        !reported_path.is_empty(),
-        "expected a path from git diff, got empty output"
-    );
-    assert!(
-        !reported_path.starts_with('"'),
-        "expected unquoted path, got: {reported_path}"
-    );
-
-    // Build an articulation that uses exactly the path git reported.
-    let articulation = format!(
-        "### {reported_path}\n\
-         Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
-         hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
-         No issues found: a single trivial file with no structure. Verdict: clean.\n\
-         Evidence: {reported_path}:1 the lone declaration.\n"
-    );
-
-    let data_dir = tempfile::tempdir().unwrap();
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), &articulation).unwrap();
-
-    let stdout = run_ok(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stdout.contains("accepted"),
-        "expected acceptance for non-ASCII path, got: {stdout}"
-    );
-}
-
-// --- quality-gate check --base override + R100 auto-clear tests (#779) ---
-
-/// Build a substantive articulation covering an arbitrary `path` with enough
-/// prose and a located-evidence line to clear both structural bars.
-fn good_articulation_for(path: &str) -> String {
-    format!(
-        "### {path}\n\
-         Checked for duplicate logic, unnecessary abstraction, stringly-typed state, \
-         hand-rolled standard library dupes, copy-paste variation, and error swallowing. \
-         No issues found: the single declaration in this file has one responsibility.\n\
-         Evidence: {path}:1 the lone declaration.\n"
-    )
-}
-
-/// `--base` overrides the default main/origin-main resolution: a stacked
-/// branch (`feat/child`, based on the still-unmerged `feat/base-branch`, not
-/// `main`) diffed with `--base feat/base-branch` sees only the child's own
-/// changes, and the resolved base is recorded on the gate row.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_base_override_scopes_to_stacked_branch_and_is_recorded() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    run_git_fixture(rp, &["init", "-b", "main"]);
-    std::fs::write(rp.join("README.md"), "seed\n").unwrap();
-    run_git_fixture(rp, &["add", "README.md"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    // Intermediate, still-unmerged base branch.
-    run_git_fixture(rp, &["checkout", "-b", "feat/base-branch"]);
-    std::fs::write(rp.join("base_only.rs"), "// base branch content\n").unwrap();
-    run_git_fixture(rp, &["add", "base_only.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "base branch work"]);
-
-    // Child branch stacked on top of the (unmerged) base branch.
-    run_git_fixture(rp, &["checkout", "-b", "feat/child"]);
-    std::fs::write(rp.join("child_only.rs"), "// child branch content\n").unwrap();
-    run_git_fixture(rp, &["add", "child_only.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "child branch work"]);
-
-    let data_dir = tempfile::tempdir().unwrap();
-    // Articulation covers ONLY child_only.rs -- correct when scoped to
-    // feat/base-branch...HEAD, but would leave base_only.rs (and README.md)
-    // uncovered against the default main...HEAD range.
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), good_articulation_for("child_only.rs")).unwrap();
-
-    let stdout = run_ok(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-        "--base",
-        "feat/base-branch",
-    ]));
-    assert!(
-        stdout.contains("accepted"),
-        "expected acceptance scoped to the stacked base, got: {stdout}"
-    );
-
-    // The resolved base is recorded on the gate row.
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    let arr = rows.as_array().expect("expected array");
-    assert_eq!(
-        arr.len(),
-        1,
-        "expected exactly one gate row, got: {list_out}"
-    );
-    assert_eq!(
-        arr[0]["base"].as_str(),
-        Some("feat/base-branch"),
-        "expected the --base override recorded on the gate row, got: {list_out}"
-    );
-}
-
-/// `--base` naming a ref that does not resolve is a hard error: no fallback
-/// to the default main/origin-main resolution, no gate recorded.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_base_unresolvable_ref_hard_errors() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = setup_git_repo_with_feature_branch();
-    let data_dir = tempfile::tempdir().unwrap();
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), good_articulation_for_foo()).unwrap();
-
-    let (_stdout, stderr) = run_fail(legion_cmd_in(data_dir.path(), repo.path()).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-        "--base",
-        "no-such-ref-at-all",
-    ]));
-    assert!(
-        stderr.contains("no-such-ref-at-all") && stderr.contains("does not resolve"),
-        "expected an unresolvable --base error naming the ref, got: {stderr}"
-    );
-
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    assert_eq!(
-        rows.as_array().unwrap().len(),
-        0,
-        "expected zero gate rows after an unresolvable --base, got: {list_out}"
-    );
-}
-
-/// A pure (R100, zero-delta) rename is auto-cleared from the coverage set: an
-/// articulation with no entry for the renamed file still passes, and the
-/// rename pair is recorded in the gate's `details` JSON for audit.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_pure_rename_auto_cleared_and_recorded() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    run_git_fixture(rp, &["init", "-b", "main"]);
-    std::fs::write(
-        rp.join("mod.rs"),
-        "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
-    )
-    .unwrap();
-    run_git_fixture(rp, &["add", "mod.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    run_git_fixture(rp, &["checkout", "-b", "feat/pure-rename"]);
-    run_git_fixture(rp, &["mv", "mod.rs", "renamed.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "pure rename, no content change"]);
-
-    let data_dir = tempfile::tempdir().unwrap();
-    // No entries at all -- a zero-delta rename requires none.
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), "# No entries needed\n").unwrap();
-
-    let stdout = run_ok(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stdout.contains("accepted") && stdout.contains("1 rename(s) auto-cleared"),
-        "expected acceptance noting one auto-cleared rename, got: {stdout}"
-    );
-
-    let list_out = run_ok(legion_cmd(data_dir.path()).args([
-        "quality-gate",
-        "list",
-        "--skill",
-        "legion-simplify",
-        "--json",
-    ]));
-    let rows: serde_json::Value = serde_json::from_str(&list_out).expect("expected JSON");
-    let arr = rows.as_array().expect("expected array");
-    assert_eq!(
-        arr.len(),
-        1,
-        "expected exactly one gate row, got: {list_out}"
-    );
-    let details: serde_json::Value =
-        serde_json::from_str(arr[0]["details"].as_str().expect("details string"))
-            .expect("details JSON");
-    assert_eq!(details["cleared_renames_count"].as_u64(), Some(1));
-    let cleared = details["cleared_renames"]
-        .as_array()
-        .expect("cleared_renames array");
-    assert_eq!(cleared.len(), 1);
-    assert_eq!(cleared[0]["old"].as_str(), Some("mod.rs"));
-    assert_eq!(cleared[0]["new"].as_str(), Some("renamed.rs"));
-}
-
-/// The R100 auto-clear must not depend on the repo's ambient `diff.renames`
-/// config: with `diff.renames=false` set LOCALLY on the fixture repo (a
-/// config a contributor or CI image could plausibly carry), a pure rename is
-/// still detected and cleared because `--name-status -M50%` is pinned
-/// explicitly on the command line (#779 Build Notes: "do not inherit
-/// ambient diff.renames config"). Without the explicit pin, this same rename
-/// would surface as an untracked `D`/`A` pair and never clear.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_pure_rename_cleared_despite_diff_renames_false_config() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    run_git_fixture(rp, &["init", "-b", "main"]);
-    std::fs::write(
-        rp.join("mod.rs"),
-        "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
-    )
-    .unwrap();
-    run_git_fixture(rp, &["add", "mod.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    // Local config override -- writes to this fixture repo's own
-    // .git/config only (GIT_DIR is scoped to `rp` by fixture_git_command).
-    run_git_fixture(rp, &["config", "diff.renames", "false"]);
-
-    run_git_fixture(rp, &["checkout", "-b", "feat/pure-rename-vs-config"]);
-    run_git_fixture(rp, &["mv", "mod.rs", "renamed.rs"]);
-    run_git_fixture(
-        rp,
-        &["commit", "-m", "pure rename under diff.renames=false"],
-    );
-
-    let data_dir = tempfile::tempdir().unwrap();
-    let artic_file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(artic_file.path(), "# No entries needed\n").unwrap();
-
-    let stdout = run_ok(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        artic_file.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stdout.contains("accepted") && stdout.contains("1 rename(s) auto-cleared"),
-        "expected the rename to still auto-clear despite diff.renames=false, got: {stdout}"
-    );
-}
-
-/// A rename with a content delta (R<100) is NOT cleared: the new path still
-/// requires an articulation entry, but the old path (which no longer exists
-/// in the tree) does not.
-#[cfg(unix)]
-#[test]
-fn quality_gate_check_rename_with_delta_requires_new_path_not_old_path() {
-    let _config_guard = RealRepoConfigGuard::new();
-    let repo = gate_repo_dir();
-    let rp = repo.path();
-
-    run_git_fixture(rp, &["init", "-b", "main"]);
-    std::fs::write(
-        rp.join("mod.rs"),
-        "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",
-    )
-    .unwrap();
-    run_git_fixture(rp, &["add", "mod.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "seed"]);
-
-    run_git_fixture(rp, &["checkout", "-b", "feat/rename-with-delta"]);
-    run_git_fixture(rp, &["mv", "mod.rs", "renamed.rs"]);
-    std::fs::write(
-        rp.join("renamed.rs"),
-        "line1\nCHANGED\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nnewline\n",
-    )
-    .unwrap();
-    run_git_fixture(rp, &["add", "renamed.rs"]);
-    run_git_fixture(rp, &["commit", "-m", "rename with content delta"]);
-
-    let data_dir = tempfile::tempdir().unwrap();
-
-    // First: an empty articulation refuses, naming renamed.rs (not mod.rs).
-    let empty_artic = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(empty_artic.path(), "# No entries\n").unwrap();
-    let (_stdout, stderr) = run_fail(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        empty_artic.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stderr.contains("renamed.rs"),
-        "expected missing-coverage naming renamed.rs, got: {stderr}"
-    );
-    assert!(
-        !stderr.contains("mod.rs"),
-        "the old path must not be required once the rename is detected, got: {stderr}"
-    );
-
-    // Then: an articulation covering only the new path passes.
-    let good_artic = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(good_artic.path(), good_articulation_for("renamed.rs")).unwrap();
-    let stdout = run_ok(legion_cmd_in(data_dir.path(), rp).args([
-        "quality-gate",
-        "check",
-        "--skill",
-        "legion-simplify",
-        "--result",
-        "clean",
-        "--articulation-file",
-        good_artic.path().to_str().unwrap(),
-    ]));
-    assert!(
-        stdout.contains("accepted") && stdout.contains("0 rename(s) auto-cleared"),
-        "expected acceptance with zero auto-cleared renames (delta rename stays in scope), \
-         got: {stdout}"
-    );
+    assert_eq!(arr[0]["skill"].as_str().unwrap(), "legion-pr-write");
 }
 
 // -- verify --issue: the card-free verify path (#913) ----------------------

@@ -20,39 +20,11 @@
 //! calibration. The fingerprint identifies the (skill, commit) cohort run, not a
 //! unique row.
 //!
-//! WITNESS LIMITATIONS (the in-pipeline signal is an MVP; the trustworthy signal
-//! is the review-CAUGHT path):
-//!  1. Exact-commit keying: the witness matches `legion-simplify:<commit>`. In
-//!     the normal pipeline `pr create` requires a clean simplify gate on HEAD, so
-//!     simplify and review land on the same commit and the lookup hits. But if a
-//!     fix commit lands between simplify and review without simplify re-running,
-//!     the lookup no-ops -- silently UNDERCOUNTING (it misses a clean verdict that
-//!     was later fixed, exactly a rubber-stamp). BOUND (#694): an unwitnessed
-//!     emitted prediction can only ever resolve one of two ways -- witnessed
-//!     before its TTL, or orphaned. `legion uncertainty orphans --surface
-//!     legion.gate` is therefore an upper bound on the undercount: every
-//!     silently-missed clean verdict from this gap shows up there once its
-//!     30-day TTL elapses, so the undercount is measured (not merely
-//!     hand-waved), even though it is not eliminated. Eliminating it outright
-//!     would need branch-scoped fallback resolution (matching the latest
-//!     emitted gate for the skill on the row's branch when the exact commit
-//!     misses) -- deliberately deferred: it risks witnessing a *different*,
-//!     unrelated earlier commit's prediction on the same branch, trading a
-//!     measured undercount for an unmeasured miscount.
-//!  2. Weak positive: a clean review corroborates at correctness 1.0, but
-//!     legion-review records clean-on-approve, so the witnessed-correct population
-//!     skews optimistic. The `Escalated`/0.0 review-CAUGHT path is the only fully
-//!     trustworthy signal; read clean-corroboration as a lower bound on the
-//!     rubber-stamp rate, not a measurement of it.
-//!
-//! DECORRELATED WITNESS (#694): `witness_gate_external` closes limitation 2.
-//! It witnesses a `legion.gate` prediction from a source outside the
-//! pipeline -- today an operator via `legion uncertainty witness-gate`, the
-//! CLI option named in #694 -- so the positive direction (correct == true) is
-//! ground truth rather than a downstream skill's own clean-on-approve
-//! optimism. Because the source is external, it also witnesses in the
-//! negative direction (correct == false) without needing a review catch,
-//! giving a second, decorrelated path to the escalated signal. The other two
+//! DECORRELATED WITNESS (#694): `witness_gate_external` witnesses a
+//! `legion.gate` prediction from a source outside the pipeline -- today an
+//! operator via `legion uncertainty witness-gate`, the CLI option named in
+//! #694 -- so both directions (correct == true and correct == false) are
+//! ground truth rather than a downstream skill's own optimism. The other two
 //! #694 options (an independent reviewer on a different model; git-revert /
 //! post-merge-bug detection) remain future work -- see the PR body for why
 //! the operator-CLI source was chosen as the smallest compliant mechanism.
@@ -60,9 +32,7 @@
 use crate::db::Database;
 use crate::db::quality_gates::QualityGateRow;
 use crate::gate_registry;
-use crate::telemetry::WitnessConflictRecord;
 use crate::uncertainty::error::Result as UncertaintyResult;
-use crate::uncertainty::error::UncertaintyError;
 use crate::uncertainty::storage::orphan_after_from_ttl;
 use crate::uncertainty::types::{
     Confidence, Correctness, OutcomeLabel, Prediction, PredictionInput, PredictionState,
@@ -71,14 +41,6 @@ use crate::verify::{GateProvenance, GateResult};
 
 /// The uncertainty surface all gate verdicts emit under.
 pub const GATE_SURFACE: &str = "legion.gate";
-
-/// Gate skill this module's witness paths target. Was a bare `"legion-simplify"`
-/// literal in `witness_simplify_from_review`'s `gate_fingerprint(...)` call,
-/// which the witness-conflict telemetry (#1009) would otherwise have had to
-/// duplicate again -- two string literals in one file that must agree with no
-/// compiler check. Named once so the fingerprint and the observability record
-/// cannot drift apart.
-const SIMPLIFY_SKILL: &str = "legion-simplify";
 
 /// Days a gate prediction waits for a witness before the engine's sweep
 /// orphans it (orphans are excluded from calibration).
@@ -101,7 +63,7 @@ const ISSUES_CONFIDENCE: f64 = 0.05;
 /// would only obscure an already-unique key.
 ///
 /// EXPECTED: `skill` contains no `:`. Gate skill names are colon-free slugs
-/// (`legion-simplify`, `legion-review`, `legion-pr-write`) and commit hashes are
+/// (`legion-review`, `legion-pr-write`) and commit hashes are
 /// hex, so the join is unambiguous. The fingerprint is treated as an OPAQUE key
 /// (recomputed and compared, never parsed back into parts), so a stray colon
 /// only risks a (vanishingly unlikely) collision between two distinct (skill,
@@ -184,7 +146,7 @@ pub fn emit_gate_prediction(
 /// let exactly the rubber-stamp this module measures poison its own
 /// denominator.
 ///
-/// A VALIDATED clean (the `check` path) and an ASSERTED `issues` (a real
+/// A VALIDATED clean (the validator path) and an ASSERTED `issues` (a real
 /// finding, self-reported or not, is not a ground-truth risk in the same
 /// direction) are both eligible for ingestion as before.
 fn is_ungrounded_assertion(row: &QualityGateRow) -> bool {
@@ -211,7 +173,7 @@ pub fn emit_gate_trust(db: &Database, row: &QualityGateRow, issue_ref: Option<&s
         eprintln!(
             "[legion] gate-trust: skipping ingestion of an ASSERTED clean verdict for \
              check-gated skill '{}' on commit {} -- a manufactured clean cannot count as \
-             ground truth (#780). Re-run via 'quality-gate check' to validate and ingest it.",
+             ground truth (#780). Re-run via its validator to validate and ingest it.",
             row.skill, row.commit_hash
         );
         return;
@@ -221,148 +183,15 @@ pub fn emit_gate_trust(db: &Database, row: &QualityGateRow, issue_ref: Option<&s
     }
 }
 
-/// Witness the legion-simplify gate prediction for `commit_hash` from the
-/// downstream review verdict (Phase 2b). `review_found_issues` true means the
-/// review caught what the simplify gate passed clean -- the clean verdict was
-/// wrong (correctness 0.0, Escalated). false corroborates it (correctness 1.0,
-/// Shipped) -- a weak positive, since legion-review records clean-on-approve.
-///
-/// Resolves the prediction by the deterministic fingerprint, taking the LATEST
-/// Emitted row (the re-run contract). Returns true if one was witnessed, false
-/// if no matching Emitted prediction exists (a clean no-op -- e.g. the simplify
-/// gate was never run, or it already witnessed/orphaned).
-pub fn witness_simplify_from_review(
-    db: &Database,
-    commit_hash: &str,
-    review_found_issues: bool,
-) -> UncertaintyResult<bool> {
-    let fingerprint = gate_fingerprint(SIMPLIFY_SKILL, commit_hash);
-    let Some(mut prediction) = db.latest_emitted_by_fingerprint(GATE_SURFACE, &fingerprint)? else {
-        return Ok(false);
-    };
-    // Only a CLEAN simplify verdict is a rubber-stamp candidate. If simplify
-    // already flagged issues, it was not rubber-stamping, so a downstream review
-    // catch does not falsify it -- witnessing it would pollute the
-    // P(buggy | said-clean) signal. Skip non-clean predictions (e.g. a gate
-    // recorded out of pipeline order).
-    let was_clean = prediction
-        .prediction_payload
-        .get("result")
-        .and_then(|v| v.as_str())
-        == Some("clean");
-    if !was_clean {
-        return Ok(false);
-    }
-    let (label, correctness) = if review_found_issues {
-        (OutcomeLabel::Escalated, 0.0)
-    } else {
-        (OutcomeLabel::Shipped, 1.0)
-    };
-    let now = chrono::Utc::now().to_rfc3339();
-    let payload = serde_json::json!({
-        "witnessed_by": "legion-review",
-        "review_found_issues": review_found_issues,
-    });
-    // Captured before the in-memory transition below (which mutates
-    // `prediction.state` in place) so the CAS write can guard against the
-    // orphan sweep racing this read (#1003).
-    let prev_state = prediction.state;
-    prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
-    db.update_prediction(&prediction, prev_state)?;
-    Ok(true)
-}
-
-/// Map a witness failure to the telemetry row it should produce, or `None`
-/// for every failure mode except the #1003 CAS conflict. Pure (the caller
-/// supplies `ts` rather than this fn calling `Utc::now()` itself) so the
-/// mapping is deterministically unit-testable by constructing an
-/// `UncertaintyError` directly -- the real TOCTOU race cannot be forced
-/// through `witness_simplify_from_review` from outside (its read,
-/// in-memory transition, and write happen inside one function call with no
-/// seam to interleave `sweep_orphans`), so this is the level at which the
-/// new behavior is actually tested.
-fn witness_conflict_record(
-    skill: &str,
-    commit_hash: &str,
-    ts: chrono::DateTime<chrono::Utc>,
-    err: &UncertaintyError,
-) -> Option<WitnessConflictRecord> {
-    match err {
-        UncertaintyError::PredictionStateConflict { id, expected } => Some(WitnessConflictRecord {
-            ts,
-            surface: GATE_SURFACE.to_string(),
-            skill: skill.to_string(),
-            commit_hash: commit_hash.to_string(),
-            prediction_id: id.clone(),
-            expected_state: *expected,
-        }),
-        _ => None,
-    }
-}
-
-/// Non-blocking witness for the gate-record handler: log on failure, never
-/// propagate. Like emit, a witness problem must not break gate recording.
-///
-/// Additionally, on the #1003 CAS-conflict failure mode specifically, writes
-/// a `WitnessConflictRecord` (#1009) so the conflict is countable -- this is
-/// additive alongside the existing `eprintln!`, which stays unconditional and
-/// unchanged: the non-blocking, gate-recording-safe contract this fn exists
-/// for is untouched. The telemetry write's own `Err` branch (the JSONL append
-/// itself failing) is a second non-propagating eprintln with no forcing test:
-/// forcing it needs a corrupted/unwritable state-dir fixture, the same
-/// unforceable-by-construction class already documented for this module's
-/// other non-blocking swallow (`emit_gate_trust_wrapper_runs_and_emits`).
-/// Accepted, not chased.
-pub fn witness_simplify_from_review_nonblocking(
-    db: &Database,
-    commit_hash: &str,
-    review_found_issues: bool,
-) {
-    if let Err(e) = witness_simplify_from_review(db, commit_hash, review_found_issues) {
-        if let Some(record) =
-            witness_conflict_record(SIMPLIFY_SKILL, commit_hash, chrono::Utc::now(), &e)
-            && let Err(log_err) = crate::telemetry::append_witness_conflict(&record)
-        {
-            eprintln!(
-                "[legion] gate-trust witness-conflict telemetry write failed (non-fatal): {log_err}"
-            );
-        }
-        eprintln!("[legion] gate-trust witness failed (non-fatal): {e}");
-    }
-}
-
-/// Apply the downstream-review witness for a just-recorded gate. ONLY a
-/// `legion-review` verdict witnesses the upstream `legion-simplify` prediction;
-/// every other gate is a no-op here. The handler's single entry point, so the
-/// skill guard and verdict->bool mapping are tested in one place. Witnesses
-/// against the row's own commit, so it cannot drift from the verdict recorded.
-pub fn maybe_witness_from_review(db: &Database, row: &QualityGateRow) {
-    if row.skill == "legion-review" {
-        witness_simplify_from_review_nonblocking(
-            db,
-            &row.commit_hash,
-            matches!(row.result, GateResult::Issues),
-        );
-    }
-}
-
 /// Witness a `surface=legion.gate` prediction from a DECORRELATED external
 /// source -- an operator or other ground truth outside the pipeline that
-/// emitted the verdict (#694). This is the source that closes the gap the
-/// module doc's WITNESS LIMITATIONS section names: `witness_simplify_from_review`
-/// is a downstream pipeline stage witnessing an upstream one, so its
-/// clean-corroboration is optimistic by construction (legion-review records
-/// clean-on-approve); an operator saying "this clean verdict was actually
-/// wrong" (or actually right) is independent of the pipeline's own
-/// rubber-stamp tendency in BOTH directions, not just the caught-by-review
-/// direction.
+/// emitted the verdict (#694). An operator saying "this clean verdict was
+/// actually wrong" (or actually right) is independent of the pipeline's own
+/// rubber-stamp tendency in BOTH directions.
 ///
-/// Unlike `witness_simplify_from_review`, this does NOT skip a non-clean
-/// (`issues`) prediction: a review-catch is only indirect evidence that a
-/// clean verdict was optimistic, so restricting it to clean predictions
-/// avoids polluting the signal with an already-non-rubber-stamping run. An
-/// operator witness is direct ground truth about whichever verdict the gate
-/// actually recorded, clean or issues, so both are eligible.
+/// It does NOT skip a non-clean (`issues`) prediction: an operator witness is
+/// direct ground truth about whichever verdict the gate actually recorded,
+/// clean or issues, so both are eligible.
 ///
 /// Resolves the prediction by the deterministic `(skill, commit)`
 /// fingerprint, taking the latest Emitted row per the re-run contract (see
@@ -433,8 +262,7 @@ fn witness_gate_prediction(
     // `clean` verdict, ISSUES_CONFIDENCE for an `issues` verdict, which claims
     // NOT clean). `correct` is relative to whichever verdict the gate actually
     // recorded, so it must be reprojected onto the claimed event -- "actually
-    // clean" -- before mapping to an outcome, the same way
-    // `witness_simplify_from_review` reads `was_clean` above. For a `clean`
+    // clean" -- before mapping to an outcome. For a `clean`
     // verdict, correct IS actually_clean. For an `issues` verdict, a correct
     // catch means it was NOT actually clean, so actually_clean is the
     // negation of `correct`. Skipping this reprojection (mapping `correct`
@@ -456,8 +284,8 @@ fn witness_gate_prediction(
         "witnessed_by": "operator",
         "correct": correct,
     });
-    // Captured before the in-memory transition below (see
-    // `witness_simplify_from_review` for why -- same TOCTOU guard, #1003).
+    // Captured before the in-memory transition below so the CAS write can
+    // guard against the orphan sweep racing this read (#1003).
     let prev_state = prediction.state;
     prediction.witness(label, payload, Correctness::from_f64(correctness)?, &now)?;
     db.update_prediction(&prediction, prev_state)?;
@@ -602,14 +430,6 @@ mod tests {
     #[test]
     fn ungrounded_assertion_detects_asserted_clean_check_gated() {
         let row = gate_row_with_provenance(
-            "legion-simplify",
-            GateResult::Clean,
-            0,
-            GateProvenance::Asserted,
-        );
-        assert!(is_ungrounded_assertion(&row));
-
-        let row = gate_row_with_provenance(
             "legion-pr-write",
             GateResult::Clean,
             0,
@@ -621,7 +441,7 @@ mod tests {
     #[test]
     fn validated_clean_is_not_an_ungrounded_assertion() {
         let row = gate_row_with_provenance(
-            "legion-simplify",
+            "legion-pr-write",
             GateResult::Clean,
             0,
             GateProvenance::Validated,
@@ -635,7 +455,7 @@ mod tests {
         // asserted "issues" result is a self-reported finding, not a
         // manufactured pass.
         let row = gate_row_with_provenance(
-            "legion-simplify",
+            "legion-pr-write",
             GateResult::Issues,
             1,
             GateProvenance::Asserted,
@@ -670,7 +490,7 @@ mod tests {
         use crate::uncertainty::types::PredictionState;
         let db = test_db();
         let row = gate_row_with_provenance(
-            "legion-simplify",
+            "legion-pr-write",
             GateResult::Clean,
             0,
             GateProvenance::Asserted,
@@ -698,114 +518,6 @@ mod tests {
             .count_predictions_by_surface_state("legion.gate", PredictionState::Emitted)
             .unwrap();
         assert_eq!(emitted, 1, "a validated clean row must still be ingested");
-    }
-
-    #[test]
-    fn witness_issues_marks_simplify_prediction_wrong() {
-        let db = test_db();
-        let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let id = emit_gate_prediction(&db, &row, None).unwrap();
-        // Review caught issues -> the clean verdict was wrong.
-        let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
-        assert!(
-            witnessed,
-            "the emitted simplify prediction should be witnessed"
-        );
-        let fetched = db.get_prediction(&id).unwrap().unwrap();
-        use crate::uncertainty::types::PredictionState;
-        assert_eq!(fetched.state, PredictionState::Witnessed);
-        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(0.0));
-        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Escalated));
-    }
-
-    #[test]
-    fn witness_clean_corroborates_simplify_prediction() {
-        let db = test_db();
-        let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        let id = emit_gate_prediction(&db, &row, None).unwrap();
-        // Review clean -> corroborates (weak positive).
-        assert!(witness_simplify_from_review(&db, "deadbeefcafe", false).unwrap());
-        let fetched = db.get_prediction(&id).unwrap().unwrap();
-        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(1.0));
-        assert_eq!(fetched.outcome_label, Some(OutcomeLabel::Shipped));
-    }
-
-    #[test]
-    fn witness_skips_a_non_clean_simplify_prediction() {
-        use crate::uncertainty::types::PredictionState;
-        let db = test_db();
-        // Simplify recorded ISSUES -> it flagged something, not a rubber-stamp
-        // candidate. The witness must skip it even when review finds issues.
-        let id = emit_gate_prediction(
-            &db,
-            &gate_row("legion-simplify", GateResult::Issues, 1),
-            None,
-        )
-        .unwrap();
-        let witnessed = witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap();
-        assert!(
-            !witnessed,
-            "an issues-verdict prediction must not be witnessed"
-        );
-        assert_eq!(
-            db.get_prediction(&id).unwrap().unwrap().state,
-            PredictionState::Emitted
-        );
-    }
-
-    #[test]
-    fn witness_with_no_matching_prediction_is_noop() {
-        let db = test_db();
-        // No simplify prediction was emitted for this commit -- clean no-op.
-        let witnessed = witness_simplify_from_review(&db, "nosuchcommit", true).unwrap();
-        assert!(
-            !witnessed,
-            "expected a no-op when no Emitted prediction matches"
-        );
-    }
-
-    #[test]
-    fn witness_takes_the_latest_emitted_on_rerun() {
-        let db = test_db();
-        let row = gate_row("legion-simplify", GateResult::Clean, 0);
-        // Two runs of the same gate on the same commit -> two Emitted rows,
-        // same fingerprint. The witness resolves the latest and leaves the loop
-        // closeable; the second witness is a no-op (only one Emitted remains).
-        let _id1 = emit_gate_prediction(&db, &row, None).unwrap();
-        let _id2 = emit_gate_prediction(&db, &row, None).unwrap();
-        assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
-        // One Emitted row remains; a second witness still finds it.
-        assert!(witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
-        // Now none Emitted -> no-op.
-        assert!(!witness_simplify_from_review(&db, "deadbeefcafe", true).unwrap());
-    }
-
-    #[test]
-    fn maybe_witness_fires_only_for_review_gate_and_maps_the_verdict() {
-        use crate::uncertainty::types::PredictionState;
-        let db = test_db();
-        let id = emit_gate_prediction(
-            &db,
-            &gate_row("legion-simplify", GateResult::Clean, 0),
-            None,
-        )
-        .unwrap();
-
-        // A non-review gate (pr-write) must NOT witness the simplify prediction.
-        // gate_row's commit ("deadbeefcafe") matches the emitted prediction above.
-        maybe_witness_from_review(&db, &gate_row("legion-pr-write", GateResult::Issues, 1));
-        assert_eq!(
-            db.get_prediction(&id).unwrap().unwrap().state,
-            PredictionState::Emitted,
-            "only legion-review should trigger the witness"
-        );
-
-        // A legion-review Issues verdict witnesses it wrong (verdict -> bool maps
-        // Issues to review_found_issues=true -> correctness 0.0).
-        maybe_witness_from_review(&db, &gate_row("legion-review", GateResult::Issues, 2));
-        let fetched = db.get_prediction(&id).unwrap().unwrap();
-        assert_eq!(fetched.state, PredictionState::Witnessed);
-        assert_eq!(fetched.outcome_correctness.map(|c| c.value()), Some(0.0));
     }
 
     #[test]
@@ -859,8 +571,7 @@ mod tests {
 
     #[test]
     fn external_witness_covers_an_issues_verdict_too() {
-        // Unlike witness_simplify_from_review, the external witness does NOT
-        // restrict to clean verdicts: an operator's ground truth is direct
+        // The external witness does NOT restrict to clean verdicts: an operator's ground truth is direct
         // evidence about whichever verdict the gate actually recorded, so an
         // "issues" prediction is just as eligible as a "clean" one.
         //
@@ -938,9 +649,8 @@ mod tests {
 
     #[test]
     fn an_unwitnessed_gate_prediction_surfaces_in_the_orphan_count() {
-        // Documents and proves the #694 bound on WITNESS LIMITATIONS item 1:
-        // a clean verdict this module's witnesses miss (e.g. the exact-commit
-        // gap) is never silently dropped -- it stays Emitted until the TTL
+        // Documents and proves the #694 bound: a clean verdict this module's
+        // witnesses miss is never silently dropped -- it stays Emitted until the TTL
         // elapses, then the (external, not-yet-built) sweep orphans it, and
         // `legion uncertainty orphans --surface legion.gate` counts it. This
         // proves the counting path end-to-end for the gate surface
@@ -957,74 +667,5 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].surface, GATE_SURFACE);
         assert_eq!(rows[0].count, 1);
-    }
-
-    // -- #1009: witness-conflict telemetry ------------------------------
-
-    #[test]
-    fn witness_conflict_record_maps_prediction_state_conflict() {
-        use crate::uncertainty::types::PredictionState;
-        let ts = chrono::Utc::now();
-        let err = UncertaintyError::PredictionStateConflict {
-            id: "pred-1".to_string(),
-            expected: PredictionState::Emitted,
-        };
-        let record = witness_conflict_record(SIMPLIFY_SKILL, "deadbeefcafe", ts, &err)
-            .expect("a PredictionStateConflict must map to a record");
-        assert_eq!(record.ts, ts);
-        assert_eq!(record.surface, GATE_SURFACE);
-        assert_eq!(record.skill, "legion-simplify");
-        assert_eq!(record.commit_hash, "deadbeefcafe");
-        assert_eq!(record.prediction_id, "pred-1");
-        assert_eq!(record.expected_state, PredictionState::Emitted);
-    }
-
-    #[test]
-    fn witness_conflict_record_is_none_for_prediction_not_found() {
-        let err = UncertaintyError::PredictionNotFound("pred-1".to_string());
-        assert!(
-            witness_conflict_record(SIMPLIFY_SKILL, "deadbeefcafe", chrono::Utc::now(), &err)
-                .is_none(),
-            "only the CAS conflict variant should map to a record"
-        );
-    }
-
-    #[test]
-    fn witness_conflict_record_is_none_for_illegal_transition() {
-        use crate::uncertainty::types::PredictionState;
-        let err = UncertaintyError::IllegalTransition {
-            from: PredictionState::Orphaned,
-            to: PredictionState::Witnessed,
-        };
-        assert!(
-            witness_conflict_record(SIMPLIFY_SKILL, "deadbeefcafe", chrono::Utc::now(), &err)
-                .is_none(),
-            "only the CAS conflict variant should map to a record"
-        );
-    }
-
-    #[test]
-    fn nonblocking_witness_still_returns_unit_and_writes_no_record_on_ordinary_no_op() {
-        let db = test_db();
-        // Precondition: no emitted `legion-simplify` prediction exists for
-        // this commit, so the inner fn returns `Ok(false)` -- the ordinary
-        // no-matching-row no-op, not an `Err`. Pinned explicitly so a future
-        // change that turns this path into an `Err` (e.g. `PredictionNotFound`)
-        // fails this test rather than silently starting to reach the
-        // telemetry write.
-        assert!(!witness_simplify_from_review(&db, "nosuchcommit", true).unwrap());
-        // The wrapper's `if let Err(e) = ...` guard never opens on `Ok`, so
-        // `witness_conflict_record` / `append_witness_conflict` are never
-        // reached: no record is written, and the call still just returns
-        // `()` without panicking.
-        witness_simplify_from_review_nonblocking(&db, "nosuchcommit", true);
-    }
-
-    #[test]
-    fn witness_conflict_log_path_uses_the_documented_filename() {
-        // The only read surface for this record is the operator one-liner
-        // named in the issue (`jq -c . witness-conflicts.jsonl`), so the
-        // filename itself is load-bearing.
-        assert!(crate::telemetry::witness_conflict_log_path().ends_with("witness-conflicts.jsonl"));
     }
 }

@@ -53,7 +53,7 @@ pub fn create_pr(
 ///
 /// The in-place counterpart to `create_pr`: corrects a PR without a
 /// close+recreate round trip, which loses the review thread and forces
-/// re-recording the simplify + pr-write gates against a new HEAD. At least
+/// re-recording the pr-write gate against a new HEAD. At least
 /// one of `title`/`body` must be `Some` -- the plugin itself refuses when
 /// both env vars are empty, but callers should validate first so a caller
 /// error surfaces before the plugin round trip.
