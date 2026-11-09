@@ -1,79 +1,56 @@
 # Events only: plan
 
-Draft for the operator's review, 2026-11-09. Nothing is filed or built from it. Two parts, in order: surgery on what the last session added, then the toys that prove the shape. Checked against rannoch main 9ffb233 with legion sym.
+Draft for the operator's review, 2026-11-09. Nothing is filed or built from it. Two parts, in order: the surgery, then the toys that prove the shape. Checked against rannoch main 9ffb233 with legion sym. Operator's words are quoted; everything else is legion's and unconfirmed.
 
-## The shape
+## The queue
 
-2026-11-09. Not built, not measured. Each point says who said it.
+```
+_events        (seq, id, type, body)     appended once, never changed
+_event_status  (seq, status, known_at)   appended: 2 processed, -1 failed (+ reason)
+_positions     (producer, position)      a producer's place in its outside source
+```
 
-Operator said:
-- "CE->inbox->procesor::<kind>->CE->graph <> CE for more work": only the graph writes facts, and it emits CEs for more work.
-- Flow state is not graph data: "it's not 'finished' data. its transitent ... if we crash the flow starts over and and it harms nothing".
-- "the kind type can be flow.<name_of_flow_flile_to_read>", then "flow.<name>.step_5".
-- "the row has all the state data, since this temporal, we can replay the flow": a step's CE data carries the instance's whole state, and a flow replays from its events.
-- "do we need a processor at all? the CE is the producer."
-- Parsing every flow's JSON per event is not acceptable when Rust code handles its own events outside the queue.
+- **In.** `accept` checks a CE against the ontology and holds it; the heartbeat commits the batch to `_events`. Duplicates are allowed: "we can have dups in the event queue we are not going to stop and look". A repeated fact writes nothing (STORE-1), and steps are idempotent.
+- **Out.** A lane takes the next event of its types with no status row, runs it, and in one heartbeat transaction appends the CEs it produced and the event's status. "CE->inbox->procesor::<kind>->CE->graph <> CE for more work": only the graph writes facts.
+- **Status.** One per event, an int "for speed": 0 is the `_events` row; in progress is kept nowhere; 2 and -1 are appended rows ("then it's temporal"). An event is handled once; when two flows need the same thing, the step emits one event for each.
+- **Crash.** An event with no 2 row and fewer than the limit of -1 rows runs again.
+- **Retries.** "-1 and time? retry x times per x time": each failed attempt appends a -1 row; attempts are their count; dead is the limit. Defaults: 10 attempts inside a 20-minute total window, exponential backoff, then dead; a lane moves past an event waiting out its backoff. The policy is in the settings file ("make the policy settings in the settings file"), read at build.
+- **The bin** is part of the queue ("bin should not be a processor"): the dead events, found by their -1 rows.
 
-Legion proposed, not confirmed:
-- The type names a row id, not a step number (`flow.<file>.<row id>`), so editing a file does not misroute events in flight.
-- No runner component: a lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits with its position.
+## Flows
 
-Operator said (2026-11-09), on an event's state: "the event should have -1|0|1|2 for it's 'status'", stored as an int "for speed". Read as -1 binned, 0 added, 1 in progress, 2 processed (legion's reading, to confirm). Then: "then it's temporal" (a status change is appended, never updated, as STORE-2), and "we don't need to do in-progress events, those can goto paper log". So: 0 is the `_events` row existing; 1 is not kept anywhere (the paper log was the stdout log LANES-6 cut; operator: "if it's cut. leave it cut. flows don't log I guess"); 2 and -1 are each one row appended to `_event_status (seq, reader, status, known_at)`, -1 with its reason, in the heartbeat transaction. The body never changes. A type has many readers (operator: "they are flows that could me 10000s and 1000s of different combos"), so status is kept per reader. Legion proposed, not confirmed: a reader keeps in memory the lowest event it has not processed, derived from `_event_status` at start, so finding its next event does not walk every processed one.
-
-Retries, operator 2026-11-09: "-1 and time? retry x times per x time"; "make the policy settings in the settings file". Each failed attempt appends a -1 row with its time and reason; attempts are the count of -1 rows; dead (the bin) is N of them. Legion proposed, not confirmed: backoff counts from the last failure, on wall time; whether a reader moves past an event waiting out its backoff is a setting (unordered flows skip ahead, ordered ones wait). The settings file is the build configuration LANES-3 names, which does not exist yet; legion proposes `rannoch.toml` at the app crate's root, read by `build.rs` into constants: the lanes (crate and types), and the retry policy (attempts, backoff, skip-ahead) as a default with overrides by type.
-
-Operator said (2026-11-09): `rannoch-processor` is "the generic for rannoch-processors-* only": the contract each step kind meets, not a runner. A step kind (`rannoch-processor-host`, `-emit`, `-wait`, ...) meets it: CE and row in, CEs out.
-- A step reads the body as borrowed bytes; only a guard or template that reads a field parses `data`.
+- A step is a CE typed `flow.<flow file>.<row id>` ("flow.<name>.step_5"; a row id, so editing a file does not misroute events in flight).
+- "the row has all the state data, since this temporal, we can replay the flow": a step's data carries the instance's whole state. Flow state is not graph data ("its transitent"); the events are kept ("IT IS TEMPORAL"); every step is durable.
+- Flow files are JSON so they "can be added/edited without a build": read at run time, each parsed once when loaded, never per event. Lanes and retry policy are fixed at build; flows are not.
+- `rannoch-processor` is "the generic for rannoch-processors-* only": the contract each step kind meets, CE and row in, CEs out.
+- Store stays direct: `rannoch.node` and `rannoch.link` go to fill.
 - Rust code that handles its own events needs no flow: it reads its types from a lane.
-- Store stays direct: `rannoch.node` and `rannoch.link` go to fill, outside the flow namespace.
 
 ## 1. Surgery
 
-What the shape makes unneeded is the bookkeeping that covers a place saved apart from its effects. Nothing outside rannoch depends on it (kessel and eavesdrop reference rannoch only from their toys).
+Scope: "everything." Nothing outside rannoch depends on these (kessel and eavesdrop reference rannoch only from their toys).
 
-Scope: everything below, older rows included (operator, 2026-11-09: "everything.").
+| Cut | Where (9ffb233) | Replaced by |
+|---|---|---|
+| `done`, `failed`, `State` on the lane contract | `rannoch-queue/src/lib.rs` | Status rows |
+| `hand_out`, `_places`, `_work`, `handed`, `processed`, `remove_worker`, `in_progress` | `rannoch-store/src/inbox.rs` | The next event of a lane's types with no status row |
+| Fill's worker place (`rannoch.fill`), its failed rows, `_fill` try limit, its retries | `rannoch-store/src/lib.rs` | Status rows and the retry policy |
+| `take_failures`, `on_failure`, `processed`, `remove_worker`, `state` passthroughs | `rannoch-queue-mem/src/lib.rs` | Nothing; `Failure::Event` at commit stays (it is accept's) |
+| `done`, `failed` on `Trickle` | `rannoch-queue-trickle/src/lib.rs` | Status rows |
+| `rannoch-processor-bin`, `rannoch-harness` | `crates/` | The queue, and the lanes running rows |
 
-| Cut | Where (9ffb233) | Added | Why it goes |
-|---|---|---|---|
-| `done`, `failed` on the lane contract; `State` | `rannoch-queue/src/lib.rs:63,69` | #237 | A lane's progress is its position, committed with what it emitted |
-| `hand_out` writing `_places` and `_work` on every read; `handed`; re-handing in-progress events | `rannoch-store/src/inbox.rs:80` | before #237; `next_of` (#243) reuses it | `next` and `next_of` become reads from a given position that write nothing |
-| `_places`, `_work`, `processed`, `remove_worker`, `in_progress` | `rannoch-store/src/inbox.rs` | before #237 | A reader's place is one row in `_positions` |
-| Fill's worker place (`rannoch.fill`), its failed rows, `_fill` try limit, retries | `rannoch-store/src/lib.rs` (FILL, 19 refs) | before #237 | Fill keeps a position; an event it cannot apply becomes a bin CE with its reason |
-| `take_failures`, `on_failure`, `processed`, `remove_worker`, `state` passthroughs | `rannoch-queue-mem/src/lib.rs` | before #237 | They pass through the cuts above; `Failure::Event` at commit stays (it is accept's) |
-| `done`, `failed` on `Trickle` | `rannoch-queue-trickle/src/lib.rs:44,48` | #241 | As the contract |
-| `rannoch-processor-bin` | `crates/` | scaffold | Operator, 2026-11-09: "bin should not be a processor ... it's part of the queue". A lane that fails an event bins it and moves its position past it, in one commit; a row's `else: bin` fails the event to the queue |
-| `rannoch-harness` | `crates/` | scaffold | Empty, and the lanes run the rows; open whether it is kept as the place lanes call rows from |
+Added: `_event_status`, and the retry policy in the settings file.
 
-Added, because the cuts need them:
-- A commit of a position alone, for a reader that handles an event and emits nothing (`accept_from` commits a position only with events).
-- A read cursor each reader holds in memory ahead of its committed position, so it does not re-read events between heartbeats.
+Kept: `_events` with its type column and index (#243), `_positions`, `accept`, `accept_from`, the heartbeat, the ontology check at accept, the core store (#238), `Trickle<T: Types>`, `rannoch-processor` and the `rannoch-processor-*` step kinds, `rannoch-worker`.
 
-Kept: `_events` and its type column and index (#243), `_positions`, `accept` and `accept_from`, the heartbeat, the ontology check at accept, the core store (#238), `Trickle<T: Types>` reading by type (#241), `rannoch-processor` (the step-kind contract) and the `rannoch-processor-*` step kinds, `rannoch-worker` (reading a flow file and checking it against the ontology).
+Docs rewritten to match: `docs/flows.md`, `docs/inbox.md`, `docs/architecture.md`, lanes.md.
 
-Docs rewritten to match: `docs/flows.md`, `docs/inbox.md`, `docs/architecture.md`; lanes.md LANES-2 (the contract), LANES-4 (a step kind's default lane), LANES-7.
-
-The cuts remove crash recovery and put positions in its place, so the surgery is not done until a kill test shows a reader resumes from its position and loses nothing committed.
+Done when a kill test shows every committed event without a 2 row runs again and nothing committed is lost.
 
 ## 2. Toys
 
-Predictions are written and committed here before any code, as with every toy.
+Predictions are written and committed here before any code.
 
-**T1, flows as events.** Westwind, on rannoch after the surgery, outside the rannoch crates. Three flows: a chain (host, then emit), a `count` by key, and a `wait` for a matching event; each with a row on the fast lane and a row on a slow lane. Random kills. Checked against an oracle in SQL over the same seed. To measure:
-- The graph after kills equals the oracle.
-- What a replay does. Today rannoch does not dedupe by CE id: the log mints a fresh id per event and the queue accepts a body it has accepted before; only a repeated `rannoch.node` or `rannoch.link` under the same id leaves the graph unchanged (docs/flows.md). So a replayed `flow.*` event is appended again and its next step runs again. T1 counts the repeated steps and checks that the graph is still the oracle's.
-- Whether finding a parked `wait` by key seeks or scans, read from `EXPLAIN QUERY PLAN`: `_events_type` indexes (type, seq), not the subject.
-- A poison event lands in the bin once, and the position moves past it.
-- Facts a second, against today's fill path and the two-lane toy's 33,000.
-- Log rows and bytes per fact, and what finished flows leave in `_events`.
-- The status's cost: facts a second with one `_event_status` row appended per event per reader, at 1, 10 and 100 readers of one type, against positions only; whether a reader's next event and the bin are found by a seek, from `EXPLAIN QUERY PLAN`; and how long a reader takes to find its lowest unprocessed event at start.
+**T1, flows as events.** Westwind, on rannoch after the surgery. Three flows: a chain (host, then emit), a `count` by key, and a `wait` for a matching event, on the fast and a slow lane. Random kills; checked against SQL over the same seed. Measures: the graph equals the oracle; a poison event is dead after 10 attempts; facts a second against today's fill and the two-lane toy's 33,000; log rows and bytes per fact; whether a lane's next event and a parked `wait` are found by a seek (`EXPLAIN QUERY PLAN`).
 
-**T2, a direct Rust reader.** The same Westwind work as T1's chain, written as Rust on a lane with no flow and its own parsing. To measure: facts a second and log rows per fact against T1, so the cost of declaring a step as data is known.
-
-## Decided, 2026-11-09
-
-1. Finished flows' events are kept: "IT IS TEMPORAL".
-2. Every step is durable: "yes".
-3. Retry defaults: 10 attempts inside a 20-minute total window ("10, 20m? yes"; "ya total window"), exponential backoff from the first failure, then dead; skip-ahead on.
-4. When flow files are read is legion's call (operator: "not a detail I care about"): compiled into Rust at build by `build.rs`, from the folder the settings file names, so it follows LANES-3 and nothing is configured at run time.
-5. rannoch dedupes by CE id at accept: "yes". An event whose `source` and `id` (the pair CloudEvents makes unique) are already in `_events` writes nothing, so a replayed step does not run its next step again. This is an addition, built with the surgery.
-6. The surgery covers everything listed: "everything."
+**T2, a direct Rust reader.** T1's chain as Rust on a lane, with no flow. Measures facts a second and log rows per fact against T1: the cost of declaring a step as data.
