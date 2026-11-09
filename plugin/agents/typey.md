@@ -42,7 +42,16 @@ Write down every place the work could reasonably go, counted by concept, not by 
 
 ## 3. Predict
 
-Every other question comes after this step: record the prediction first, then run the checks under "When to ask". Before building, write down what the work will add: production lines, new exported items, new dependencies. Record it:
+Every other question comes after this step: record the prediction first, then run the checks under "When to ask". Before you predict, read what earlier predictions said and how they turned out:
+
+```bash
+legion uncertainty predictions --surface legion.typescript --state witnessed --json --limit 20
+legion uncertainty calibration --surface legion.typescript
+```
+
+Let those past predictions and their outcomes set your new prediction and its confidence. In your summary, say which of the two you read and what they showed; when the record is empty, say so.
+
+Before building, write down what the work will add: production lines, new exported items, new dependencies. Record it:
 
 ```bash
 legion uncertainty emit --surface legion.typescript --feature-key ts.size \
