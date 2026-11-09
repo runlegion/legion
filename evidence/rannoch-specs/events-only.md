@@ -4,18 +4,28 @@ Draft for the operator's review, 2026-11-09. Nothing is filed or built from it. 
 
 ## The shape
 
-Operator and legion, 2026-11-09. Not built, not measured.
+2026-11-09. Not built, not measured. Each point says who said it.
 
-- `CE -> inbox -> step -> CE -> graph`, and the graph emits CEs for more work. Nothing but the graph writes facts.
-- A flow step is a CE typed `flow.<flow file>.<row id>`. Its data carries the instance's whole state, so flow state lives nowhere else and a flow replays from its events (operator: "the row has all the state data, since this temporal, we can replay the flow").
-- No processor component. A lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits together with its position. A step kind (host, emit, wait, count, branch, ...) is a function: CE and row in, CEs out.
-- Flow files are read at build and become Rust; at run time a lane matches on the type column and hands the body to the step as borrowed bytes. Only a guard or template that reads a field parses `data`.
-- Rust code that handles its own events needs no flow: it reads its types from a lane and commits its position with what it emits.
+Operator said:
+- "CE->inbox->procesor::<kind>->CE->graph <> CE for more work": only the graph writes facts, and it emits CEs for more work.
+- Flow state is not graph data: "it's not 'finished' data. its transitent ... if we crash the flow starts over and and it harms nothing".
+- "the kind type can be flow.<name_of_flow_flile_to_read>", then "flow.<name>.step_5".
+- "the row has all the state data, since this temporal, we can replay the flow": a step's CE data carries the instance's whole state, and a flow replays from its events.
+- "do we need a processor at all? the CE is the producer."
+- Parsing every flow's JSON per event is not acceptable when Rust code handles its own events outside the queue.
+
+Legion proposed, not confirmed:
+- The type names a row id, not a step number (`flow.<file>.<row id>`), so editing a file does not misroute events in flight.
+- No processor component: a lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits with its position. A step kind is a function: CE and row in, CEs out.
+- A step reads the body as borrowed bytes; only a guard or template that reads a field parses `data`.
+- Rust code that handles its own events needs no flow: it reads its types from a lane.
 - Store stays direct: `rannoch.node` and `rannoch.link` go to fill, outside the flow namespace.
 
 ## 1. Surgery
 
 What the shape makes unneeded is the bookkeeping that covers a place saved apart from its effects. Nothing outside rannoch depends on it (kessel and eavesdrop reference rannoch only from their toys).
+
+Scope is open: the operator asked to cut "the fat that crept in last session". Only the rows marked #237, #241 or #243 came from that session (2026-11-07 and 11-08); the rows marked "before #237" are older and are listed because the shape makes them unneeded too.
 
 | Cut | Where (9ffb233) | Added | Why it goes |
 |---|---|---|---|
@@ -27,6 +37,10 @@ What the shape makes unneeded is the bookkeeping that covers a place saved apart
 | `done`, `failed` on `Trickle` | `rannoch-queue-trickle/src/lib.rs:44,48` | #241 | As the contract |
 | `rannoch-worker`, `rannoch-harness`, `rannoch-processor`, eleven `rannoch-processor-*` crates | `crates/` | scaffolds | Empty, and the shape has no processor or harness; the step-function crate is named after the toys |
 
+Added, because the cuts need them:
+- A commit of a position alone, for a reader that handles an event and emits nothing (`accept_from` commits a position only with events).
+- A read cursor each reader holds in memory ahead of its committed position, so it does not re-read events between heartbeats.
+
 Kept: `_events` and its type column and index (#243), `_positions`, `accept` and `accept_from`, the heartbeat, the ontology check at accept, the core store (#238), `Trickle<T: Types>` reading by type (#241).
 
 Docs rewritten to match: `docs/flows.md`, `docs/inbox.md`, `docs/architecture.md`; lanes.md LANES-2 (the contract), LANES-4 (a step kind's default lane), LANES-7.
@@ -37,8 +51,10 @@ The cuts remove crash recovery and put positions in its place, so the surgery is
 
 Predictions are written and committed here before any code, as with every toy.
 
-**T1, flows as events.** Westwind, on rannoch after the surgery, outside the rannoch crates. Flow files compiled at build. Three flows: a chain (host, then emit), a `count` by key, and a `wait` for a matching event; each with a row on the fast lane and a row on a slow lane. Random kills. Checked against an oracle in SQL over the same seed. To measure:
-- The graph after kills equals the oracle, and replaying a flow from its events writes nothing new (content-hash CE ids).
+**T1, flows as events.** Westwind, on rannoch after the surgery, outside the rannoch crates. Three flows: a chain (host, then emit), a `count` by key, and a `wait` for a matching event; each with a row on the fast lane and a row on a slow lane. Random kills. Checked against an oracle in SQL over the same seed. To measure:
+- The graph after kills equals the oracle.
+- What a replay does. Today rannoch does not dedupe by CE id: the log mints a fresh id per event and the queue accepts a body it has accepted before; only a repeated `rannoch.node` or `rannoch.link` under the same id leaves the graph unchanged (docs/flows.md). So a replayed `flow.*` event is appended again and its next step runs again. T1 counts the repeated steps and checks that the graph is still the oracle's.
+- Whether finding a parked `wait` by key seeks or scans, read from `EXPLAIN QUERY PLAN`: `_events_type` indexes (type, seq), not the subject.
 - A poison event lands in the bin once, and the position moves past it.
 - Facts a second, against today's fill path and the two-lane toy's 33,000.
 - Log rows and bytes per fact, and what finished flows leave in `_events`.
@@ -50,3 +66,6 @@ Predictions are written and committed here before any code, as with every toy.
 1. What happens to a finished flow's events in a log that keeps everything: kept, purged by the app's rule, or written to a memory lane that never reaches `_events`. T1's log measurement informs it.
 2. Every step durable, or only a change of lane or a wait.
 3. Fill's failures: does a bin CE replace retries, or does fill keep a retry before the bin.
+4. When flow files are read: compiled into Rust at build (legion's proposal, to fit LANES-3), or kept as data in a watched folder, staged and made live by a signed request after a trial against history (the 2026-10-21 programs design; flows.md open question 6).
+5. Whether rannoch dedupes by CE id at accept, so a replay writes nothing new. That is an addition, not a cut.
+6. The surgery's scope (above).
