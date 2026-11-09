@@ -16,7 +16,9 @@ Operator said:
 
 Legion proposed, not confirmed:
 - The type names a row id, not a step number (`flow.<file>.<row id>`), so editing a file does not misroute events in flight.
-- No processor component: a lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits with its position. A step kind is a function: CE and row in, CEs out.
+- No runner component: a lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits with its position.
+
+Operator said (2026-11-09): `rannoch-processor` is "the generic for rannoch-processors-* only": the contract each step kind meets, not a runner. A step kind (`rannoch-processor-host`, `-emit`, `-wait`, ...) meets it: CE and row in, CEs out.
 - A step reads the body as borrowed bytes; only a guard or template that reads a field parses `data`.
 - Rust code that handles its own events needs no flow: it reads its types from a lane.
 - Store stays direct: `rannoch.node` and `rannoch.link` go to fill, outside the flow namespace.
@@ -35,13 +37,13 @@ Scope is open: the operator asked to cut "the fat that crept in last session". O
 | Fill's worker place (`rannoch.fill`), its failed rows, `_fill` try limit, retries | `rannoch-store/src/lib.rs` (FILL, 19 refs) | before #237 | Fill keeps a position; an event it cannot apply becomes a bin CE with its reason |
 | `take_failures`, `on_failure`, `processed`, `remove_worker`, `state` passthroughs | `rannoch-queue-mem/src/lib.rs` | before #237 | They pass through the cuts above; `Failure::Event` at commit stays (it is accept's) |
 | `done`, `failed` on `Trickle` | `rannoch-queue-trickle/src/lib.rs:44,48` | #241 | As the contract |
-| `rannoch-worker`, `rannoch-harness`, `rannoch-processor`, eleven `rannoch-processor-*` crates | `crates/` | scaffolds | Empty, and the shape has no processor or harness; the step-function crate is named after the toys |
+| `rannoch-harness` | `crates/` | scaffold | Empty, and the lanes run the rows; open whether it is kept as the place lanes call rows from |
 
 Added, because the cuts need them:
 - A commit of a position alone, for a reader that handles an event and emits nothing (`accept_from` commits a position only with events).
 - A read cursor each reader holds in memory ahead of its committed position, so it does not re-read events between heartbeats.
 
-Kept: `_events` and its type column and index (#243), `_positions`, `accept` and `accept_from`, the heartbeat, the ontology check at accept, the core store (#238), `Trickle<T: Types>` reading by type (#241).
+Kept: `_events` and its type column and index (#243), `_positions`, `accept` and `accept_from`, the heartbeat, the ontology check at accept, the core store (#238), `Trickle<T: Types>` reading by type (#241), `rannoch-processor` (the step-kind contract) and the `rannoch-processor-*` step kinds, `rannoch-worker` (reading a flow file and checking it against the ontology).
 
 Docs rewritten to match: `docs/flows.md`, `docs/inbox.md`, `docs/architecture.md`; lanes.md LANES-2 (the contract), LANES-4 (a step kind's default lane), LANES-7.
 
