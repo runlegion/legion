@@ -18,6 +18,8 @@ Legion proposed, not confirmed:
 - The type names a row id, not a step number (`flow.<file>.<row id>`), so editing a file does not misroute events in flight.
 - No runner component: a lane reads its types from a position, runs the row each `flow.*` event names, and commits the CEs it emits with its position.
 
+Operator said (2026-11-09), on an event's state: "the event should have -1|0|1|2 for it's 'status'", stored as an int "for speed". Read as -1 binned, 0 added, 1 in progress, 2 processed (legion's reading, to confirm). Legion proposed with it, not confirmed: status changes in the heartbeat transaction with the emitted events (page writes, no extra sync); an index on (type, status, seq) hands a reader its next event, so readers need no position row (producers keep `_positions`); one reader per type; the body never changes, only its status; -1 is the bin, with the reason beside it.
+
 Operator said (2026-11-09): `rannoch-processor` is "the generic for rannoch-processors-* only": the contract each step kind meets, not a runner. A step kind (`rannoch-processor-host`, `-emit`, `-wait`, ...) meets it: CE and row in, CEs out.
 - A step reads the body as borrowed bytes; only a guard or template that reads a field parses `data`.
 - Rust code that handles its own events needs no flow: it reads its types from a lane.
@@ -61,6 +63,7 @@ Predictions are written and committed here before any code, as with every toy.
 - A poison event lands in the bin once, and the position moves past it.
 - Facts a second, against today's fill path and the two-lane toy's 33,000.
 - Log rows and bytes per fact, and what finished flows leave in `_events`.
+- The status flag's cost: facts a second with status updates in the heartbeat transaction against positions only, and whether the (type, status, seq) index seeks for a reader's next event and for the bin.
 
 **T2, a direct Rust reader.** The same Westwind work as T1's chain, written as Rust on a lane with no flow and its own parsing. To measure: facts a second and log rows per fact against T1, so the cost of declaring a step as data is known.
 
