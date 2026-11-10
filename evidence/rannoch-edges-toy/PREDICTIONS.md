@@ -13,6 +13,7 @@ Settings as the real store: WAL, synchronous=FULL, fullfsync=ON. Data: Westwind 
 
 1. Out of order: 10% of events arrive with ids older than ones already committed. Prediction: every current, as-of and as-known read equals an oracle built from the same events in id order.
 2. Same id, different body: a second CloudEvent with an id already in the log but other content. Prediction: the key absorbs it, nothing records it, and the first body is what the store keeps.
+   Revised 2026-11-09 before anything ran, after #260 landed: an exact copy under a logged id is tossed; a different body is stored under a plain new UUIDv7 written into its `id`, the rest of its bytes as sent, and it fills. Prediction: both hold, and a re-id'd event delivered again is stored again under another new id.
 3. An id from the future: a UUIDv7 an hour ahead of the clock. Prediction: accepted, logged at its own time, and read as known from then.
 4. Fill cannot apply: (a) an event of an undeclared class, and (b) a storage fault forced during fill. Prediction: both leave the event in the log unfilled and the commit returns Ok; (b) is the one that is wrong, since a fault is not an event fill cannot apply.
 5. Kill mid-heartbeat, at random, 100 times. Prediction: nothing committed is lost, and no committed event is left unfilled.
