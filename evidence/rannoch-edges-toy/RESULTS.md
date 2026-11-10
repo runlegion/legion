@@ -320,3 +320,54 @@ The run is the same as before: two processes, each with its own handle and queue
 - Every node event has a version.
 
 The 400 writes lost on 24ef0b7 came from commits that outlasted the store's 5-second lock wait. That failure mode remains on any build where a commit takes longer than 5 s, but it no longer happens at this size.
+
+## Basics on the fill bench's events, rannoch main b288b86, 2026-11-09
+
+The operator asked for the basics on the synthetic events the team benches on, not on Westwind. The code is `toys/edges` `src/fillbench.rs` (0efa5b8), run as `edges-toy fillbench`, and it was built in a scratch worktree at b288b86.
+
+**Events.** It makes the events of rannoch `toys/live/src/bin/fillbench.rs` (origin/chore/205-release-check) the same way and in the same order, 306,000 in all:
+
+- 15,000 author and 135,000 book nodes;
+- 150,000 `wrote` links;
+- 6,000 re-sent events, each the same content under a new id.
+
+The bodies average 206 B. Two things changed from the bench:
+
+- Each id is a plain UUIDv7 minted when the event is made. The bench's `<uuid>:0` form is refused on main.
+- `book` declares no indexed `title`, because `Class` has no `indexed` field on main.
+
+**Run.** The events go through `Queue::accept` and the heartbeat commit, as an app sends them, timed from the first accept until the watermark passes the last ticket.
+
+- **Commit sizes:** at most 4,096 events past the watermark (three runs), then at most 16,384 (three runs).
+- **SQLite:** the same events go into plain SQLite on the same disk, in 4,096-event transactions, with WAL, `synchronous=FULL` and `fullfsync=ON`. It has a table per class keyed by its key, and `wrote` keyed by its ends with an index on (dst, src), as rannoch's relation table is. A re-sent event writes its row again.
+- **Disk:** the probe measured 129.8 MB/s of durable writes and a 21.1 ms durable flush. Durable share means events/s × bytes per event ÷ the probe's bytes/s.
+- **Load:** the load average ran from 3.1 to 3.9.
+
+| run | events/s | commits | B/event | durable share |
+|---|---|---|---|---|
+| cap 4,096, 3 runs | 45,741 / 45,774 / 45,988 | 75 | 642 | 22.6 to 22.8% |
+| cap 16,384, 3 runs | 66,352 / 66,419 / 66,632 | 19 | 642 | 32.8 to 33.0% |
+| SQLite, 3 runs | 236,753 / 239,193 / 248,200 | 75 transactions | 25 | |
+
+No run had a failure.
+
+**Basics 1 on these events: holds.**
+
+- With 4,096-event commits, main runs 6.1 to 9.2 times the 5,000 to 7,500 baseline; with 16,384-event commits, 8.8 to 13.3 times.
+- Both stay under SQLite: 19% of its rate at 4,096 and 28% at 16,384.
+
+That baseline was measured on Westwind, not on these events, so the multiple compares across datasets.
+
+**Basics 2 on these events: holds.** Main stores 642 B per event, under 1,000, against SQLite's 25.
+
+| table or index | B/event |
+|---|---|
+| `_events`, the log | 298 |
+| `_versions` | 149 |
+| `_versions_at` | 88 |
+| `_events_type` | 68 |
+| `relation:wrote` | 15 |
+| `class:book` | 14 |
+| `relation:wrote:to` | 9 |
+
+The gap to SQLite is wider here than on Westwind, 26 times against 5.3. A bench event carries one short title or two keys, so SQLite's rows are tiny, while rannoch keeps each event's whole body and a version for it.
