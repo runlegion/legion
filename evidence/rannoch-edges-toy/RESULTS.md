@@ -277,3 +277,46 @@ PREDICTIONS.md names three ways to break an edge. Where each happened:
   - Edge 6 lost 400 events at commit, reported as failures, under the 5 s lock wait.
   - Edge 4 leaves events unfilled with an Ok commit, as predicted.
 - **A duplicate id that keeps the second body.** Not seen. Edge 2 keeps the first body under the first id and stores the second under a new one.
+
+## Re-run on rannoch main b288b86, 2026-11-09
+
+Basics 1 and edge 6 were run again against rannoch main b288b86, which has #263 and #265. With those, fill's version lookups and the valid-day read's seek through `_versions_at` again. The toy is the one on `toys/edges` (f09c9c8), built in a scratch worktree at b288b86, and nothing was committed there. The first results above stand as they were run on 24ef0b7.
+
+Direct commits of 4,096 facts are flat again, at 44,186 to 57,505 facts/s across six batches (22,559 facts). Basics therefore ran at the full scale of the earlier toys: 1,000,000 extended order lines, 1,754,602 facts. The disk probe measured 151.5 MB/s of durable writes and a 4.5 ms durable flush, and the load average ran from 2.1 to 2.6.
+
+The `plans` step replays the SQL as 24ef0b7 wrote it, so its output does not describe b288b86 and is left out.
+
+### Basics 1 again: facts a second
+
+| run | facts/s | commits | B/fact | durable share |
+|---|---|---|---|---|
+| cap 4,096, #1 | 32,542 | 429, median 4,096 | 1,424 | 30.6% |
+| cap 4,096, #2 | 32,838 | 429 | 1,424 | 30.9% |
+| cap 4,096, #3 | 33,006 | 429 | 1,424 | 31.0% |
+| cap 16,384 | **43,388** | 120, max 16,384 | 1,424 | 40.8% |
+| no cap | 42,657 | 3, one of 1,019,191 events | 1,424 | 40.1% |
+| SQLite, 3 runs | 84,336 to 96,319 | 4,096 a transaction | 268 | |
+
+**Outcome: holds**, with how far it holds depending on batch size.
+
+- With 4,096-event commits (32,542 to 33,006 facts/s), main runs 4.3 to 6.6 times main before #253. That clears 5 times the bottom of the baseline (25,000), not the top (37,500).
+- With 16,384-event commits (43,388 facts/s), it runs 5.8 to 8.7 times, clearing both.
+- Every run stays under SQLite's 84,336 to 96,319 on the same rows and disk, at 34 to 51% of its rate.
+- Main uses 31 to 41% of the disk's durable rate (facts/s × bytes per fact ÷ the probe's bytes/s).
+
+The 20 ms heartbeat interval is the gap between the two caps: a producer held to 4,096 waits up to one interval for each commit.
+
+Basics 2 does not change. Main stores 1,424 B per fact against SQLite's 268, still over the predicted 1,000: the log is 587 B a fact, the history 470 B and its index 132 B.
+
+### Edge 6 again: two handles on one file
+
+The run is the same as before: two processes, each with its own handle and queue, each sending the same 5,000 shared bodies and 20,000 of its own.
+
+**Outcome: holds.**
+
+- Both writers finish in 1.78 s with 0 failures.
+- The log holds all 45,000 customer nodes, ids are unique and the log reads in id order.
+- All 5,000 shared ids are kept once, each with the body sent, and none was re-id'd.
+- Every node event has a version.
+
+The 400 writes lost on 24ef0b7 came from commits that outlasted the store's 5-second lock wait. That failure mode remains on any build where a commit takes longer than 5 s, but it no longer happens at this size.
