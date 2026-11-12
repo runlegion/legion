@@ -1,5 +1,48 @@
 # Legion Changelog
 
+## 0.44.12
+
+The behaviour-scenarios release. On 0.44.11 the spec-writer told writers to give each
+check its own scenario ("four failure cases are four criteria and four scenarios"). On
+mail that produced 441 scenarios for 48 requirements, 2,888 lines of generated features
+and about 15,400 lines of step files, most of it logic written as behaviour. Where the
+shaper's RESEARCH documents left something unstated, the writer either guessed (FR-MAIL-050's
+slot on a throwing login) or dropped a defect a toy had seen (FR-MAIL-034 held over 100
+messages). The spec-writer now folds related outcomes into one behaviour scenario per
+public surface and follows six stated rules about what the scenarios must catch. The
+shaper now records what those rules read. Both changes come from platform's research
+`01a1d1e9-dac6`, where the same approach took 73 criteria on four mail requirements down
+to 26 checks without losing anything a SHALL or a proven method needs.
+
+Patch release: fixes to two agent definitions within the existing plugin. No code change,
+no wire-format change and no schema migration.
+
+### Fixed
+
+- **The spec-writer folds related outcomes into behaviour scenarios and states six rules**
+  (PR #1530, #1526). The scenarios paragraph of `plugin/agents/spec-writer.md` no longer
+  says "one check per scenario". It now says a scenario is one whole behaviour through one
+  public surface, which may take several steps and fold related outcomes into its Then, so
+  related failure cases join the behaviour they belong to. A new paragraph states six
+  rules, one sentence each. A SHALL's failure ways include its dependencies failing,
+  throwing or hanging. An outcome that only one answer keeps every SHALL true is settled,
+  and a scenario checks it. An outcome that several answers satisfy is a gap for the spec
+  author: the writer reports it as a finding and writes no scenario asserting either
+  answer. A failure someone saw happen keeps its check. A gap is reported only when its
+  answer would change what gets built, and two SHALLs that pull opposite ways on one failure
+  are named as a conflict. The writer reads every decision record a requirement traces to,
+  and the list of allowed reads now names those records. The PR re-ran the research's
+  final prompt with the new text on FR-MAIL-049, 004, 050 and 034 and got 25 checks
+  against the research's 26, within its run-to-run variance of about 3. The reviewer
+  checklist and `verification.scenarios[]` still pair one scenario with one criterion, so
+  folded outcomes are written as one criterion.
+- **The shaper records what the spec-writer's rules read** (PR #1529, #1528).
+  `plugin/agents/shaper.md` now says its RESEARCH documents also state four things. Each
+  failure a toy saw happen, marked as seen, with the rule that prevents it. Each failure way
+  it finds, with the outcome decided or marked undecided. The public surface that owns each
+  behaviour. Every decision record the form rests on. The stated reason is that the
+  spec-writer guesses or drops what the shaper saw wherever these documents are silent.
+
 ## 0.44.11
 
 The visible-revision release. On 0.44.10 `legion document revise` bumped a document's
