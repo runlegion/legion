@@ -241,6 +241,7 @@ pub(crate) fn handle(action: DocumentAction) -> error::Result<()> {
                 }
                 println!("created:  {}", doc.created_at);
                 println!("updated:  {}", doc.updated_at);
+                println!("revision: {}", doc.revision);
                 println!("--- payload ---");
                 println!("{}", doc.payload);
 
