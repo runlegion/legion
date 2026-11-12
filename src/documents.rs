@@ -40,6 +40,9 @@ pub struct Document {
     pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The revision counter `revise_document` bumps; 1 at insert.
+    #[serde(default)]
+    pub revision: i64,
 }
 
 /// Fields hoisted from `payload.meta` at insert time. Provided by the
@@ -138,6 +141,7 @@ impl Database {
             archived_at: None,
             created_at: now.clone(),
             updated_at: now,
+            revision: 1,
         })
     }
 
@@ -318,7 +322,7 @@ impl Database {
     /// check `archived_at` on the returned Document.
     pub fn get_document(&self, id: &str) -> Result<Option<Document>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at \
+            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at, revision \
              FROM documents WHERE id = ?1 AND deleted_at IS NULL",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -360,7 +364,7 @@ impl Database {
         }
 
         let sql = format!(
-            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at \
+            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at, revision \
              FROM documents WHERE {} ORDER BY updated_at DESC",
             clauses.join(" AND ")
         );
@@ -443,7 +447,7 @@ impl Database {
     /// means).
     pub fn get_all_documents_for_reindex(&self) -> Result<Vec<Document>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at \
+            "SELECT id, type, surface, status, priority, owner, payload, archived_at, created_at, updated_at, revision \
              FROM documents WHERE deleted_at IS NULL",
         )?;
         let rows = stmt.query_map([], map_document_row)?;
@@ -1354,6 +1358,7 @@ fn map_document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
         archived_at: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        revision: row.get(10)?,
     })
 }
 
@@ -2463,6 +2468,29 @@ mod tests {
         assert_eq!(db.document_revision(&doc.id).expect("revision"), 1);
     }
 
+    /// #1523: a document read back by get and list carries its revision,
+    /// so `document view` and `list` can show it.
+    #[test]
+    fn get_and_list_carry_the_revision() {
+        let db = test_db();
+        crate::db::testutil::seed_type_schema(&db, "requirement");
+        let doc = db
+            .insert_document(&sample_meta("requirement", "mail"), "{}")
+            .unwrap();
+        assert_eq!(doc.revision, 1);
+        db.revise_document(&doc.id, "{}").unwrap();
+        assert_eq!(db.get_document(&doc.id).unwrap().unwrap().revision, 2);
+        let listed = db
+            .list_documents(&DocumentFilter {
+                doc_type: Some("requirement"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.iter().find(|d| d.id == doc.id).unwrap().revision, 2);
+        let json = serde_json::to_value(&listed[0]).unwrap();
+        assert!(json.get("revision").is_some());
+    }
+
     #[test]
     fn document_revision_of_unknown_id_errors() {
         let db = test_db();
@@ -2812,6 +2840,7 @@ mod tests {
             archived_at: None,
             created_at: "2026-01-01T00:00:00+00:00".into(),
             updated_at: "2026-01-01T00:00:00+00:00".into(),
+            revision: 1,
         };
         let text = document_search_text(&doc);
         assert!(text.contains("Thread detail"));
@@ -2833,6 +2862,7 @@ mod tests {
             archived_at: None,
             created_at: "2026-01-01T00:00:00+00:00".into(),
             updated_at: "2026-01-01T00:00:00+00:00".into(),
+            revision: 1,
         };
         let text = document_search_text(&doc);
         assert!(text.contains("Latency budget"));
@@ -2855,6 +2885,7 @@ mod tests {
             archived_at: None,
             created_at: "2026-01-01T00:00:00+00:00".into(),
             updated_at: "2026-01-01T00:00:00+00:00".into(),
+            revision: 1,
         };
         let text = document_search_text(&doc);
         assert!(text.contains("Thread detail"));
@@ -2878,6 +2909,7 @@ mod tests {
             archived_at: None,
             created_at: "2026-01-01T00:00:00+00:00".into(),
             updated_at: "2026-01-01T00:00:00+00:00".into(),
+            revision: 1,
         };
         // Never fails -- a malformed payload just yields less text.
         let text = document_search_text(&doc);
@@ -2898,6 +2930,7 @@ mod tests {
             archived_at: None,
             created_at: "2026-01-01T00:00:00+00:00".into(),
             updated_at: "2026-01-01T00:00:00+00:00".into(),
+            revision: 1,
         };
 
         index_document(&index, &doc).expect("index_document");

@@ -843,6 +843,7 @@ mod tests {
             archived_at: None,
             created_at: T.into(),
             updated_at: T.into(),
+            revision: 1,
         }
     }
 
