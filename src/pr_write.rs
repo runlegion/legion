@@ -472,6 +472,26 @@ mod tests {
         assert_eq!(report.mapping_entries, 2);
     }
 
+    /// #1527: a `unit` criterion is mapped like any other, and an entry that
+    /// cites its unit test is evidence enough for this gate.
+    #[test]
+    fn accepts_a_unit_criterion_entry_citing_its_test() {
+        let ac = vec![
+            "unit: an empty name is refused, proven by widget::tests::refuses_empty_name"
+                .to_owned(),
+        ];
+        let body = "## Acceptance criteria mapping\n\n\
+             ### 1. unit: an empty name is refused\n\
+             validate_name now returns an error for a blank or whitespace-only name, \
+             before anything is written to the store.\n\
+             Evidence: widget::tests::refuses_empty_name\n\n\
+             ## Not done\n\n\
+             Did not change how names are displayed.\n";
+        let report = validate_pr_body(&ac, body);
+        assert!(report.ok, "expected clean, got {:?}", report.findings);
+        assert_eq!(report.mapping_entries, 1);
+    }
+
     #[test]
     fn refuses_missing_mapping_section() {
         let ac = vec!["Something".to_owned()];

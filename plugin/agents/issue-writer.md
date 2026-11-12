@@ -82,7 +82,9 @@ Make the scenarios of <FR-ID> pass. The requirement is the authority; read it wi
 
 ## Placement
 
-The generated `.feature` files go in the `tests/` tree that mirrors <the module owning the entry point, found with `legion sym`>. Do not hand-edit them.
+The behaviour scenarios are owned by <the module owning the entry point, found with `legion sym`>. Feature files are generated only for behaviour (scenario) criteria, and are carried in this issue as guardrails, not generated into `tests/`:
+
+<the Gherkin of each scenario criterion, from the requirement's `verification.scenarios`; "none: no behaviour criteria" when it has none>
 
 ## Acceptance criteria
 

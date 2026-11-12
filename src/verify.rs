@@ -167,6 +167,9 @@ pub struct AcResult {
 pub struct SpecCriterion {
     pub id: String,
     pub text: String,
+    /// True when the criterion's evidence kind is `unit` (#1527): a named
+    /// rule proven by a named unit test, so a pass must name that test.
+    pub unit: bool,
 }
 
 /// The kind of resolvable artifact backing a spec-bound verdict (#882 step
@@ -293,6 +296,35 @@ pub struct TracedRequirement {
     pub doc_id: String,
     pub revision: i64,
     pub criteria: Vec<SpecCriterion>,
+}
+
+/// The criteria whose `pass` verdict cites no test although the criterion is
+/// a `unit` criterion (#1527): a unit criterion is proven by a named unit
+/// test, so a pass whose artifacts name none is refused before anything is
+/// recorded. Fail and uncertain verdicts stand as given (#1507). Returns the
+/// criterion text of each such verdict.
+pub fn unit_passes_naming_no_test<'a>(
+    requirements: &'a [TracedRequirement],
+    results: &[SpecAcResult],
+) -> Vec<&'a str> {
+    results
+        .iter()
+        .filter(|r| {
+            r.verdict == AcVerdict::Pass
+                && !r
+                    .artifacts
+                    .iter()
+                    .any(|a| a.kind == ArtifactKind::Test && !a.reference.trim().is_empty())
+        })
+        .filter_map(|r| {
+            requirements
+                .iter()
+                .filter(|q| q.doc_id == r.spec_doc_id)
+                .flat_map(|q| &q.criteria)
+                .find(|c| c.id == r.criterion_id && c.unit)
+                .map(|c| c.text.as_str())
+        })
+        .collect()
 }
 
 /// Decide a work-source issue's fate against the requirement(s) its trace
@@ -604,6 +636,7 @@ mod tests {
         SpecCriterion {
             id: id.to_owned(),
             text: text.to_owned(),
+            unit: false,
         }
     }
 
@@ -639,6 +672,50 @@ mod tests {
             revision,
             criteria,
         }
+    }
+
+    /// #1527: a pass on a `unit` criterion is accepted when its evidence
+    /// names the test, and refused when it names none; a non-unit criterion
+    /// and a fail on a unit criterion are left as given.
+    #[test]
+    fn unit_pass_must_name_its_test() {
+        let unit = SpecCriterion {
+            unit: true,
+            ..crit("u-1", "an empty name is refused")
+        };
+        let requirements = vec![traced("doc-1", 1, vec![unit, crit("s-1", "scenario crit")])];
+        let diff_only = VerdictArtifact {
+            kind: ArtifactKind::Diff,
+            reference: "src/widget.rs:10".to_owned(),
+            outcome: "refuses empty".to_owned(),
+        };
+
+        let names_test = vec![spec_res(
+            "doc-1",
+            1,
+            "u-1",
+            AcVerdict::Pass,
+            vec![artifact("widget::tests::refuses_empty_name", "passed")],
+        )];
+        assert!(unit_passes_naming_no_test(&requirements, &names_test).is_empty());
+
+        let names_none = vec![
+            spec_res("doc-1", 1, "u-1", AcVerdict::Pass, vec![diff_only.clone()]),
+            spec_res("doc-1", 1, "s-1", AcVerdict::Pass, vec![diff_only.clone()]),
+        ];
+        assert_eq!(
+            unit_passes_naming_no_test(&requirements, &names_none),
+            vec!["an empty name is refused"]
+        );
+
+        let fail_without_test = vec![spec_res(
+            "doc-1",
+            1,
+            "u-1",
+            AcVerdict::Fail,
+            vec![diff_only],
+        )];
+        assert!(unit_passes_naming_no_test(&requirements, &fail_without_test).is_empty());
     }
 
     #[test]

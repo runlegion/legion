@@ -928,6 +928,7 @@ pub(crate) fn resolve_spec_criteria(
                 criteria.push(verify::SpecCriterion {
                     id: id.to_string(),
                     text: text.to_string(),
+                    unit: entry.get("evidence").and_then(|v| v.as_str()) == Some("unit"),
                 });
             }
             _ => {
@@ -1164,6 +1165,7 @@ fn handle_verify_issue(
         })
         .collect();
     refuse_empty_pass_evidence(&empty)?;
+    refuse_unit_pass_without_test(&verify::unit_passes_naming_no_test(&requirements, &results))?;
     let decision = verify::decide_spec_multi(&requirements, &results);
     let results_value = serde_json::to_value(&results)?;
 
@@ -1187,6 +1189,25 @@ fn refuse_empty_pass_evidence(criteria: &[&str]) -> error::Result<()> {
     eprintln!(
         "[legion] error: verify refused -- {} pass verdict(s) carry empty evidence (#1516); \
          nothing was recorded:",
+        criteria.len()
+    );
+    for c in criteria {
+        eprintln!("  - {c}");
+    }
+    Err(error::LegionError::ExitWith(1))
+}
+
+/// Refuse a verify run in which a pass on a `unit` criterion names no test
+/// (#1527): its evidence carries no `test` artifact. Runs before any gate is
+/// recorded, so a refused run records nothing.
+fn refuse_unit_pass_without_test(criteria: &[&str]) -> error::Result<()> {
+    if criteria.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "[legion] error: verify refused -- {} pass verdict(s) on a unit criterion name no \
+         test; cite the unit test as an artifact of kind \"test\" (#1527). Nothing was \
+         recorded:",
         criteria.len()
     );
     for c in criteria {
@@ -1530,16 +1551,22 @@ mod tests {
             owner: "legion",
         };
         let payload = serde_json::json!({
-            "verification": {"criteria": [{"id": "crit-1", "text": "alpha"}]}
+            "verification": {"criteria": [
+                {"id": "crit-1", "text": "alpha"},
+                {"id": "crit-2", "text": "beta", "evidence": "unit"}
+            ]}
         })
         .to_string();
         let doc = db.insert_document(&meta, &payload).expect("insert");
         let criteria = resolve_spec_criteria(&doc)
             .expect("resolve")
             .expect("criteria present");
-        assert_eq!(criteria.len(), 1);
+        assert_eq!(criteria.len(), 2);
         assert_eq!(criteria[0].id, "crit-1");
         assert_eq!(criteria[0].text, "alpha");
+        // #1527: the evidence kind is carried, so verify knows a unit criterion.
+        assert!(!criteria[0].unit);
+        assert!(criteria[1].unit);
     }
 
     #[test]

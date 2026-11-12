@@ -2221,6 +2221,43 @@ mod tests {
     }
 
     #[test]
+    fn shipped_requirement_schema_accepts_unit_evidence() {
+        let db = test_db();
+        db.ensure_shipped_schemas().expect("first use");
+        let requirement = |evidence: &str| {
+            serde_json::json!({
+                "meta": {
+                    "id": "FR-WIDGET-001", "type": "requirement", "surface": "widget",
+                    "status": "draft", "priority": "SHALL", "owner": "legion",
+                    "date": "2026-11-12", "author": "spec-writer"
+                },
+                "title": "Widget rule",
+                "description": "The widget SHALL refuse an empty name.",
+                "traces_to": "pain.empty-name",
+                "verification": {
+                    "acceptance": ["An empty name is refused."],
+                    "criteria": [{
+                        "id": "crit-1",
+                        "text": "An empty name is refused.",
+                        "evidence": evidence,
+                        "unit": {
+                            "rule": "an empty name is refused",
+                            "test": "widget::tests::refuses_empty_name"
+                        }
+                    }]
+                }
+            })
+        };
+        let meta = sample_meta("requirement", "legion");
+        db.insert_document(&meta, &requirement("unit").to_string())
+            .expect("a unit criterion with a named rule and test lands");
+        assert!(matches!(
+            db.validate_document_payload("requirement", &requirement("lint")),
+            Err(LegionError::SchemaViolation { .. })
+        ));
+    }
+
+    #[test]
     fn shipped_prototype_schema_requires_canvas_and_explores() {
         let db = test_db();
         db.ensure_shipped_schemas().expect("first use");
