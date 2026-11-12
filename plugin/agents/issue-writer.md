@@ -156,9 +156,11 @@ against it.
 - A proven method is acceptance, not background. Turn each Proven design line into an
   acceptance criterion the build is judged on, with its evidence: what in the diff shows
   the method is used, and, where the research measured it, the measurement re-run against
-  the build (a throughput floor, a mismatch count). A toy-proven criterion is event
-  evidence, never research: the toy's case re-run against the built software, its numbers
-  compared with the toy's, recorded by the builder in the PR. Research evidence stays for
+  the build (a throughput floor, a mismatch count). A toy-proven criterion is never
+  research or event: the toy's case re-run against the built software, with the toy's
+  verdict, is unit or scenario evidence asserted in CI; a number with no verdict is recorded
+  beside the toy's number and never asserted, by the e2e run on the deploy issue when only a
+  real deployment can read it. Research evidence stays for
   what no toy has run yet. What the research proved must not be done becomes a criterion
   too.
 - Never label proven toy evidence as background, context, trace ids only, or "design

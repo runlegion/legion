@@ -128,7 +128,7 @@
         },
         "criteria": {
           "type": "array",
-          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: proven by something that really happens, named with who records it, never simulated; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head. unit: a named rule proven by a named unit test, with no Gherkin.",
+          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: a human's judgment only, named with who makes it, never simulated; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head. unit: a named rule proven by a named unit test, with no Gherkin.",
           "items": {
             "type": "object",
             "required": [
