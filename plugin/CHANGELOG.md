@@ -1,5 +1,28 @@
 # Legion Changelog
 
+## 0.44.11
+
+The visible-revision release. On 0.44.10 `legion document revise` bumped a document's
+revision counter and printed it, but neither `legion document view` nor `legion document
+list` showed it, in text or with `--json`. `legion verify` needs a requirement's revision
+as `spec_revision`, so verifiers learned it by making a run that was refused, and each of
+those runs left a throwaway gate row. View now prints the revision, and the `--json` output
+of view and list carries it.
+
+Patch release: a fix within the existing document surface. The output gains one additive
+field, and the `revision` column it reads already existed, so there is no schema migration.
+
+### Fixed
+
+- **`legion document view` and `list` show the revision** (PR #1524, #1523). `Document` in
+  `src/documents.rs` now has a `revision` field, the counter `revise_document` bumps,
+  starting at 1 on insert. `get_document`, `list_documents` and
+  `get_all_documents_for_reindex` select the `revision` column and pass it to
+  `map_document_row`. `legion document view <id>` prints a `revision:` line after
+  `updated:`. `view --json` and `list --json` include `revision` on every document, so a
+  verifier can read `spec_revision` straight from the document without a refused run. The
+  field is `#[serde(default)]`, so serialized documents that lack it still deserialize.
+
 ## 0.44.10
 
 The finished-means-measured release. On 0.44.9 the rusty and typey builders counted their
