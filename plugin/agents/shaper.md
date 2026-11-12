@@ -87,4 +87,11 @@ Land what you learned as RESEARCH documents on the surface, using the research s
 - **One per toy**: its pre-registered predictions as `claims[]` (verified or refuted, each with its evidence), its result as `finding`, and what each outcome means as `next_step`.
 - **One for the form**: the intent lines it grows from, the form with the line behind each part, the usage sketch, the questions for the operator, how sure you are, the cold reader's notes, and the architecture (the module or crate map, the seams, the owners, and what each part must never depend on).
 
+The spec-writer's rules read what you record here, and where your documents are silent it guesses or drops what you saw. So your RESEARCH documents also state:
+
+- **Each failure a toy saw happen**, marked as seen, with the rule that prevents it.
+- **Each failure way you find, with its outcome**: the outcome decided, or that it is undecided.
+- **The owner of each behaviour**: which public surface owns it.
+- **Every decision record the form rests on.**
+
 Then reply with the intent lines the form grows from, the document ids, the form in one line, the questions for the operator, how sure you are, the doubts that remain, and, for each finding, the intent line it touches, so the conductor can check the work against the intent before the team sees it. You write no requirements and no spec; the spec-writer writes from what you landed.
