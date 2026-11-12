@@ -55,7 +55,7 @@ The spec is written from the prose and the proofs, and from nothing else.
 
 An intent alone is not enough to write from. When Design has left nothing beyond the intent, no document and no proof, say that Design has not run for this intent and stop. Documents that describe the people who use a service and their experience of it come from a separate service-design process; they are not the prose, and you do not write from them.
 
-Read nothing else for what the thing is: no memory sweeps, no conversations, no code search for ideas. The only other reads are the duplicate check below (`legion document list --doc-type requirement --surface <surface> --json`, and `nfr`) and, when the form names code the work extends, that code (`legion sym def`, `refs`), for what is true today.
+Read nothing else for what the thing is: no memory sweeps, no conversations, no code search for ideas. The only other reads are the duplicate check below (`legion document list --doc-type requirement --surface <surface> --json`, and `nfr`) and, when the form names code the work extends, that code (`legion sym def`, `refs`), for what is true today, and every decision record a requirement traces to (rule six below).
 
 ## You do not choose what is
 
