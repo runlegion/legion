@@ -2221,56 +2221,6 @@ mod tests {
     }
 
     #[test]
-    fn shipped_requirement_schema_accepts_unit_evidence_naming_its_test() {
-        let db = test_db();
-        db.ensure_shipped_schemas().expect("first use");
-        let requirement = |evidence: &str, unit: &serde_json::Value| {
-            let mut criterion = serde_json::json!({
-                "id": "crit-1",
-                "text": "An empty name is refused.",
-                "evidence": evidence
-            });
-            if !unit.is_null() {
-                criterion["unit"] = unit.clone();
-            }
-            serde_json::json!({
-                "meta": {
-                    "id": "FR-WIDGET-001", "type": "requirement", "surface": "widget",
-                    "status": "draft", "priority": "SHALL", "owner": "legion",
-                    "date": "2026-11-12", "author": "spec-writer"
-                },
-                "title": "Widget rule",
-                "description": "The widget SHALL refuse an empty name.",
-                "traces_to": "pain.empty-name",
-                "verification": {
-                    "acceptance": ["An empty name is refused."],
-                    "criteria": [criterion]
-                }
-            })
-        };
-        let named = serde_json::json!({
-            "rule": "an empty name is refused",
-            "test": "widget::tests::refuses_empty_name"
-        });
-        let meta = sample_meta("requirement", "legion");
-        db.insert_document(&meta, &requirement("unit", &named).to_string())
-            .expect("a unit criterion naming its test lands");
-        for refused in [
-            requirement(
-                "unit",
-                &serde_json::json!({"rule": "an empty name is refused"}),
-            ),
-            requirement("unit", &serde_json::Value::Null),
-            requirement("behaviour", &serde_json::Value::Null),
-        ] {
-            assert!(matches!(
-                db.validate_document_payload("requirement", &refused),
-                Err(LegionError::SchemaViolation { .. })
-            ));
-        }
-    }
-
-    #[test]
     fn shipped_prototype_schema_requires_canvas_and_explores() {
         let db = test_db();
         db.ensure_shipped_schemas().expect("first use");

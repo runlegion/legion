@@ -72,7 +72,7 @@ Render exactly these sections, in this order, with this wording, and nothing els
 
 ## Scope
 
-Make the scenarios of <FR-ID> pass. The requirement is the authority; read it with `legion document view <FR-ID>`. This issue restates none of it.
+Make the scenarios of <FR-ID> pass. The requirement is the authority; read it with `legion document view <FR-ID>`. This issue restates none of it but its scenarios, carried below as the guardrail.
 
 ## Proven design
 
@@ -82,16 +82,15 @@ Make the scenarios of <FR-ID> pass. The requirement is the authority; read it wi
 
 ## Placement
 
-The generated `.feature` files go in the `tests/` tree that mirrors <the module owning the entry point, found with `legion sym`>. Do not hand-edit them. This issue also carries the same features, one per thing a user does, as the guardrail for what the build must do. A scenario is one complete behaviour a user does, start to finish; a small check of one rule is a unit test beside the code, never its own scenario:
+The requirement's scenarios are the guardrail for what the build must do. They are generated as today into the `tests/` folder the toolchain defaults to, mirroring <the module owning the entry point, found with `legion sym`>. Do not hand-edit them. Unit tests are the builder's; this issue lists none.
 
 <the Gherkin of each scenario criterion, from the requirement's `verification.scenarios`; "none: no scenario criteria" when it has none>
 
 ## Acceptance criteria
 
 - scenario `@criterion-<id>` passes
-- unit test `<name>` passes: <the rule of logic it proves>
 - (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
-- proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build gives <the toy's verdict>, asserted by unit test <name>
+- proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build meets <the toy's measurement>, recorded by the builder in the PR
 - proven design: <what must not be done> is not done, shown by <what in the diff>
 - (one line per Proven design line that no requirement criterion above already carries)
 - CI passes
@@ -156,13 +155,12 @@ against it.
   RESEARCH <id>: 0 mismatches on 20,000 states").
 - A proven method is acceptance, not background. Turn each Proven design line into an
   acceptance criterion the build is judged on, with its evidence: what in the diff shows
-  the method is used, and, where the research gave a verdict, the toy's case re-run against
-  the build with that verdict (a throughput floor met, zero mismatches). A toy-proven
-  criterion is never research or event: the toy's case re-run against the built software,
-  with the toy's verdict, is unit evidence: a named unit test asserted in CI. There is no
-  measurement kind: a number from a real run is a note in the PR, not a criterion.
-  Research evidence stays for what no toy has run yet. What the research proved must not
-  be done becomes a criterion too.
+  the method is used, and, where the research measured it, the measurement re-run against
+  the build (a throughput floor, a mismatch count). A toy-proven criterion is event
+  evidence, never research: the toy's case re-run against the built software, its numbers
+  compared with the toy's, recorded by the builder in the PR. Research evidence stays for
+  what no toy has run yet. What the research proved must not be done becomes a criterion
+  too.
 - Never label proven toy evidence as background, context, trace ids only, or "design
   evidence, not acceptance for this build", and never write that the builder chooses a
   mechanism a RESEARCH document proved.
@@ -171,7 +169,7 @@ In the scenarios shape the section is `## Proven design`. In the template shape 
 no separate section: each Proven design line becomes a criterion in the template's
 acceptance criteria section, carrying its RESEARCH id and measurement in the line itself
 ("proven design: <method> is used, shown by <what in the diff>; proved by <RESEARCH id>,
-<the toy's verdict>, asserted by unit test <name>").
+<the measurement>, re-run against the build and recorded by the builder in the PR").
 
 ## Which work needs a spec
 

@@ -128,28 +128,13 @@
         },
         "criteria": {
           "type": "array",
-          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: a human's judgment, named with who records it, never simulated; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head. unit: logic, a named rule proven by the unit test its unit.test names, with no Gherkin. Behaviour is the scenario kind. There is no kind for measurements: a number from a real run is a note in the PR.",
+          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: proven by something that really happens, named with who records it, never simulated; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head.",
           "items": {
             "type": "object",
             "required": [
               "id",
               "text"
             ],
-            "if": {
-              "properties": {
-                "evidence": {
-                  "const": "unit"
-                }
-              },
-              "required": [
-                "evidence"
-              ]
-            },
-            "then": {
-              "required": [
-                "unit"
-              ]
-            },
             "properties": {
               "id": {
                 "type": "string"
@@ -163,8 +148,7 @@
                   "scenario",
                   "event",
                   "research",
-                  "artifact",
-                  "unit"
+                  "artifact"
                 ]
               },
               "event": {
@@ -181,21 +165,6 @@
               "research": {
                 "type": "string",
                 "description": "The RESEARCH document id that holds this criterion."
-              },
-              "unit": {
-                "type": "object",
-                "description": "For a unit criterion: the rule, and the unit test that proves it, by the name verify matches the cited test against; no Gherkin scenario.",
-                "required": [
-                  "test"
-                ],
-                "properties": {
-                  "rule": {
-                    "type": "string"
-                  },
-                  "test": {
-                    "type": "string"
-                  }
-                }
               },
               "artifact": {
                 "type": "object",

@@ -44,12 +44,6 @@ never `pass` -- verify never asserts an unprovable claim.
    - `git diff main..HEAD` -- the change that addresses it.
    - Read CI's run on the verified head and note the test that exercises it. Run tests yourself only when CI has no run for that head, and then only the issue's own scenarios: a local full-suite run repeats CI.
    - For a behavioral criterion, describe the observable behavior you confirmed.
-   - For a `unit` criterion (a named rule proven by a named unit test, no scenario), the
-     evidence is that test: it passes in CI's run on the head and checks the named rule. A
-     missing, failing or skipped test, or one that cannot fail, is `fail`. Cite it as an
-     artifact of kind `test` whose `ref` is exactly the name the criterion's `unit.test`
-     gives; `legion verify` refuses a pass on a unit criterion that cites no test or a test
-     of another name.
    - For the predictions criterion, fetch what was emitted for this issue by its issue ref --
      `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` -- not by searching
      emission text, and witness each row it returns. When it returns zero rows, state plainly
