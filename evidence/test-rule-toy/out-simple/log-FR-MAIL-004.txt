@@ -1,0 +1,24 @@
+The verification for FR-MAIL-004 is at `evidence/test-rule-toy/out/out-FR-MAIL-004.json`, and the JSON parses.
+
+**Counts:** 1 behaviour check and 8 unit checks. I also traced 12 ways the requirement could fail, raised 4 gaps and listed 9 candidate checks I left out.
+
+- **The behaviour scenario:** a user receives a message and sees who it is from and who it went to. It runs `readMessage` over seven RFC 5322 Appendix A examples, including the obsolete and commented ones, and compares all six address fields with the goldens in research 01a19b44.
+- **The unit checks:** all eight are in `read/address.ts`, one for each rule in the statement:
+  - display names unquoted;
+  - comments and folding white space removed;
+  - routes dropped;
+  - empty list elements skipped;
+  - groups kept with their members;
+  - quoted local parts and domain literals kept as written;
+  - an unparseable value read as null, never as a made-up address;
+  - `sameMailbox`: domains compare without ASCII case, local parts exactly.
+
+  Four of the unit checks would fail the wrong results the parser toy recorded for postal-mime.
+
+**Gaps for the spec author:**
+- No fixture has a Bcc field, so nothing proves Bcc is read.
+- No fixture has a mixed-case domain, so nothing end to end proves domains are returned as written.
+- The statement doesn't say whether encoded words in display names (RFC 2047, e.g. `=?utf-8?...?=`) are decoded.
+- The rule that From holds only mailboxes and Sender exactly one (RFC 5322 3.6.2) is in the reading form, but this requirement neither states it nor traces to it.
+
+**Least sure it belongs:** the behaviour scenario. This requirement is a parser, and its real user-facing surface, the IMAP envelope, is handed to IMAP. I kept the scenario because only a whole message read with `readMessage` proves each of the six fields goes through the address reader. Under a stricter reading of "a thing a user does", it is a golden comparison of a function's output, and this requirement would have no behaviour check at all.

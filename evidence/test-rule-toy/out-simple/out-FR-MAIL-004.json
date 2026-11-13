@@ -1,0 +1,136 @@
+{
+  "requirement": "FR-MAIL-004",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "A received message shows who it is from and who it went to, whatever RFC 5322 form the sender used",
+      "gherkin": "Scenario: The senders and recipients of a received message are read in every form RFC 5322 allows\n  Given mail has received the RFC 5322 Appendix A messages a1.1-sender, a1.2-mailboxes, a1.3-groups, a2-2-reply, a5-oddities, a6.1-obs-address and a6.3-obs-ws, byte-exact from the fixtures of research 01a19b44\n  When mail reads each message\n  Then its From, Sender, Reply-To, To, Cc and Bcc hold exactly the mailboxes and groups of that message's golden in body.goldens.read of research 01a19b44\n  And a5-oddities reads From as Pete <pete@silly.test> and Cc as the group \"Hidden recipients\" with no members\n  And a6.1-obs-address reads To as Mary Smith <mary@example.net> and jdoe@test.example, with the route and the empty element gone\n  And a6.3-obs-ws reads From as John Doe <jdoe@machine.example>\n  And none of these messages records a problem",
+      "proves": [
+        "Mail SHALL read the address fields of a received message (From, Sender, Reply-To, To, Cc, Bcc) into mailboxes and groups as RFC 5322 3.4 and 4.4 define them",
+        "toy 01a18fb8: no existing parser reads A.5, A.6.1 and A.6.3; this is the check that mail's own reader does",
+        "goldens 01a19b44: readMessage reproduces the golden address fields of each fixture",
+        "intent proposals[3]: a mailbox that feels like the one people already use shows the right people on every message"
+      ],
+      "why_not_the_other_kind": "Receiving a message and seeing its people is the one thing a user does here, and only readMessage over a whole message proves each of the six fields is read with the address reader."
+    },
+    {
+      "kind": "unit",
+      "title": "A display name is returned unquoted, its words joined as written; no name is null",
+      "rule": "A phrase's text joins its atoms, quoted strings and dots with one space before each spaced token, quoted strings lose their quotes and backslashes, and a mailbox with no phrase has name null.",
+      "unit": "packages/core/src/read/address.ts (readAddresses)",
+      "proves": [
+        "display names unquoted (RFC 5322 3.4)",
+        "A.1.2: \"Joe Q. Public\" and \"Giant; \\\"Big\\\" Box\" read as Joe Q. Public and Giant; \"Big\" Box; <boss@nil.test> has name null"
+      ],
+      "why_not_the_other_kind": "Joining and unquoting tokens is a rule over a string; a user never does it, they see its result."
+    },
+    {
+      "kind": "unit",
+      "title": "Comments and folding white space inside an address are removed",
+      "rule": "Comments (nested, with quoted parentheses) and folding white space anywhere in a mailbox, local part, domain or group are dropped, so pete(his account)@silly.test(his host) reads as pete@silly.test and jdoe@test  . example as jdoe@test.example.",
+      "unit": "packages/core/src/read/address.ts (readAddresses, over lex)",
+      "proves": [
+        "comments and folding white space removed (RFC 5322 3.2.2, 4.4)",
+        "toy 01a18fb8: postal-mime read A.6.3 From as name 'John Doe . example', address jdoe@machine; this check fails that result"
+      ],
+      "why_not_the_other_kind": "Dropping comments is a token rule with many small cases, which a unit test covers exhaustively and cheaply."
+    },
+    {
+      "kind": "unit",
+      "title": "An obsolete route before the addr-spec is dropped",
+      "rule": "In an angle address, an @ and everything up to the next colon is a route and is dropped, so <@node.test:mary@example.net> reads as mary@example.net.",
+      "unit": "packages/core/src/read/address.ts (readAddresses)",
+      "proves": [
+        "routes dropped (RFC 5322 4.4, obs-route)",
+        "toy 01a18fb8: postal-mime returned @node.test:mary@example.net as the address"
+      ],
+      "why_not_the_other_kind": "The route is one grammar branch; a unit test isolates it from the rest of a message."
+    },
+    {
+      "kind": "unit",
+      "title": "Empty list elements are skipped, and an empty value is an empty list",
+      "rule": "Commas with nothing between them, in an address list or among a group's members, add no element, and an empty field value is an empty list.",
+      "unit": "packages/core/src/read/address.ts (readAddresses)",
+      "proves": [
+        "empty list elements skipped (RFC 5322 4.4, obs-addr-list, obs-group-list)",
+        "A.6.1: 'Mary Smith <@node.test:mary@example.net>, , jdoe@test  . example' reads as two mailboxes"
+      ],
+      "why_not_the_other_kind": "List splitting is pure logic over tokens; no user action reaches it any differently."
+    },
+    {
+      "kind": "unit",
+      "title": "A group is kept with its members, an empty group with none",
+      "rule": "A phrase, a colon, mailboxes separated by commas and a closing semicolon read as one group named by the phrase holding those mailboxes in order; 'Undisclosed recipients:;' is a group with no members.",
+      "unit": "packages/core/src/read/address.ts (readAddresses)",
+      "proves": [
+        "groups kept with their members (RFC 5322 3.4)",
+        "A.1.3 and A.5: groups 'A Group' with three members, 'Undisclosed recipients' and 'Hidden recipients' with none",
+        "toy 01a18fb8: postal-mime added a member ')' to the empty A.5 group and a stray mailbox after A Group"
+      ],
+      "why_not_the_other_kind": "The group grammar is a rule over tokens, best proved directly on its inputs."
+    },
+    {
+      "kind": "unit",
+      "title": "A quoted local part and a domain literal are returned as written",
+      "rule": "A local part keeps its quotes and a domain literal its brackets, so \"john doe\"@example.com and jdoe@[192.0.2.1] read with local '\"john doe\"' and domain '[192.0.2.1]'.",
+      "unit": "packages/core/src/read/address.ts (readAddresses)",
+      "proves": [
+        "mailboxes as RFC 5322 3.4.1 defines the addr-spec",
+        "a local part compares exactly: it can only if it is kept as written"
+      ],
+      "why_not_the_other_kind": "Keeping the written form is a token rule; a user never sees it apart from the address it yields."
+    },
+    {
+      "kind": "unit",
+      "title": "A value that fits no address grammar reads as null, never as an invented address",
+      "rule": "readAddresses returns null when lexing fails (an unclosed comment, quoted string or literal) or any list element fits no mailbox or group, as with '<<<>>> ,,, @@@', 'lone@' and 'G: <bad;'.",
+      "unit": "packages/core/src/read/address.ts (readAddresses)",
+      "proves": [
+        "as RFC 5322 3.4 and 4.4 define them: what fits neither grammar is not a mailbox",
+        "toy 01a18fb8: postal-mime read the m6 garbage From as address '<' with name '>>' and reported no problem"
+      ],
+      "why_not_the_other_kind": "Rejection is a property of the parser over many bad strings, which a unit test enumerates."
+    },
+    {
+      "kind": "unit",
+      "title": "Two mailboxes are the same when their domains match without ASCII case and their local parts match exactly",
+      "rule": "sameMailbox(a, b) is true when the domains are equal after folding A to Z only and the local parts are equal byte for byte, so Jdoe@Example.COM and Jdoe@example.com match, and jdoe@example.com and Jdoe@example.com do not.",
+      "unit": "packages/core/src/read/address.ts (sameMailbox)",
+      "proves": [
+        "A domain compares without regard to case; a local part compares exactly (RFC 5322 3.4.1)"
+      ],
+      "why_not_the_other_kind": "A comparison is a pure function of two values; no fixture or user action is needed to prove it."
+    }
+  ],
+  "failure_ways": [
+    { "way": "readMessage does not pass one of the six fields (for example Reply-To or Bcc) through readAddresses, or passes the wrong field", "caught_by": "A received message shows who it is from and who it went to, whatever RFC 5322 form the sender used (Reply-To through a2-2-reply; Bcc only if a fixture carries it, see gaps)" },
+    { "way": "A display name keeps its quotes or backslashes, or its words are joined with the wrong spacing", "caught_by": "A display name is returned unquoted, its words joined as written; no name is null" },
+    { "way": "A mailbox with no display name gets an empty string or the address as its name", "caught_by": "A display name is returned unquoted, its words joined as written; no name is null" },
+    { "way": "A comment or folding white space is left in the name, local part or domain, or a spaced dot splits the domain into a name", "caught_by": "Comments and folding white space inside an address are removed" },
+    { "way": "A route is kept in the address", "caught_by": "An obsolete route before the addr-spec is dropped" },
+    { "way": "An empty list element becomes an empty mailbox, or makes the whole field fail", "caught_by": "Empty list elements are skipped, and an empty value is an empty list" },
+    { "way": "A group is flattened into its members, loses its name, or an empty group gets a member", "caught_by": "A group is kept with its members, an empty group with none" },
+    { "way": "A quoted local part loses its quotes or a domain literal its brackets, so two different addresses read the same", "caught_by": "A quoted local part and a domain literal are returned as written" },
+    { "way": "Garbage in an address field is read as a mailbox instead of null", "caught_by": "A value that fits no address grammar reads as null, never as an invented address" },
+    { "way": "Domains compare with case, or local parts compare without case, or non-ASCII letters are folded", "caught_by": "Two mailboxes are the same when their domains match without ASCII case and their local parts match exactly" },
+    { "way": "The reader lowercases the domain it returns, so the address is no longer as written", "caught_by": "A received message shows who it is from and who it went to, whatever RFC 5322 form the sender used (goldens hold domains as written); no fixture has an uppercase domain, see gaps" },
+    { "way": "An address field that reads as null records no unparsed-value problem", "caught_by": "No SHALL of FR-MAIL-004 breaks: recording problems is the reading form's 'reports, never mends' rule, owned by the requirement for problems" }
+  ],
+  "gaps": [
+    { "failure_way": "readMessage does not read Bcc", "question": "No fixture in research 01a19b44 carries a Bcc field, so nothing proves Bcc is read. Should a Bcc line be added to a fixture (and its golden), or is Bcc on received mail accepted as unproven?" },
+    { "failure_way": "The reader lowercases the domain it returns", "question": "No fixture has a mixed-case domain, so the goldens cannot catch a reader that folds case. Should one fixture carry an uppercase domain so 'returned as written' is proved end to end?" },
+    { "failure_way": "A display name written as RFC 2047 encoded words shows as =?utf-8?...?= in the mailbox", "question": "FR-MAIL-004 says display names are unquoted but not whether encoded words in them are decoded, and the form keeps Subject as written. Does reading leave encoded words in names to the client, or does another requirement decode them?" },
+    { "failure_way": "A group in From or Sender, or two Senders, is read as valid", "question": "The form reads From as mailboxes only and Sender as exactly one (RFC 5322 3.6.2), but FR-MAIL-004 neither states nor traces 3.6.2. Which requirement owns that rule, so its check is written there?" }
+  ],
+  "left_out": [
+    { "candidate": "A unit test of the lexer alone for comments, quoted strings and literals", "why": "Rule 3: the lexer is shared by message-ids and dates and its rules are not this requirement's SHALL; this requirement's comment and white-space clause is proved through readAddresses." },
+    { "candidate": "One behaviour scenario per address field (From, To, Cc, and so on)", "why": "Rule 2: the user does one thing, receiving and reading a message, so the fields go in one scenario." },
+    { "candidate": "One behaviour scenario per Appendix A message", "why": "Rule 2: these are inputs to the same user action, not separate actions; the obsolete forms are proved by the unit tests and wired by the one scenario." },
+    { "candidate": "A behaviour scenario that IMAP ENVELOPE shows the addresses", "why": "Rule 3: the form hands ENVELOPE to IMAP, whose own requirement proves it." },
+    { "candidate": "Checks that a null address field records unparsed-value in readMessage's problems", "why": "Rule 3: problem recording is not a clause of FR-MAIL-004; it belongs to the requirement for problems." },
+    { "candidate": "A check that From must be mailboxes and Sender exactly one", "why": "Rule 3: RFC 5322 3.6.2 is not in this requirement's statement or traces; raised as a gap instead." },
+    { "candidate": "A comparison of address reading with postal-mime or Python email", "why": "Rule 3: toy 01a18fb8 already decided build over depend; the goldens are the oracle." },
+    { "candidate": "A real-world mail corpus check", "why": "Rule 3: no corpus exists (01a19b44 and 01a19b46 mark it unverified); it is a research step, not a check of this SHALL." },
+    { "candidate": "A unit test that canonicalLocal is never used in reading", "why": "Rule 3: the sameMailbox unit test already fails if local parts are folded; a test of an absence adds nothing." }
+  ]
+}

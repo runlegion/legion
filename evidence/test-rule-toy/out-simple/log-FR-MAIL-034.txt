@@ -1,0 +1,28 @@
+I wrote the verification to `evidence/test-rule-toy/out/out-FR-MAIL-034.json`. It passes a JSON check and is not committed.
+
+**Counts:** 3 behaviour and 8 unit, 11 checks in all. The file also lists 23 failure ways, 4 gaps and 11 left out.
+
+**Behaviour scenarios**, one per thing a person does:
+- New mail reaches every open mail app under one rising UID.
+- A message deleted on one device stays readable on another until that device is told.
+- A message marked read on one device shows read on another.
+
+**Units**, all in `packages/cloudflare/src/imap-objects.ts`:
+- UIDs rise and are never reused after expunge.
+- A fresh mailbox object takes a greater UID validity, per RFC 3501 2.3.1.1.
+- A delivery that commits behind the newest id is pulled exactly once. This also covers a burst of more than 100 deliveries inside the ten-minute window; if paging were wrong, every pull would reread the first 100 rows and lose the rest.
+- One bad delivery is skipped and later ones still pull.
+- An expunged row is still served, and the row outlives its bytes.
+- Every change tells every registered session.
+- Nothing waits for a tell.
+- An untold commit is told by the next alarm.
+
+**Gaps for the spec author:**
+1. The statement says a late delivery is never lost, but the form's cursor loses one that commits more than ten minutes behind the newest id.
+2. The form stores the Message-ID as plain text, and toy 01a1a4ad found that deleted text survives in the SQLite files. The spec has to say which fields the row kept after erasure may hold.
+3. A skip for an already-held Message-ID can hide different mail. Does that count as a lost delivery?
+4. The statement sets no limit on how soon a session is told. The alarm allows five minutes, while the form expects Apple Mail to hear new mail within a minute.
+
+**Least sure:** "A message marked read on one device shows read on another." Marking read is something a person does, and "any change" covers flag changes, so rule 2 admits it. But the statement's SHALLs are about deliveries, UIDs and expunge. The unit "Every change tells every registered session" already proves that `setFlags` tells, so this scenario may belong to another requirement about flags.
+
+I cite nothing from decision `01a1a48e-3611…`, which `traces_to` names but which was not among the inputs.

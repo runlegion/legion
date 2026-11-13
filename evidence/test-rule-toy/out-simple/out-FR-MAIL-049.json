@@ -1,0 +1,120 @@
+{
+  "requirement": "FR-MAIL-049",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "A deployer revokes a mailbox and every session logged in to it is told and closed",
+      "gherkin": "Scenario: A deployer revokes a mailbox and every session logged in to it is told and closed\n  Given mailbox \"team@example.test\" is reached by two valid passwords, for users \"ana\" and \"ben\"\n  And \"ana\" has an IMAP session that logged in and selected INBOX\n  And \"ana\" has an IMAP session that logged in and selected nothing\n  And \"ana\" has an IMAP session that logged in, selected INBOX and was then evicted to hibernation\n  And \"ana\" has a submission session that logged in\n  And \"ben\" has an IMAP session that logged in and selected INBOX\n  And mailbox \"other@example.test\" has an IMAP session that logged in and selected INBOX\n  When the deployer revokes mailbox \"team@example.test\"\n  Then each of the 4 IMAP sessions on \"team@example.test\" receives an untagged BYE and then its connection closes\n  And the submission session on \"team@example.test\" is told and its connection closes\n  And no session on \"team@example.test\" answers a further command\n  And the session on \"other@example.test\" still answers FETCH\n  And \"ben\" logs in again with the same password and selects INBOX",
+      "proves": [
+        "FR-MAIL-049: Mail SHALL let a deployer revoke a mailbox: every IMAP and submission session logged in to it, awake or hibernating, is told and closed",
+        "FR-MAIL-049: a session registers with its mailbox at login and not at SELECT (the unselected session is closed)",
+        "FR-MAIL-049: Revocation SHALL be per mailbox, so another valid password's session also closes and reconnects",
+        "toy 01a1a4c4: a logged-in unselected session survived revocation until sessions registered at login, which then closed 4 of 4",
+        "toy 01a1ae1d: evict(stub, { webSockets: 'hibernate' }) reproduces the runtime's eviction, so the hibernating session is made without waiting"
+      ],
+      "why_not_the_other_kind": "Revocation is one deployer action whose outcome exists only across real sessions, the mailbox object and hibernation together, so only the whole path proves it."
+    },
+    {
+      "kind": "unit",
+      "title": "Revoke tells every registered session even when one fails or hangs",
+      "rule": "ImapMailbox.revoke tells every session registered with the mailbox and counts each as closed or failed, so one session that throws, or whose tell deadline the test fires through the Deadline port, does not stop the rest from being told.",
+      "unit": "ImapMailbox (imap-objects.ts)",
+      "proves": [
+        "FR-MAIL-049: every IMAP and submission session logged in to it is told and closed",
+        "toy 01a1a4c4: ImapMailbox.revoke(): Promise<{ told; closed; failed }>",
+        "toy 01a1ae1d: deadlines behind a port can be fired by the test; the 10 s tell bound in imap-objects.ts needs the Deadline port"
+      ],
+      "why_not_the_other_kind": "Making a real session throw mid-revoke needs a fake session, and the counting and continue-on-failure rule lives in one function."
+    }
+  ],
+  "failure_ways": [
+    {
+      "way": "A session registers at SELECT, so a logged-in unselected session survives revocation and keeps reading mail (the toy saw this 5 of 5).",
+      "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed"
+    },
+    {
+      "way": "A hibernating session is not woken or not found by revoke, and stays open.",
+      "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed"
+    },
+    {
+      "way": "Submission sessions never register with the mailbox, so revoke ends IMAP only.",
+      "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed"
+    },
+    {
+      "way": "A submission session is closed without being told, or is told in a way no client can see.",
+      "caught_by": "Not caught: the statement does not say what 'told' means for submission (see gaps)."
+    },
+    {
+      "way": "Sessions register under the user, so revoke closes only one password's sessions and another password's session stays open.",
+      "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed"
+    },
+    {
+      "way": "Revoke closes sessions on other mailboxes too.",
+      "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed"
+    },
+    {
+      "way": "A session is closed without being told (socket dropped with no BYE), as a reload did in the toy.",
+      "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed"
+    },
+    {
+      "way": "One session throws while being told and revoke stops, leaving later sessions open.",
+      "caught_by": "Revoke tells every registered session even when one fails or hangs"
+    },
+    {
+      "way": "A session never answers the tell, so revoke stalls on it and later sessions are never told.",
+      "caught_by": "Revoke tells every registered session even when one fails or hangs"
+    },
+    {
+      "way": "A test or document promises a close time (the toy's 1 s claim was refuted; closes reached 8.2 s).",
+      "caught_by": "No check can prove a promise is absent; the scenario keeps the SHALL by awaiting close as an event and asserting no duration."
+    },
+    {
+      "way": "A login in flight when revoke runs completes afterwards and registers a session that was never told.",
+      "caught_by": "Not caught: the statement does not say whether such a session must close (see gaps)."
+    }
+  ],
+  "gaps": [
+    {
+      "failure_way": "A login in flight when revoke runs completes afterwards and registers a session that was never told.",
+      "question": "Must a session whose login completes during a revoke also be closed, or is it a new session that may stay? The toy did not measure this case."
+    },
+    {
+      "failure_way": "A submission session is closed without being told, or is told in a way no client can see.",
+      "question": "What does 'told' mean for a submission session: a 421 reply before close, or something else? Neither toy measured submission sessions."
+    },
+    {
+      "failure_way": "The deployer cannot tell whether revocation took effect.",
+      "question": "How does the deployer revoke (command, route or API), and what do they see when some sessions are reported failed?"
+    },
+    {
+      "failure_way": "A revoked mailbox's sessions reconnect at once with the same passwords, so revocation ends no access.",
+      "question": "Does revoking a mailbox only end current sessions (the statement's 'closes and reconnects' implies this), or must it also refuse new logins until the deployer changes the credentials? Basic has no revocation event and its old password still worked after a reload."
+    }
+  ],
+  "left_out": [
+    {
+      "candidate": "A unit test that ImapSession registers at login and not at SELECT",
+      "why": "Rule 2: when registration happens is wiring proven by the scenario's unselected session, not a rule with its own logic."
+    },
+    {
+      "candidate": "A unit test that ImapSession.revoked sends BYE before webSocketClose",
+      "why": "Rule 2: the order is observed on the wire in the scenario; a unit test would repeat it."
+    },
+    {
+      "candidate": "Separate scenarios for selected, unselected, hibernating, submission and other-password sessions",
+      "why": "Rule 2: they are one deployer action, so they are one scenario."
+    },
+    {
+      "candidate": "A check that closes finish within a bound",
+      "why": "Rule 3, and the SHALL itself: Mail promises no close time."
+    },
+    {
+      "candidate": "A scenario that ben's client reconnects on its own after the close",
+      "why": "Rule 3: reconnecting is the mail app's behaviour; the scenario shows the login is still accepted."
+    },
+    {
+      "candidate": "Running the scenario once per login strategy (basic, RESP, KV)",
+      "why": "Rule 3: revocation sits outside the strategy behind the login port, and the strategies' contract suite belongs to their own requirements."
+    }
+  ]
+}

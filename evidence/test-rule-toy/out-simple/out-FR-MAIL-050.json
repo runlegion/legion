@@ -1,0 +1,133 @@
+{
+  "requirement": "FR-MAIL-050",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "A person reads mail from their own mail app with a generated password, and reconnecting often is never refused",
+      "gherkin": "Scenario: A person reads mail from their mail app with a generated password\n  Given the deployer has generated a password for the user \"ana\" on mailbox \"support\"\n  And the deployer has put the generated list in a platform secret\n  And mail's login is @rafters/mail-auth-basic wrapped in the limiter, running in workerd\n  When ana's mail app connects and logs in as \"ana\" with that password\n  And selects INBOX and fetches a message\n  Then the message is returned\n  When ana's mail app disconnects and logs in again 11 more times from the same address within 5 minutes\n  Then every login succeeds\n  And no stored state, in D1 or any state file, contains the password, its hash or the list",
+      "proves": [
+        "SHALL offer @rafters/mail-auth-basic, checking a password against a list in a platform secret",
+        "SHALL: a correct password gets its slot back, so a mail app that reconnects often is not refused",
+        "SHALL: no credential reaches stored state",
+        "toy 01a1a4c4: imaplib logged in, selected and fetched through the real session with no credential in D1 or any of 4,786 state files",
+        "toy 01a1a4c4: with refund on success, correct passwords past 10 passed"
+      ],
+      "why_not_the_other_kind": "Logging in from a mail app crosses the secret, the strategy, the limiter, the IMAP session and stored state, so only the whole path can show the person gets their mail and nothing is stored."
+    },
+    {
+      "kind": "behaviour",
+      "title": "Someone guessing passwords from one address is held at 10 attempts until the window ends",
+      "gherkin": "Scenario: Wrong guesses from one address stop at the limit\n  Given mail's login is @rafters/mail-auth-basic wrapped in the limiter, running in workerd\n  And the limiter's clock is controlled by the test\n  When a client at address 203.0.113.7 tries 10 logins with wrong passwords and unknown users\n  Then each is answered NO\n  When the same client tries an 11th login, with the correct password\n  Then it is refused and no password is hashed\n  When the test moves the clock past the 5-minute window\n  And the client logs in with the correct password\n  Then the login succeeds",
+      "proves": [
+        "SHALL: a limit of 10 attempts per client address in a 5-minute window",
+        "SHALL: wrong guesses stay at the limit",
+        "toy 01a1a4c4: refusals hashed 0",
+        "toy 01a1ae1d: deadlines behind a port can be fired by the test, so no check waits 5 minutes"
+      ],
+      "why_not_the_other_kind": "The guesser meets the limit through the real session, and only the full path shows what the client sees when refused and that a refusal reaches no strategy."
+    },
+    {
+      "kind": "behaviour",
+      "title": "A strategy author runs the contract suite in workerd and it catches a strategy that skips work for unknown users",
+      "gherkin": "Scenario: A strategy author proves their strategy against the contract suite\n  Given a strategy author has a login strategy and a work counter it supplies\n  When the author runs the contract suite against @rafters/mail-auth-basic in workerd\n  Then every contract clause passes\n  And the counter reads the same work for an unknown user as for a wrong password\n  When the author runs the contract suite against a strategy that returns early for an unknown user\n  Then the suite fails on the work rule, naming the unknown user and the wrong password counts",
+      "proves": [
+        "SHALL offer a contract suite any strategy can run in workerd",
+        "SHALL: the work rule is that an unknown user and a wrong password do the same work, by a counter the strategy supplies",
+        "toy 01a1a4c4: 15 of 15 on basic, RESP and local Cloudflare KV, plain and wrapped, in workerd"
+      ],
+      "why_not_the_other_kind": "The suite is itself what the author uses, and running it in workerd against a passing and a failing strategy is the only way to show it both runs there and catches a breach."
+    },
+    {
+      "kind": "unit",
+      "title": "Basic strategy returns the mailbox only for a matching PBKDF2-SHA256 hash of the client's octets",
+      "rule": "basicStrategy returns the entry's mailbox when PBKDF2-SHA256 at 100,000 iterations of the client's password octets, with the entry's salt, equals the entry's hash, and null otherwise.",
+      "unit": "@rafters/mail-auth-basic: basicStrategy",
+      "proves": [
+        "SHALL check a password against a list with PBKDF2-SHA256 at 100,000 iterations over the client's octets",
+        "toy 01a1a4c4 must_hold: hash the client's octets, since octets() truncates above 0xFF"
+      ],
+      "why_not_the_other_kind": "Whether a hash matches is a pure function of the list and the octets, with no user action of its own."
+    },
+    {
+      "kind": "unit",
+      "title": "Basic strategy hashes exactly once per attempt, whether or not the user exists",
+      "rule": "For a known user with the right password, a known user with a wrong one, and an unknown user, basicStrategy runs exactly one PBKDF2 hash per call.",
+      "unit": "@rafters/mail-auth-basic: basicStrategy",
+      "proves": [
+        "SHALL: costing one hash per attempt whether or not the user exists",
+        "toy 01a1a4c4: 516-753 percent timing gap with no dummy hash"
+      ],
+      "why_not_the_other_kind": "The contract suite proves equal work by the strategy's own counter, but only a count beside the code proves the amount is one hash."
+    },
+    {
+      "kind": "unit",
+      "title": "A generated password verifies through the basic strategy when sent as the client's octets",
+      "rule": "The password generator writes an entry of user, mailbox, salt, 100,000 iterations and hash whose password, sent as the client would send it, verifies through basicStrategy, and it takes no password as input.",
+      "unit": "@rafters/mail-auth-basic: password generator",
+      "proves": [
+        "SHALL: passwords that are generated and never chosen",
+        "toy 01a1a4c4 must_hold: generators hash UTF-8 and the strategy hashes the client's octets, so the two must agree"
+      ],
+      "why_not_the_other_kind": "Agreement between the generator's encoding and the strategy's is logic between two functions; the deployer's use of it is already the opening of the login scenario."
+    },
+    {
+      "kind": "unit",
+      "title": "The limiter grants at most 10 takes per address per 5-minute window, even under a race",
+      "rule": "For one address, take() succeeds at most 10 times in a 5-minute window, including 50 concurrent takes, refund() returns one slot, and the window's end restores all 10.",
+      "unit": "the limiter (LimiterPort implementation), run in workerd with a test-controlled clock",
+      "proves": [
+        "SHALL: a limit of 10 attempts per client address in a 5-minute window",
+        "toy 01a1a4c4: 15 races of 50 passed exactly 10, take is one synchronous transaction",
+        "toy 01a1ae1d: time behind a port can be fired by the test"
+      ],
+      "why_not_the_other_kind": "A race of 50 and a window boundary cannot be driven from a mail app reliably; they are counting logic in the limiter's transaction."
+    },
+    {
+      "kind": "unit",
+      "title": "The limited wrapper refunds a correct password only, and a refusal runs no login",
+      "rule": "limited(limiterFor, login) refunds the address's slot when login returns a mailbox, keeps it when login returns null, and never calls login when take() refuses.",
+      "unit": "limited (the wrapper around any Login)",
+      "proves": [
+        "SHALL: a limit around any strategy, from which a correct password gets its slot back",
+        "SHALL: wrong guesses stay at the limit",
+        "toy 01a1a4c4 unverified claim: refund on success only lets extra correct passwords through; wrong guesses under refund were not counted"
+      ],
+      "why_not_the_other_kind": "Run with a fake Login and a fake limiter, it proves the wrapper holds for any strategy, which a scenario on basic alone cannot."
+    }
+  ],
+  "failure_ways": [
+    { "way": "The basic strategy hashes the password as UTF-8 instead of the client's octets, so a non-ASCII password never matches", "caught_by": "Basic strategy returns the mailbox only for a matching PBKDF2-SHA256 hash of the client's octets" },
+    { "way": "The strategy uses fewer iterations or another hash, weakening generated passwords", "caught_by": "Basic strategy returns the mailbox only for a matching PBKDF2-SHA256 hash of the client's octets (entries at 100,000), and the generator unit; an entry at another count is a gap" },
+    { "way": "An unknown user returns before hashing, so timing tells which users exist", "caught_by": "Basic strategy hashes exactly once per attempt, whether or not the user exists; and the contract suite scenario" },
+    { "way": "The generator's encoding differs from the strategy's, so a generated password never logs in", "caught_by": "A generated password verifies through the basic strategy when sent as the client's octets" },
+    { "way": "A deployer can supply a chosen password", "caught_by": "A generated password verifies through the basic strategy (the generator takes no password); nothing stops a hand-written list, see gaps" },
+    { "way": "The contract suite does not run in workerd, or passes a strategy that skips work for unknown users", "caught_by": "A strategy author runs the contract suite in workerd and it catches a strategy that skips work for unknown users" },
+    { "way": "Concurrent attempts slip past 10 because take is not one transaction", "caught_by": "The limiter grants at most 10 takes per address per 5-minute window, even under a race" },
+    { "way": "The window never resets, locking an address out for good", "caught_by": "The limiter grants at most 10 takes per address per 5-minute window; and the guessing scenario's clock move" },
+    { "way": "Refund fires on a wrong password, so guesses are unlimited", "caught_by": "The limited wrapper refunds a correct password only, and a refusal runs no login" },
+    { "way": "No refund on success, so a mail app reconnecting more than 10 times in 5 minutes is refused", "caught_by": "A person reads mail from their own mail app with a generated password, and reconnecting often is never refused" },
+    { "way": "A refused attempt still runs the strategy, costing a hash", "caught_by": "The limited wrapper refunds a correct password only, and a refusal runs no login; and the guessing scenario" },
+    { "way": "The limiter is built into the basic strategy and does not wrap other strategies", "caught_by": "The limited wrapper refunds a correct password only (run with a fake Login)" },
+    { "way": "The password, its hash or the list is written to D1 or a state file", "caught_by": "A person reads mail from their own mail app with a generated password (the state scan at its end)" },
+    { "way": "The package ships under another licence or imports from the service layer", "caught_by": "No check: neither a unit nor a scenario proves a licence or an import boundary, see gaps" }
+  ],
+  "gaps": [
+    { "failure_way": "The package ships under another licence or imports from the service layer", "question": "How is 'MIT and imports nothing from the service layer' proven: by a build constraint outside these checks, or by a scenario in which a strategy author installs only the auth packages, and which?" },
+    { "failure_way": "A deployer can supply a chosen password", "question": "What makes a password 'never chosen': only that the package offers a generator and no way to set one, or must the strategy refuse entries the generator did not make? What length and alphabet must a generated password have?" },
+    { "failure_way": "The strategy uses fewer iterations or another hash", "question": "Must the basic strategy refuse an entry whose iterations are not 100,000, or only cap it at 100,000 as the toy's schema did?" },
+    { "failure_way": "The window never resets, or resets at the wrong time", "question": "Is the 5-minute window fixed per address from the first attempt, or sliding over the last 5 minutes? The guessing scenario's clock move depends on it." },
+    { "failure_way": "A refused client is told the wrong thing", "question": "What does the client see when the limiter refuses: the same NO as a wrong password, which the toy says counts toward the session's 3-strike BYE, or something distinct?" },
+    { "failure_way": "The limiter keys on the wrong address", "question": "What is the client address behind a TCP-to-WebSocket edge: the connecting IP the platform reports, or something else?" }
+  ],
+  "left_out": [
+    { "candidate": "Timing comparison of unknown user against wrong password (the toy's percent gap)", "why": "Rule 3: the requirement makes work the measure by a counter, and the no-timing toy says no test passes or fails on how long something took." },
+    { "candidate": "Revocation closes sessions", "why": "Rule 3: no SHALL in FR-MAIL-050 names revocation; it belongs to another requirement." },
+    { "candidate": "A user of 502 bytes or more throws a KV get (contract clause)", "why": "Rule 3: KV is not this requirement and no SHALL here names user length." },
+    { "candidate": "A separate scenario for the deployer generating passwords and setting the secret", "why": "Rule 2: it is the opening of the person's login, the one complete behaviour it serves." },
+    { "candidate": "A separate scenario for a mail app reconnecting often", "why": "Rule 2: reconnecting is part of the person using their mail app, so it lives in that scenario." },
+    { "candidate": "A unit that no credential is written by the strategy", "why": "Rule 3: stored state is only observable at the end of the whole login, which the scenario already scans." },
+    { "candidate": "LOGIN latency and hash CPU against the Free plan's 10 ms", "why": "Rule 3: no SHALL names a latency or CPU bound." },
+    { "candidate": "Secret size: about 27 basic entries fit in 5 KB", "why": "Rule 3: no SHALL names a list size." },
+    { "candidate": "Store down or hung gives EOF instead of NO", "why": "Rule 3: basic reads a secret, not a store, and no SHALL here names store failure." }
+  ]
+}

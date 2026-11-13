@@ -1,0 +1,25 @@
+I wrote the verification for FR-MAIL-050 to `evidence/test-rule-toy/out/out-FR-MAIL-050.json`, and it parses as valid JSON.
+
+**Counts:** 8 checks, 3 behaviour and 5 unit. The file also lists 14 failure ways, 6 gaps and 9 left-out candidates.
+
+**Behaviour, one per thing a user does:**
+1. A person reads mail from their own mail app with a generated password. The scenario starts with the deployer generating the password and putting the list in the secret. It then logs in 11 more times within 5 minutes and is never refused, and ends by scanning stored state for any credential.
+2. Someone guessing passwords from one address is stopped after 10 attempts. The 11th attempt is refused without hashing, even with the right password. After the test moves the clock past the window, the right password logs in.
+3. A strategy author runs the contract suite in workerd. It passes the basic login and fails a strategy that returns early for an unknown user.
+
+**Unit, beside the code:**
+- The basic login's hash check: PBKDF2-SHA256 at 100,000 iterations over the client's octets.
+- The basic login hashes exactly once per attempt, whether or not the user exists.
+- A password the generator makes verifies through the basic login.
+- The limiter allows at most 10 attempts per address per window, even with 50 at once.
+- The wrapper that applies the limit to any login gives a correct password its slot back and never runs the login when refused.
+
+**Least sure:** the generator unit. The statement says passwords are "generated and never chosen" but never names a generator or what makes a password unchosen. The check assumes the package ships one that takes no password as input. If the spec author decides otherwise, this check goes.
+
+**Unproven:** nothing in the set proves that the package is MIT and imports nothing from the service layer. Neither a unit nor a scenario can show a licence or an import boundary, so I listed it as a gap rather than adding a third kind of check.
+
+The other gaps for the spec author are:
+- whether the 5-minute window is fixed or sliding;
+- what a refused client sees, since the toy says a refusal counts toward the session's 3-strike disconnect;
+- whether the login must refuse an entry at a different iteration count;
+- what the client address is behind the edge.

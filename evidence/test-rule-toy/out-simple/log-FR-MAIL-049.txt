@@ -1,0 +1,26 @@
+I wrote the verification for FR-MAIL-049 to `out/out-FR-MAIL-049.json`. It has two checks: one behaviour and one unit.
+
+**Behaviour: a deployer revokes a mailbox and every session logged in to it is told and closed.** This is one end-to-end scenario. Before the revoke, the mailbox has five sessions open:
+- three IMAP sessions for the first user: one that selected INBOX, one that selected nothing, and one that was evicted to hibernation;
+- one submission session;
+- one IMAP session for a second valid password.
+
+A sixth session on a different mailbox serves as a control. After the revoke:
+- each IMAP session on the mailbox gets a BYE and is closed;
+- no session on the mailbox answers another command;
+- the control session still answers;
+- the second user can log in again.
+
+No step measures or waits on a duration. The test waits for each connection to close, and makes the hibernating session by forced eviction rather than by waiting.
+
+**Unit: revoke tells every session registered with the mailbox, even when one fails or hangs.** This test belongs to the mailbox module, `ImapMailbox` in `imap-objects.ts`. If one session throws, or never answers before its deadline, the rest are still told. The test fires that deadline itself rather than waiting it out.
+
+The file lists four gaps for the spec author:
+- whether a login that completes during a revoke must also be closed;
+- what "told" means for a submission session, since neither toy measured submission;
+- how the deployer starts a revoke, and what they see if some sessions fail;
+- whether revoking only ends current sessions or must also refuse new logins.
+
+The scenario's submission step ("is told and its connection closes") cannot be built until the second gap is answered.
+
+**Least sure it belongs: the unit check.** The statement says every session "is told and closed". It never says what happens when one session fails or hangs. The unit check enforces that the rest are still told, which reads more into "every" than the statement says. If the spec author answers that differently, the check should go.

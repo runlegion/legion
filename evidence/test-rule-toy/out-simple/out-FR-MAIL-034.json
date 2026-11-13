@@ -1,0 +1,168 @@
+{
+  "requirement": "FR-MAIL-034",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "New mail reaches every open mail app under one rising UID",
+      "gherkin": "Scenario: New mail reaches every open mail app under one rising UID\n  Given Sean's mailbox holds two messages\n  And his Mac is idling on INBOX\n  And his phone has INBOX selected\n  When a message is delivered to his mailbox\n  Then the Mac is told \"* 3 EXISTS\" without sending a command\n  And the phone is told \"* 3 EXISTS\" on its next NOOP\n  And both fetch message 3 under the same UID, greater than every UID before it",
+      "proves": [
+        "SHALL keep each mailbox in one Durable Object that pulls deliveries into SQLite, assigning UIDs that only rise",
+        "SHALL tell every registered IMAP session of any change",
+        "toy.01a19d7e: a ping tells every IDLE session, and the mailbox object never reuses a UID"
+      ],
+      "why_not_the_other_kind": "Receiving mail across two apps runs the receiver, the ping, the pull, the tell and both sessions end to end, which no single module holds."
+    },
+    {
+      "kind": "behaviour",
+      "title": "A message deleted on one device stays readable on another until it is told",
+      "gherkin": "Scenario: A message deleted on one device stays readable on another until it is told\n  Given Sean's Mac and phone both have INBOX selected\n  And each was told that message 1 has a UID\n  When he deletes message 1 on the phone with STORE +FLAGS (\\Deleted) and EXPUNGE\n  Then the Mac's FETCH 1 (UID BODY[]) still returns that UID and the message's bytes\n  And the Mac's next NOOP tells \"* 1 EXPUNGE\"\n  And a fresh SELECT on either device no longer lists that UID",
+      "proves": [
+        "SHALL keep an expunged message's bytes readable until they are erased (FR-MAIL-053)",
+        "SHALL tell every registered IMAP session of any change",
+        "form.01a19daa idea 4: expunge hides and does not erase, so another session can still read the message it was told about"
+      ],
+      "why_not_the_other_kind": "Deleting on one device and reading on another is a person's action across two live sessions and the mailbox, start to finish."
+    },
+    {
+      "kind": "behaviour",
+      "title": "A message marked read on one device shows read on another",
+      "gherkin": "Scenario: A message marked read on one device shows read on another\n  Given Sean's Mac is idling on INBOX\n  And his phone has INBOX selected\n  When he reads message 1 on the phone, which stores \\Seen on it\n  Then the Mac is told message 1's flags include \\Seen without sending a command",
+      "proves": [
+        "SHALL tell every registered IMAP session of any change"
+      ],
+      "why_not_the_other_kind": "Marking mail read is something a person does, and its effect is seen on a second device through the whole chain."
+    },
+    {
+      "kind": "unit",
+      "title": "UIDs rise and are never reused after expunge",
+      "rule": "Each added message takes a UID greater than every UID the mailbox has assigned, including UIDs of expunged rows, and open reports uidNext as sqlite_sequence.seq + 1.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox)",
+      "proves": [
+        "SHALL assign UIDs that only rise",
+        "form.01a19daa claim: AUTOINCREMENT with expunged rows kept never reuses a UID"
+      ],
+      "why_not_the_other_kind": "UID assignment is the mailbox object's own logic, and no person does anything distinct to trigger it."
+    },
+    {
+      "kind": "unit",
+      "title": "A fresh mailbox object takes a greater UID validity",
+      "rule": "A mailbox object whose tables are created anew sets uid_validity from the current time in seconds, greater than the value of any earlier object for the same mailbox.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox)",
+      "proves": [
+        "SHALL assign UIDs that only rise",
+        "rfc3501.2.3.1.1: a mailbox whose UIDs fail to persist must take a greater UIDVALIDITY"
+      ],
+      "why_not_the_other_kind": "A rebuilt object is an internal event with no user action of its own."
+    },
+    {
+      "kind": "unit",
+      "title": "A delivery committing behind the newest id is pulled once",
+      "rule": "A delivery whose UUIDv7 id is older than the newest id already seen, by less than ten minutes, and that commits after it, is added exactly once, as is every row of a burst of more than 100 deliveries inside those ten minutes.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox pull)",
+      "proves": [
+        "SHALL never lose a delivery that commits late",
+        "form.01a19daa Pulling: the cursor stands ten minutes behind the newest id seen, dashed, and pages by the last id read"
+      ],
+      "why_not_the_other_kind": "Commit order against id order is timing inside the pull; the person only receives mail, which the first scenario already covers."
+    },
+    {
+      "kind": "unit",
+      "title": "One bad delivery is skipped and later ones still pull",
+      "rule": "A delivery whose blob is gone, or whose read or insert fails, gets a skipped row (no-blob or unreadable) and every later delivery, in this pull and the next, is still added.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox pull)",
+      "proves": [
+        "SHALL never let one bad message stop later ones",
+        "form.01a19daa Pulling: skipped rows for no-blob and unreadable"
+      ],
+      "why_not_the_other_kind": "A bad message comes from a stranger or from damage, not from anything the mailbox's owner does."
+    },
+    {
+      "kind": "unit",
+      "title": "An expunged row is still served, and its row outlives its bytes",
+      "rule": "held and bytes serve a row whether expunged or not, held answers for 101 UIDs within the 100-parameter limit, open never lists an expunged row, and once the blob is gone held still returns the row while bytes returns null.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox held, bytes, open)",
+      "proves": [
+        "SHALL keep an expunged message's bytes readable until they are erased (FR-MAIL-053) and its row after that",
+        "toy.01a1a4ad must_hold: keep the tombstone, since removing the row closes a woken session with 1011"
+      ],
+      "why_not_the_other_kind": "The person's side of this is the second scenario; the row outliving its bytes follows erasure, which no person triggers here."
+    },
+    {
+      "kind": "unit",
+      "title": "Every change tells every registered session",
+      "rule": "Any commit that adds, flags or expunges a row, from open, ping, setFlags, expunge or the alarm, calls changed() on every registered session; a false forgets that name, and a rejection keeps it while the others are still told.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox tell)",
+      "proves": [
+        "SHALL tell every registered IMAP session of any change",
+        "form.01a19daa Telling: whenever a pull adds a row, from any caller, every registered session is told"
+      ],
+      "why_not_the_other_kind": "Which caller triggers a tell, and what a refused tell does to the registry, cannot be reached from the client side."
+    },
+    {
+      "kind": "unit",
+      "title": "Nothing waits for a tell",
+      "rule": "With a session whose changed() sits behind a real serial queue, open, ping, setFlags, expunge and alarm each return while a tell is outstanding, and a changed() that never settles is cut off at 10 seconds without stopping later passes.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox tell)",
+      "proves": [
+        "SHALL tell every registered IMAP session of any change without ever waiting for the telling",
+        "form.01a19daa provenance: a tell cycle hung a mailbox and every ping for good on local workerd"
+      ],
+      "why_not_the_other_kind": "The hang is a cycle between a session's queue and the mailbox's calls, which only a fake session with a real queue can hold in place."
+    },
+    {
+      "kind": "unit",
+      "title": "An untold commit is told by the next alarm",
+      "rule": "A commit sets tell-owed in its own transaction, and alarm() first sets the next alarm while a session is registered, then pulls, then tells when tell-owed is set, so a lost tell, a lost ping or a pull that throws still ends in a tell.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (ImapMailbox alarm)",
+      "proves": [
+        "SHALL tell every registered IMAP session of any change",
+        "form.01a19daa Telling: a commit that has not been told must not stay untold"
+      ],
+      "why_not_the_other_kind": "A lost tell or a D1 outage is an internal failure that no person can cause on purpose."
+    }
+  ],
+  "failure_ways": [
+    { "way": "Two writers assign UIDs for one mailbox, so two apps see one message under different UIDs.", "caught_by": "New mail reaches every open mail app under one rising UID" },
+    { "way": "An expunged row is deleted, so AUTOINCREMENT state or a later insert gives an old UID to new mail.", "caught_by": "UIDs rise and are never reused after expunge" },
+    { "way": "A rebuilt mailbox object restarts UIDs at 1 under the old UID validity, so a client sees UIDs go backwards.", "caught_by": "A fresh mailbox object takes a greater UID validity" },
+    { "way": "The cursor stands at the newest id, so a large message that commits after a later small one is never read.", "caught_by": "A delivery committing behind the newest id is pulled once" },
+    { "way": "The cursor is formatted without the dash, so it compares wrongly against delivery ids and skips rows.", "caught_by": "A delivery committing behind the newest id is pulled once" },
+    { "way": "More than 100 deliveries land inside ten minutes and each pull rereads the same first page, never reaching row 101.", "caught_by": "A delivery committing behind the newest id is pulled once" },
+    { "way": "The lagging cursor rereads a pulled delivery and adds it again under a new UID.", "caught_by": "A delivery committing behind the newest id is pulled once" },
+    { "way": "A delivery whose blob is gone throws, and every later pull throws at the same row.", "caught_by": "One bad delivery is skipped and later ones still pull" },
+    { "way": "A malformed message from a stranger fails to read or insert, and blocks every later pull.", "caught_by": "One bad delivery is skipped and later ones still pull" },
+    { "way": "Expunge deletes the row or the blob, so a session told of the message can no longer read it.", "caught_by": "A message deleted on one device stays readable on another until it is told" },
+    { "way": "held binds one parameter per UID, so a mailbox of over 100 messages cannot serve its rows.", "caught_by": "An expunged row is still served, and its row outlives its bytes" },
+    { "way": "Erasing the bytes removes the row too, so a woken session restoring its view closes with 1011.", "caught_by": "An expunged row is still served, and its row outlives its bytes" },
+    { "way": "Only a ping tells, so a row pulled by another device's SELECT leaves a session in IDLE unaware.", "caught_by": "Every change tells every registered session" },
+    { "way": "setFlags or expunge commits without telling.", "caught_by": "Every change tells every registered session" },
+    { "way": "A rejected tell removes the session's name, so a live session is never told again.", "caught_by": "Every change tells every registered session" },
+    { "way": "A call awaits its tell, which waits on a session's queue that waits on that call, hanging the mailbox and every ping.", "caught_by": "Nothing waits for a tell" },
+    { "way": "One session's changed() never settles, and the tell pass never finishes, so no later change is told.", "caught_by": "Nothing waits for a tell" },
+    { "way": "The tell in waitUntil is dropped after the commit, and the change is never told.", "caught_by": "An untold commit is told by the next alarm" },
+    { "way": "A D1 outage makes alarm() throw six times, and Cloudflare stops retrying, ending the alarm chain.", "caught_by": "An untold commit is told by the next alarm" },
+    { "way": "A delivery's ping is lost, and a session in IDLE never hears of it.", "caught_by": "An untold commit is told by the next alarm" },
+    { "way": "Flags change on one device and the other device keeps showing the old flags.", "caught_by": "A message marked read on one device shows read on another" },
+    { "way": "A delivery commits more than ten minutes behind the newest id seen.", "caught_by": "No check: the form's cursor loses it by design, against the statement's 'never'; raised as a gap." },
+    { "way": "An empty expunge, sent by every CLOSE, tells every session.", "caught_by": "No SHALL breaks: an extra tell with nothing to report is harmless." }
+  ],
+  "gaps": [
+    { "failure_way": "A delivery commits more than ten minutes behind the newest id seen, and the cursor has passed it.", "question": "The statement says a late commit is never lost, while the form's cursor bounds lateness at ten minutes. Is ten minutes the stated bound, or must a later commit still be found, and how?" },
+    { "failure_way": "After erasure the kept row still holds the Message-ID in plain text, which toy 01a1a4ad found survives deletion in SQLite files.", "question": "Which fields may the row kept after erasure hold (blob key, a keyed hash of the Message-ID, size, internal date, flags), given that the form's messages table stores message_id as plain text?" },
+    { "failure_way": "A second delivery reusing or guessing a held Message-ID is skipped as held-message-id, hiding different mail from the person.", "question": "Does a held-message-id skip of different mail count as a lost delivery under this requirement's title, or is it accepted as the receiving form's 'shown to the person once'?" },
+    { "failure_way": "A tell arrives five minutes late, through the alarm, after a lost ping or tell.", "question": "How soon must a registered session be told of a change? The statement sets no bound, the alarm gives five minutes, and the form's event 3 expects Apple Mail to hear new mail within a minute." }
+  ],
+  "left_out": [
+    { "candidate": "A scenario for a large message that commits after a smaller later one", "why": "Rule 2: no person does this; it is timing inside the pull, proven by a unit under rule 1." },
+    { "candidate": "A scenario for a stranger's malformed message", "why": "Rule 2: the mailbox's owner does nothing; the skip is logic, proven by a unit under rule 1." },
+    { "candidate": "A unit that a held or expunged Message-ID adds no UID and a skipped row", "why": "Rule 3: no SHALL of this statement depends on it; it serves the receiving form's 'shown once'." },
+    { "candidate": "A unit that a Message-ID over 998 octets counts as none", "why": "Rule 3: without it the row is skipped as unreadable and later rows still pull, so no SHALL here breaks." },
+    { "candidate": "A unit that an empty expunge tells nobody", "why": "Rule 3: an extra tell breaks no SHALL." },
+    { "candidate": "A unit that overlapping pulls add each row once and a ping during a pull runs once more", "why": "Rule 3: delivery UNIQUE already stops duplicates and the alarm catches a missed pull; the delay is raised as a gap on timeliness." },
+    { "candidate": "A unit that the cursor never lowers", "why": "Rule 3: a lowered cursor rereads rows that are skipped by delivery, so nothing is lost." },
+    { "candidate": "Resuming a session after eviction in the deletion scenario", "why": "Rule 3: that proves the session requirement's snapshot, not this mailbox; the scenario holds without eviction." },
+    { "candidate": "Event criterion 8: a tell left in waitUntil still arrives on deployed Cloudflare", "why": "Rule 3: a deploy-only fact is neither a unit nor a user scenario." },
+    { "candidate": "The test SQLite wrapper rejecting more than 100 parameters and 2 MB rows", "why": "Rule 3: it is harness, not a check; the held unit relies on it." },
+    { "candidate": "Session object checks (save before send, ending order, frames of 1 MiB)", "why": "Rule 3: they prove the session object's requirement, not this one." }
+  ]
+}
