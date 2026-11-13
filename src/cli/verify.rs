@@ -928,7 +928,14 @@ pub(crate) fn resolve_spec_criteria(
                 criteria.push(verify::SpecCriterion {
                     id: id.to_string(),
                     text: text.to_string(),
-                    unit: entry.get("evidence").and_then(|v| v.as_str()) == Some("unit"),
+                    unit_test: (entry.get("evidence").and_then(|v| v.as_str()) == Some("unit"))
+                        .then(|| {
+                            entry
+                                .get("unit")
+                                .and_then(|u| u.get("test"))
+                                .and_then(|t| t.as_str())
+                                .map_or_else(String::new, |t| t.trim().to_string())
+                        }),
                 });
             }
             _ => {
@@ -1124,7 +1131,7 @@ fn handle_verify_issue(
             .filter(|r| r.verdict == verify::AcVerdict::Pass && r.evidence.trim().is_empty())
             .map(|r| r.criterion.as_str())
             .collect();
-        refuse_empty_pass_evidence(&empty)?;
+        refuse_passes(&empty, EMPTY_PASS_EVIDENCE)?;
         let decision = verify::decide(&acceptance, &results);
         let results_value = serde_json::to_value(&results)?;
 
@@ -1164,8 +1171,12 @@ fn handle_verify_issue(
                 .map_or(r.criterion_id.as_str(), |c| c.text.as_str())
         })
         .collect();
-    refuse_empty_pass_evidence(&empty)?;
-    refuse_unit_pass_without_test(&verify::unit_passes_naming_no_test(&requirements, &results))?;
+    refuse_passes(&empty, EMPTY_PASS_EVIDENCE)?;
+    refuse_passes(
+        &verify::unit_passes_not_citing_their_test(&requirements, &results),
+        "on a unit criterion do not cite the test its unit.test names; cite that test, by \
+         that exact name, as an artifact of kind \"test\" (#1527)",
+    )?;
     let decision = verify::decide_spec_multi(&requirements, &results);
     let results_value = serde_json::to_value(&results)?;
 
@@ -1179,16 +1190,17 @@ fn handle_verify_issue(
     )
 }
 
-/// Refuse a verify run in which a pass carries empty evidence (#1516),
-/// naming each such criterion. Runs before any gate is recorded, so a
-/// refused run records nothing.
-fn refuse_empty_pass_evidence(criteria: &[&str]) -> error::Result<()> {
+/// Refuse a verify run in which some pass verdicts are not allowed, naming
+/// each such criterion after `reason` (what is wrong with those passes and,
+/// where it helps, what to cite instead). Runs before any gate is recorded,
+/// so a refused run records nothing. Used for a pass with empty evidence
+/// (#1516) and a pass on a `unit` criterion not citing its named test (#1527).
+fn refuse_passes(criteria: &[&str], reason: &str) -> error::Result<()> {
     if criteria.is_empty() {
         return Ok(());
     }
     eprintln!(
-        "[legion] error: verify refused -- {} pass verdict(s) carry empty evidence (#1516); \
-         nothing was recorded:",
+        "[legion] error: verify refused -- {} pass verdict(s) {reason}; nothing was recorded:",
         criteria.len()
     );
     for c in criteria {
@@ -1197,24 +1209,7 @@ fn refuse_empty_pass_evidence(criteria: &[&str]) -> error::Result<()> {
     Err(error::LegionError::ExitWith(1))
 }
 
-/// Refuse a verify run in which a pass on a `unit` criterion names no test
-/// (#1527): its evidence carries no `test` artifact. Runs before any gate is
-/// recorded, so a refused run records nothing.
-fn refuse_unit_pass_without_test(criteria: &[&str]) -> error::Result<()> {
-    if criteria.is_empty() {
-        return Ok(());
-    }
-    eprintln!(
-        "[legion] error: verify refused -- {} pass verdict(s) on a unit criterion name no \
-         test; cite the unit test as an artifact of kind \"test\" (#1527). Nothing was \
-         recorded:",
-        criteria.len()
-    );
-    for c in criteria {
-        eprintln!("  - {c}");
-    }
-    Err(error::LegionError::ExitWith(1))
-}
+const EMPTY_PASS_EVIDENCE: &str = "carry empty evidence (#1516)";
 
 /// What a verify verdict is bound to: a work-source issue (#913). #931
 /// removed the card-bound target this used to be an enum over
@@ -1553,7 +1548,8 @@ mod tests {
         let payload = serde_json::json!({
             "verification": {"criteria": [
                 {"id": "crit-1", "text": "alpha"},
-                {"id": "crit-2", "text": "beta", "evidence": "unit"}
+                {"id": "crit-2", "text": "beta", "evidence": "unit",
+                 "unit": {"rule": "beta holds", "test": "widget::tests::beta_holds"}}
             ]}
         })
         .to_string();
@@ -1564,9 +1560,12 @@ mod tests {
         assert_eq!(criteria.len(), 2);
         assert_eq!(criteria[0].id, "crit-1");
         assert_eq!(criteria[0].text, "alpha");
-        // #1527: the evidence kind is carried, so verify knows a unit criterion.
-        assert!(!criteria[0].unit);
-        assert!(criteria[1].unit);
+        // #1527: a unit criterion carries its `unit.test` as the test name.
+        assert_eq!(criteria[0].unit_test, None);
+        assert_eq!(
+            criteria[1].unit_test.as_deref(),
+            Some("widget::tests::beta_holds")
+        );
     }
 
     #[test]

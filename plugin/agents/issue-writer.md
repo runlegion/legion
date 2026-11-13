@@ -82,14 +82,13 @@ Make the scenarios of <FR-ID> pass. The requirement is the authority; read it wi
 
 ## Placement
 
-The behaviour scenarios are owned by <the module owning the entry point, found with `legion sym`>. Feature files are generated only for behaviour (scenario) criteria, and are carried in this issue as guardrails, not generated into `tests/`:
+The generated `.feature` files go in the `tests/` tree that mirrors <the module owning the entry point, found with `legion sym`>. Do not hand-edit them. This issue also carries the same features, one per thing a user does, as the guardrail for what the build must do. A scenario is one complete behaviour a user does, start to finish; a small check of one rule is a unit test beside the code, never its own scenario:
 
-<the Gherkin of each scenario criterion, from the requirement's `verification.scenarios`; "none: no behaviour criteria" when it has none>
+<the Gherkin of each scenario criterion, from the requirement's `verification.scenarios`; "none: no scenario criteria" when it has none>
 
 ## Acceptance criteria
 
 - scenario `@criterion-<id>` passes
-- behaviour `@criterion-<id>`: the build does what its feature above says
 - unit test `<name>` passes: <the rule of logic it proves>
 - (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
 - proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build gives <the toy's verdict>, asserted by unit test <name>
@@ -158,13 +157,12 @@ against it.
 - A proven method is acceptance, not background. Turn each Proven design line into an
   acceptance criterion the build is judged on, with its evidence: what in the diff shows
   the method is used, and, where the research gave a verdict, the toy's case re-run against
-  the build with that verdict (a throughput floor met, zero mismatches). A toy-proven criterion is never
-  research or event: the toy's case re-run against the built software, with the toy's
-  verdict, is unit evidence: a named unit test asserted in CI. There is no measurement
-  kind: a number from a real run is a note in the PR, not a criterion. Research evidence
-  stays for
-  what no toy has run yet. What the research proved must not be done becomes a criterion
-  too.
+  the build with that verdict (a throughput floor met, zero mismatches). A toy-proven
+  criterion is never research or event: the toy's case re-run against the built software,
+  with the toy's verdict, is unit evidence: a named unit test asserted in CI. There is no
+  measurement kind: a number from a real run is a note in the PR, not a criterion.
+  Research evidence stays for what no toy has run yet. What the research proved must not
+  be done becomes a criterion too.
 - Never label proven toy evidence as background, context, trace ids only, or "design
   evidence, not acceptance for this build", and never write that the builder chooses a
   mechanism a RESEARCH document proved.

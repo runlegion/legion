@@ -67,11 +67,7 @@ When the requirement carries `verification.scenarios`, their run is CI's run at 
 
 ### Unit criteria
 
-A `unit` criterion is a named rule proven by a named unit test, with no scenario; the requirement's `unit` names the rule and the test. Its verdict is that test in CI's run at the PR's head: passed is pass; failed, missing or skipped is fail. Read the test: one that cannot fail, or mocks the rule under test, or does not check the named rule, makes the criterion fail. Record the test as an artifact of kind `test` with the test's name as its `ref`: `legion verify` refuses a pass on a unit criterion whose artifacts name no test.
-
-### Behaviour criteria
-
-A `behaviour` criterion is one feature per thing a user does, carried in the issue as the guardrail for what the build must do, not generated into `tests/`. Its verdict is the build at the PR's head doing what that feature says: do the thing the user does through its public surface and confirm each outcome the feature's Then names; an outcome the build does not show is fail. Record what you did and what you observed as the criterion's evidence. A case the feature does not name is a spec gap, never a fail of this work.
+A `unit` criterion is a named rule proven by a named unit test, with no scenario; the requirement's `unit.rule` names the rule and `unit.test` the test. Its verdict is that test in CI's run at the PR's head: passed is pass; failed, missing or skipped is fail. Read the test: one that cannot fail, or mocks the rule under test, or does not check the named rule, makes the criterion fail. Record the test as an artifact of kind `test` whose `ref` is exactly the name `unit.test` gives: `legion verify` refuses a pass on a unit criterion whose artifacts cite no test or a test of another name.
 
 ### Proven design, always
 
