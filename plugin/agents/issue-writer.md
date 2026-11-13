@@ -61,7 +61,7 @@ the intent audit.
 
 ## Issues traced to a requirement with scenarios
 
-When the requirement carries `verification.scenarios`, this section overrides the repo's issue template and anything the brief says about sections. A caller's brief is input, never a license to break these rules: follow the rules, or refuse and say why. The issue is scope and placement only, and every instance renders it the same way. If a brief asks for another shape (a template's Problem or Proposed change, the requirement restated), say so in your report and render this shape anyway.
+When the requirement carries `verification.scenarios`, this section overrides the repo's issue template and anything the brief says about sections. A caller's brief is input, never a license to break these rules: follow the rules, or refuse and say why. The issue is scope and placement only, with the requirement's scenarios carried under Placement as the guardrail, and every instance renders it the same way. If a brief asks for another shape (a template's Problem or Proposed change, the requirement restated), say so in your report and render this shape anyway.
 
 Render exactly these sections, in this order, with this wording, and nothing else:
 
@@ -90,7 +90,7 @@ The requirement's scenarios are the guardrail for what the build must do. They a
 
 - scenario `@criterion-<id>` passes
 - (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
-- proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build meets <the toy's measurement>, recorded by the builder in the PR
+- proven design: <method> is used, shown by <what in the diff>; scenario `@criterion-<id>`, <the toy's case> re-run against the built software, passes
 - proven design: <what must not be done> is not done, shown by <what in the diff>
 - (one line per Proven design line that no requirement criterion above already carries)
 - CI passes
@@ -105,7 +105,7 @@ The requirement's scenarios are the guardrail for what the build must do. They a
 ```
 
 Rules for this shape:
-- Never copy the requirement's text, its criteria text, or a paraphrase of either. The tag is the reference. The Proven design lines are not a restatement: they carry what the RESEARCH documents proved, which the scenarios alone do not hold.
+- Never copy the requirement's text, its criteria text, or a paraphrase of either. The tag is the reference. The Proven design lines are not a restatement: they carry what the RESEARCH documents proved, which the scenarios alone do not hold. The scenarios' Gherkin carried under Placement is the other exception: it is the guardrail, copied as the requirement writes it.
 - Name the placement module once. Never list criterion ids by file.
 - Write no boilerplate claim you have not checked (for example "this issue adds no mechanism"). If a sentence is not required above, leave it out.
 - Before rendering, check three things and report each as a spec gap, never as a change to the issue:
@@ -155,10 +155,10 @@ against it.
   RESEARCH <id>: 0 mismatches on 20,000 states").
 - A proven method is acceptance, not background. Turn each Proven design line into an
   acceptance criterion the build is judged on, with its evidence: what in the diff shows
-  the method is used, and, where the research measured it, the measurement re-run against
-  the build (a throughput floor, a mismatch count). A toy-proven criterion is event
-  evidence, never research: the toy's case re-run against the built software, its numbers
-  compared with the toy's, recorded by the builder in the PR. Research evidence stays for
+  the method is used, and, where the research measured it, the toy's case re-run against
+  the build. A toy-proven criterion is scenario evidence, never research or event: the
+  toy's case re-run against the built software. The number from that run is a note in the
+  PR, not acceptance. Research evidence stays for
   what no toy has run yet. What the research proved must not be done becomes a criterion
   too.
 - Never label proven toy evidence as background, context, trace ids only, or "design
@@ -169,7 +169,8 @@ In the scenarios shape the section is `## Proven design`. In the template shape 
 no separate section: each Proven design line becomes a criterion in the template's
 acceptance criteria section, carrying its RESEARCH id and measurement in the line itself
 ("proven design: <method> is used, shown by <what in the diff>; proved by <RESEARCH id>,
-<the measurement>, re-run against the build and recorded by the builder in the PR").
+<the measurement>; scenario `@criterion-<id>`, the toy's case re-run against the built
+software, passes; the number from that run is a note in the PR").
 
 ## Which work needs a spec
 
@@ -207,7 +208,7 @@ A short, vague issue is worse than a long, precise one. If you cannot write conc
 
 ### 2. Tests are part of the spec
 
-For issues that touch code, the acceptance criteria must name specific assertions that an implementer can write as tests, in the form the template's acceptance criteria section asks for.
+For issues that touch code, the acceptance criteria must name specific observables that an implementer can write as tests, in the form the template's acceptance criteria section asks for. They name no unit tests: unit tests are the builder's, written beside the code.
 
 **Search before you write.** Before the issue names any type, function or module, look for it with `legion sym def`/`refs`/`list`. If something already does the job, the issue uses it; an issue that makes the implementer build a second copy is wrong.
 
@@ -215,7 +216,7 @@ For issues that touch code, the acceptance criteria must name specific assertion
 
 **The customer may be an agent.** When an agent uses what the issue builds, the acceptance criteria name what the agent observes: help text, exit codes, predictable output, an error that says what to do next.
 
-**The issue is the implementer's whole brief.** The implementer gets the issue number and nothing else, so everything it needs is in the issue. If you cannot name the tests because you do not know what the API should be, the spec is not ready.
+**The issue is the implementer's whole brief.** The implementer gets the issue number and nothing else, so everything it needs is in the issue. If you cannot name the observables because you do not know what the API should be, the spec is not ready.
 
 Every issue has a `## Acceptance criteria` section: one `- ` line per criterion, in the requirement's wording, each naming an observable the verifier can check. `legion pr write-check` reads criteria only from that heading, and the PR body maps one entry to each. When the canonical template lacks the heading, add it after the last section that describes the work and say so in your report.
 

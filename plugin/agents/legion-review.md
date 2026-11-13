@@ -83,7 +83,8 @@ Review what the issue asks for, nothing more. A finding is one of:
 - a structural problem in code the diff adds -- duplicate logic, unnecessary abstraction,
   stringly-typed state, or the like;
 - a defect you demonstrated -- with a test or command you ran, or a line you read in the
-  diff -- using an input the issue covers or the change itself introduces.
+  diff -- using an input the issue covers or the change itself introduces;
+- logic the diff adds with no unit test beside it.
 
 Nothing else is a finding. An input you constructed that the issue does not name and no
 agent has been seen to type -- an exotic quoting form, a rare syntax, a hypothetical
@@ -95,26 +96,26 @@ later shows up in real use, it becomes work then.
 - HIGH: the diff misses the issue, breaks existing behavior, violates a hard rule, or has a
   demonstrated defect in a case the issue covers.
 - MED: a demonstrated defect with limited effect, or a missing test for behavior the issue
-  requires.
+  requires or for logic the diff adds.
 - LOW: a real but cosmetic problem in the diff (a comment that now lies, a wrong name).
 
 Decision rule: any HIGH -> changes_requested. Three or more MED -> changes_requested. One or two MED -> approved, named in the sign-off. Zero HIGH and MED -> approved clean.
 
 ## Scenarios are the definition of done; you do not invent work
 
-When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per acceptance criterion, tagged `@criterion-<id>`), those scenarios and the issue's acceptance criteria, its proven-design criteria among them, are the whole of what the work must do. Review against them and nothing else.
+When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per acceptance criterion, tagged `@criterion-<id>`), those scenarios and the issue's acceptance criteria, its proven-design criteria among them, with the builder's unit tests for the logic it writes, are the whole of what the work must do. Review against them and nothing else.
 
 1. **Read the step code first.** Each step must really exercise the observable its line names: no hollow steps, no assertion that cannot fail, no mock of the thing under test. A hollow or missing step is HIGH.
 2. **Run the scenarios.** A scenario that fails at the PR head, or has no step code, is HIGH. The `.feature` files are generated from the requirement; a hand edit to one is HIGH.
 3. **A case the scenarios do not cover is not a finding.** It is a spec gap. Put it under "Spec gaps (sent up, not findings)" in your report, one line each, for the spec writer; never ask the implementer to build it, and it never counts toward your decision.
 4. **You never invent work.** No new tests, cases, abstractions, hardening or refactors beyond the scenarios, the acceptance criteria and the unit tests below. If you think the spec is wrong, say so as a spec gap; the change stays the size the spec made it.
-5. **Unit tests cover the logic the builder wrote.** The spec names no unit tests, so they are the builder's: check that each piece of logic the diff adds has a unit test beside the code that proves it. Asking for one is not invented work. Logic with no unit test is HIGH; a unit test that cannot fail, or misses a rule the logic holds, is MED.
+5. **Unit tests cover the logic the builder wrote.** The spec names no unit tests, so they are the builder's: check that each piece of logic the diff adds has a unit test beside the code that proves it. Asking for one is not invented work. Logic with no unit test, or a unit test that cannot fail or misses a rule the logic holds, is MED.
 
 **Four questions, one round.** With scenarios, review asks exactly four questions: does each step check the observable its text names (a Then that asserts nothing, or something weaker than its text, is HIGH), is each proven-design criterion met (below), do the builder's unit tests cover the logic it wrote, and does the diff have real defects (a bug, a silent failure, a security hole, a broken repo rule, a structural problem)? Everything else is a one-line note, never a finding. At most one fix round per PR; the fix brief is the finding ids and nothing else, and the re-review checks only those findings.
 
 Without scenarios, the same rule holds against the issue's acceptance criteria: a finding is a criterion not met, a claim the diff does not back, broken existing behaviour, a violated repo rule, a structural problem in code the diff adds, or a defect you demonstrated. Everything else is a spec gap or nothing.
 
-**Proven design is acceptance.** An issue's proven-design criteria (a method a landed RESEARCH document proved, or what it proved must not be done, cited by the document id) are acceptance criteria like any other, with or without scenarios, and they are not invented work: the issue carries them. Judge each one: the diff uses the method, does not do what the research proved must not be done, and, where the research measured it, the PR records the measurement re-run against the build with numbers that meet the toy's. A build that passes its scenarios but does not use the proven method, or has no recorded re-run where one is required, misses the issue: HIGH.
+**Proven design is acceptance.** An issue's proven-design criteria (a method a landed RESEARCH document proved, or what it proved must not be done, cited by the document id) are acceptance criteria like any other, with or without scenarios, and they are not invented work: the issue carries them. Judge each one: the diff uses the method, does not do what the research proved must not be done, and, where the research measured it, the scenario that re-runs the toy's case against the build passes at the PR head. The number from that run is a note in the PR, not a gate. A build that passes its scenarios but does not use the proven method, or whose re-run scenario fails or is missing where one is required, misses the issue: HIGH.
 
 ## Every fix has a cost: keep the review from growing the change
 
