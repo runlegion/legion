@@ -1,0 +1,6 @@
+{
+ "id": "FR-MAIL-049",
+ "title": "Revoking a mailbox ends every session logged in to it",
+ "statement": "Mail SHALL let a deployer revoke a mailbox: every IMAP and submission session logged in to it, awake or hibernating, is told and closed, because a session registers with its mailbox at login and not at SELECT. Revocation SHALL be per mailbox, since session state stores the account and not the user, so another valid password's session also closes and reconnects. Mail SHALL promise no close time.",
+ "traces_to": "intent.01a1132e-927a-7c32-9a52-46ac2a1a573d.direction.proposals[3] (feels like the mailbox people use); intent.01a1132e-927a-7c32-9a52-46ac2a1a573d.direction.proposals[0]; toy.01a1a4c4-186c-7021-9c10-159f4f377b50; reflection.01a1a48e-358f-7951-9792-8d19baa3e48e"
+}

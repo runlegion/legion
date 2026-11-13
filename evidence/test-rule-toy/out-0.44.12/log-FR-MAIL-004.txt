@@ -1,0 +1,20 @@
+I wrote `target/toy-1526/out/out-FR-MAIL-004.json`, and it parses as valid JSON.
+
+**Counts by kind:** 2 unit, 0 behaviour, 0 e2e, 0 event. I also listed 23 ways the requirement can fail, raised 3 gaps and recorded 7 left-out candidates.
+
+The two checks:
+1. **A golden table for the six address fields.** For every reading fixture, the From, Sender, Reply-To, To, Cc and Bcc fields that `readMessage` returns, and their problems, must match `read.json`. The existing rows already cover every failure toy 01a18fb8 saw happen: A.5, A.6.1, A.6.3 and the m6 garbage. I added six rows the table could not show before:
+   - No fixture has a Bcc.
+   - An empty To or Bcc gives an empty list with no problem.
+   - Group members with no comma between them give no value and a problem.
+   - A route with no closing colon gives no value and a problem.
+   - A domain's case is kept as written.
+   - A comment nested 10,000 deep must not throw.
+2. **`sameMailbox`.** The domain ignores case in A-Z only, and the local part compares exactly. The Kelvin-sign row is the method the reference established. No golden fixture calls this function, so it needs its own check.
+
+**Gaps for the spec author:**
+- **Quoted local parts (a conflict).** The statement says a local part "compares exactly", and the form keeps the quotes. But RFC 5322 3.2.4, which the statement cites, treats `"jdoe"@x` and `jdoe@x` as the same mailbox. Which comparison is right?
+- **Repeated address fields.** When a message has two To (or Cc, Reply-To, Bcc) fields, nothing says which one is read. The reference reads the first, but the form says "the first one" only for Subject.
+- **Raw UTF-8 display names.** The form lists reading these (RFC 6532) as not decided.
+
+**Least sure:** having no behaviour check. `readMessage` is a single call, and what a mail app actually shows comes from IMAP's ENVELOPE, which the form hands to IMAP. So the user-visible scenario belongs to IMAP's requirement, not this one. I'm about 0.65 sure that is right. If the team expects FR-MAIL-004 to own a receive-then-display scenario, it needs one behaviour check.

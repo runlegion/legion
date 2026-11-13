@@ -1,0 +1,20 @@
+I wrote and validated the file at `target/toy-1526/out/out-FR-MAIL-050.json`. It holds 7 checks, 22 failure ways, 4 gaps and 11 candidates I left out.
+
+**Counts by kind**
+
+| Kind | Count | Checks |
+|---|---|---|
+| behaviour | 3 | a mail app logs in over IMAP with a generated password and no credential is left in stored state; the contract suite passes a sound strategy and fails a broken one; the 10-in-5-minutes limit, where correct passwords get their slot back |
+| unit | 3 | 50 racing attempts from one address let exactly 10 reach the login and refused ones do no hashing; a known-answer table for PBKDF2 over the client's octets; MIT and no imports from the service layer |
+| e2e | 1 | a deployed login with a real platform secret, which records CPU time and list size and asserts neither |
+| event | 0 | |
+
+**Gaps for the spec author**
+1. **A store or the secret fails, or hangs:** should the client get NO or have the connection closed, should there be a timeout, and does the attempt count toward the limit? The toy saw the connection close when the store was down and a login that never answered when it hung.
+2. **The limiter itself fails:** two parts of the requirement conflict. Letting logins through breaks the limit, and refusing them refuses the mail app that reconnects often.
+3. **A counter that never counts:** the contract suite would pass it, because 0 equals 0. Should the suite require that a correct password shows some work?
+4. **"Never chosen":** how is it enforced? One option is a package that only generates passwords and their entries. Either way, how strong must a generated password be?
+
+**The check I was least sure belongs:** the unit check on the license and imports. That part is a requirement in the statement, so something must check it. But it reads like a repo rule for CI, and it is not a rule of logic, which is what a unit check is supposed to be. I kept it because no other check fails when it breaks.
+
+A close second is putting the 502-byte user case into the contract suite scenario. That failure was seen in the key-value store strategy, not in the basic login, but the toy asked for a suite clause covering it.

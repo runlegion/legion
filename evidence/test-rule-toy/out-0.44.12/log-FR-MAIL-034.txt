@@ -1,0 +1,37 @@
+I wrote the verification for FR-MAIL-034 to `target/toy-1526/out/out-FR-MAIL-034.json`. The file parses as valid JSON.
+
+**Counts by kind:**
+
+| Kind | Count |
+|---|---|
+| behaviour | 6 |
+| unit | 5 |
+| e2e | 1 |
+| event | 0 |
+
+It also lists 29 ways the requirement could fail, each pointing to the check that catches it, plus 2 gaps and 13 candidates I left out.
+
+**Behaviour scenarios:**
+- A delivery that commits after a later one still arrives.
+- One bad delivery does not stop the ones after it.
+- Expunge hides a message but keeps it readable until it is erased, and keeps its row after that.
+- Every change reaches every session on the mailbox, whoever caused it.
+- No command waits for a tell, and one dead session holds up no one.
+- Mail nobody announced still arrives, even when the delivery store is down for a while.
+
+**Unit checks:**
+- The delivery cursor's ten-minute lag, its dashed text form, and that it only ever rises.
+- The Message-ID rules, as one table of rows.
+- Reading the rows a session's view names still works past the 100-parameter limit.
+- A rebuilt mailbox object takes a greater UIDVALIDITY.
+- Pulls run one at a time, so overlapping pulls give each delivery one UID.
+
+**The e2e check** goes on the deploy issue. It checks that a tell still arrives on deployed Cloudflare after the call that started it has returned. It records the delay without asserting it.
+
+**Gaps for the spec author:**
+1. **Ten-minute lag against "never lose".** The SHALL says a late commit is never lost, but the form's cursor stands only ten minutes behind. Does anything bound how late a delivery can commit? If not, what reads one that commits later?
+2. **Two SHALLs conflict on a transient failure.** "Never let one bad message stop later ones" and "never lose a delivery" pull opposite ways. The form marks any failure reading a row as unreadable, so a temporary R2 or D1 error loses a good message for good. Should failed rows be retried, or skipped and recoverable later?
+
+I also read decision record 01a1a48e, although the brief said to read only the listed files. The writer rules require reading every decision record a requirement traces to, and this one is in the traces. It turned out to be about IMAP logins and settles nothing here, so I recorded it under "left_out".
+
+**The check I am least sure belongs** is the unit check that pulls run one at a time. Duplicate UIDs from overlapping pulls are already blocked by the uniqueness rule on delivery ids, so its remaining job is stopping a dropped ping from delaying new mail by up to five minutes. That delay is arguably no SHALL failure, since the session is still told in the end.

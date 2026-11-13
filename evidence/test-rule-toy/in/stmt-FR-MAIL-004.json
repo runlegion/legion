@@ -1,0 +1,6 @@
+{
+ "id": "FR-MAIL-004",
+ "title": "Addresses are read as RFC 5322 defines them, including obsolete and commented forms",
+ "statement": "Mail SHALL read the address fields of a received message (From, Sender, Reply-To, To, Cc, Bcc) into mailboxes and groups as RFC 5322 3.4 and 4.4 define them: display names unquoted, comments and folding white space removed, routes dropped, empty list elements skipped, and groups kept with their members. A domain compares without regard to case; a local part compares exactly.",
+ "traces_to": "rfc5322.3.4; rfc5322.3.4.1; rfc5322.4.4; intent.01a1132e-927a-7c32-9a52-46ac2a1a573d.direction.proposals[3] (a mailbox that feels like the one people already use); toy.01a18fb8-4127-7391-9883-bb022b45bd75; form.01a19b46-cbfb-7702-999b-841607c44bc0; goldens.01a19b44-5fe5-7342-bb90-85b91511d33d"
+}

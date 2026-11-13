@@ -1,0 +1,194 @@
+{
+  "requirement": "FR-MAIL-034",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "A delivery that commits after a later one still reaches the mailbox",
+      "gherkin": "Scenario: A delivery that commits after a later one still reaches the mailbox\n  Given a mailbox with one registered session\n  And delivery A is received before delivery B, but B commits first\n  When B commits and the mailbox is pinged\n  And A commits a minute later and the mailbox is pinged again\n  Then a fresh open of the mailbox lists both messages\n  And A's UID is greater than B's\n  And no UID was given twice\n  And the session was told of each message",
+      "proves": [
+        "SHALL: never losing a delivery that commits late",
+        "SHALL: assigning UIDs that only rise",
+        "form 01a19daa: a cold read saw a cursor at the newest id lose mail for good (revision 2 finding)"
+      ],
+      "why_not_the_other_kind": "It takes two deliveries, two pings and an open to show, and the person notices a missing message in their mailbox."
+    },
+    {
+      "kind": "unit",
+      "title": "The delivery cursor stands ten minutes behind the newest id and only rises",
+      "rule": "The cursor is the newest delivery id's 48-bit millisecond prefix lowered by 600,000, written dashed as xxxxxxxx-xxxx so it compares as text against the ids, and it is never lowered; rows: a delivery 5 seconds ahead of the cursor is pulled, a delivery at the same prefix sorts above the cursor, and a row read behind the cursor leaves it unchanged.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (the mailbox object's pull)",
+      "proves": [
+        "SHALL: never losing a delivery that commits late",
+        "form 01a19daa: Pulling, the cursor rule and its test 'a delivery 5 seconds ahead of the cursor is pulled'"
+      ],
+      "why_not_the_other_kind": "The late-commit scenario lands a minute behind, never seconds from the cursor's edge, so only a test of the comparison itself shows a wrong dash or a cursor that falls."
+    },
+    {
+      "kind": "behaviour",
+      "title": "One bad delivery does not stop the deliveries after it",
+      "gherkin": "Scenario: One bad delivery does not stop the deliveries after it\n  Given four deliveries to one mailbox, in order: a good message, one whose stored bytes are gone, one whose bytes cannot be read or stored, and a good message\n  When the mailbox pulls\n  Then both good messages are in the mailbox in delivery order, with rising UIDs\n  And the two bad deliveries are in no one's mailbox\n  When a fifth good message is delivered\n  Then it arrives in the mailbox with a greater UID",
+      "proves": [
+        "SHALL: never letting one bad message stop later ones",
+        "SHALL: pulls deliveries into SQLite"
+      ],
+      "why_not_the_other_kind": "It takes several deliveries and pulls to show, and the person notices mail that stopped arriving."
+    },
+    {
+      "kind": "unit",
+      "title": "A held Message-ID gets no UID; none, or one over 998 octets, always gets one",
+      "rule": "A delivery whose Message-ID of at most 998 octets is already held by a row gets no UID, while a delivery with no Message-ID, or with one over 998 octets, always gets its own UID; the rows are a held id, a repeated missing id, and a repeated 999-octet id under the test wrapper's 2 MB row limit.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (the mailbox object's pull)",
+      "proves": [
+        "toy 01a19d7e: the mailbox DO gives a held Message-ID no UID",
+        "SHALL: never letting one bad message stop later ones (an oversized Message-ID must not fail its row against the 2 MB row limit)"
+      ],
+      "why_not_the_other_kind": "It is one rule shown by a table of fixtures, each a single delivery and pull; the user-facing case of a retry after expunge is in the expunge scenario."
+    },
+    {
+      "kind": "behaviour",
+      "title": "Expunge hides a message and keeps it readable until it is erased, and its row after",
+      "gherkin": "Scenario: Expunge hides a message and keeps it readable until it is erased, and its row after\n  Given a mailbox holding messages with UIDs 1, 2 and 3\n  And a session that was told of all three\n  When another session expunges UID 3\n  Then a fresh open lists UIDs 1 and 2 only\n  And the first session can still read UID 3's flags, size, date and bytes\n  And a provider's retry of UID 3's message does not bring it back\n  And the next new message gets UID 4\n  When UID 3's bytes are erased\n  Then the first session can still read UID 3's flags, size and date, and reads its bytes as nothing\n  And no message ever gets UID 3 again",
+      "proves": [
+        "SHALL: keeping an expunged message's bytes readable until they are erased (FR-MAIL-053) and its row after that",
+        "SHALL: assigning UIDs that only rise",
+        "rfc3501.2.3.1.1: a UID is never reused",
+        "toy 01a19d7e: the mailbox DO never reuses a UID",
+        "toy 01a1a4ad: keep the tombstone, since removing the row closes a woken session with 1011"
+      ],
+      "why_not_the_other_kind": "It is a sequence of expunge, open, reads, a redelivery and an erasure, and the person meets each outcome in their mail app."
+    },
+    {
+      "kind": "unit",
+      "title": "Reading the rows a view names works past 100 messages",
+      "rule": "held passes the UIDs as one JSON parameter, so a request for 101 UIDs, expunged or not, succeeds under the Durable Object SQLite limit of 100 bound parameters that the test wrapper enforces.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (the mailbox object's held)",
+      "proves": [
+        "SHALL: keeping an expunged message's ... row (readable to a woken session)",
+        "form 01a19daa: a cold read saw a held query break every mailbox over 100 messages on waking (revision 2 finding)"
+      ],
+      "why_not_the_other_kind": "It is one call against a platform limit that only the test wrapper reproduces, and no scenario above holds 101 messages."
+    },
+    {
+      "kind": "unit",
+      "title": "A rebuilt mailbox object takes a greater UIDVALIDITY",
+      "rule": "uid_validity is set once, when the mailbox object's tables are created, from the current time in seconds, so a fresh object for a mailbox whose deliveries outlived the old one reports a greater uid_validity than the old one did.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (the mailbox object's tables)",
+      "proves": [
+        "rfc3501.2.3.1.1: UIDVALIDITY must be greater if UIDs fail to persist",
+        "SHALL: assigning UIDs that only rise"
+      ],
+      "why_not_the_other_kind": "Losing an object's SQLite is not something any user does through a surface, so the rule is shown on two fresh objects with a controlled clock."
+    },
+    {
+      "kind": "unit",
+      "title": "Overlapping pulls give each delivery one UID, and a pull asked during one runs again",
+      "rule": "Pulls are single-flight: two pulls asked for at once give each delivery, with or without a Message-ID, exactly one UID, and a pull asked for while one runs runs once more after it, so a row committed during the first pull is pulled without waiting for the alarm.",
+      "unit": "packages/cloudflare/src/imap-objects.ts (the mailbox object's pull)",
+      "proves": [
+        "SHALL: one Durable Object ... assigning UIDs",
+        "SHALL: tell every registered IMAP session of any change (without a five-minute wait for the alarm)",
+        "form 01a19daa: Tests, 'two overlapping pulls with no Message-ID add each row once, and a ping during a pull is not missed'"
+      ],
+      "why_not_the_other_kind": "The race needs control of when a pull's read and a commit interleave, which no sequence of calls through the surface gives."
+    },
+    {
+      "kind": "behaviour",
+      "title": "Every change reaches every session on the mailbox, whoever caused it",
+      "gherkin": "Scenario: Every change reaches every session on the mailbox, whoever caused it\n  Given a person's Mac idling on their inbox and their iPhone with the inbox selected\n  When new mail is delivered and the iPhone's SELECT finds it before any ping arrives\n  Then the Mac is told of the new message, with the UID the iPhone sees\n  When another message is delivered and pinged\n  Then both the Mac and the iPhone are told of it\n  When the iPhone flags a message and then expunges one\n  Then the Mac is told of the flag change and of the expunge",
+      "proves": [
+        "SHALL: tell every registered IMAP session of any change",
+        "SHALL: keep each mailbox in one Durable Object (both sessions see one set of UIDs)",
+        "form 01a19daa: Pulling, 'whenever a pull adds a row, from any caller, every registered session is told', or an iPhone's SELECT leaves the Mac unaware"
+      ],
+      "why_not_the_other_kind": "It takes two sessions and several commands, and the person notices a Mac that never shows mail the iPhone already has."
+    },
+    {
+      "kind": "behaviour",
+      "title": "No command waits for a tell, and one dead session holds up no one",
+      "gherkin": "Scenario: No command waits for a tell, and one dead session holds up no one\n  Given four sessions on one mailbox: one idling, one in the middle of a command, one whose connection never answers, and one whose connection fails every tell\n  When new mail arrives and the session in the middle of a command runs a SELECT that finds it\n  Then the SELECT completes without waiting for any session to be told\n  And a ping, a flag change and an expunge each complete while tells are still outstanding\n  And the idling session is told of the new message\n  When another message arrives\n  Then the idling session and the one whose tells fail are each told of it, despite the session that never answers",
+      "proves": [
+        "SHALL: without ever waiting for the telling",
+        "SHALL: tell every registered IMAP session of any change",
+        "form 01a19daa: a cold read saw a tell cycle hang a mailbox and every ping for good (revision 3 finding)"
+      ],
+      "why_not_the_other_kind": "The hang shows only across a session's command, the mailbox's pull and another session's tell together, and every person on the mailbox notices it as mail that stops."
+    },
+    {
+      "kind": "behaviour",
+      "title": "Mail nobody announced still arrives, even across a delivery store outage",
+      "gherkin": "Scenario: Mail nobody announced still arrives, even across a delivery store outage\n  Given a mailbox with one session idling\n  And a delivery whose ping was lost\n  And a flag change that committed but whose tell was lost when the object stopped\n  And the delivery store fails when the next timed check runs\n  When the delivery store recovers and the following timed check runs\n  Then the idling session is told of the new message and of the flag change",
+      "proves": [
+        "SHALL: never losing a delivery",
+        "SHALL: tell every registered IMAP session of any change",
+        "form 01a19daa: alarm() re-arms first so a D1 outage cannot end the chain, and tell-owed makes an untold commit heard"
+      ],
+      "why_not_the_other_kind": "It needs a lost ping, a lost tell, a failing dependency and two timed checks in sequence, and the person notices mail that never shows up."
+    },
+    {
+      "kind": "e2e",
+      "title": "A tell left running after its call returns reaches an idle session on deployed Cloudflare",
+      "rule": "On the deploy issue for examples/imap: deliver a message to a mailbox with an idle session through the bridge, and the session hears it; the run records the time from delivery to the untagged EXISTS, never asserting it.",
+      "proves": [
+        "SHALL: tell every registered IMAP session of any change without ever waiting for the telling (the tell runs in ctx.waitUntil after the RPC returns)",
+        "form 01a19daa: event 8, shown locally only"
+      ],
+      "why_not_the_other_kind": "Whether work in waitUntil outlives its RPC is a property of the deployed runtime that local workerd cannot settle."
+    }
+  ],
+  "failure_ways": [
+    { "way": "The cursor sits at the newest id, so a large delivery that commits after a later, smaller one is never read", "caught_by": "A delivery that commits after a later one still reaches the mailbox" },
+    { "way": "The cursor is written undashed or compared wrongly, so a delivery seconds ahead of it is skipped", "caught_by": "The delivery cursor stands ten minutes behind the newest id and only rises" },
+    { "way": "A delivery commits more than ten minutes after its id's time, behind the cursor", "caught_by": "No check: the form settles ten minutes and the SHALL says never; reported under gaps" },
+    { "way": "A blob is gone when the pull reads it, and the throw stops every later pull", "caught_by": "One bad delivery does not stop the deliveries after it" },
+    { "way": "A stranger's message fails to parse or insert, and the throw stops every later pull", "caught_by": "One bad delivery does not stop the deliveries after it" },
+    { "way": "A Message-ID near 2 MB makes its row fail the row limit, losing that message", "caught_by": "A held Message-ID gets no UID; none, or one over 998 octets, always gets one" },
+    { "way": "A transient R2 or D1 error on one row is recorded as unreadable for good", "caught_by": "No check: two SHALLs pull opposite ways on it; reported under gaps" },
+    { "way": "A redelivery or retry of a held message gets a second UID", "caught_by": "A held Message-ID gets no UID; none, or one over 998 octets, always gets one" },
+    { "way": "A dedupe on a null Message-ID drops every message with none", "caught_by": "A held Message-ID gets no UID; none, or one over 998 octets, always gets one" },
+    { "way": "Expunge deletes the row, so a UID is reused or a session told of the message cannot read it", "caught_by": "Expunge hides a message and keeps it readable until it is erased, and its row after" },
+    { "way": "A retry of an expunged message brings it back", "caught_by": "Expunge hides a message and keeps it readable until it is erased, and its row after" },
+    { "way": "Erasure removes the row with the bytes, and a woken session closes with 1011", "caught_by": "Expunge hides a message and keeps it readable until it is erased, and its row after" },
+    { "way": "held binds one parameter per UID and throws past 100 on waking", "caught_by": "Reading the rows a view names works past 100 messages" },
+    { "way": "A mailbox object rebuilt from lost SQLite reuses the old UIDVALIDITY with new UIDs", "caught_by": "A rebuilt mailbox object takes a greater UIDVALIDITY" },
+    { "way": "Two sessions reach two objects for one mailbox and disagree about UIDs", "caught_by": "Every change reaches every session on the mailbox, whoever caused it" },
+    { "way": "Two overlapping pulls race and give one delivery two UIDs", "caught_by": "Overlapping pulls give each delivery one UID, and a pull asked during one runs again" },
+    { "way": "A ping arriving during a pull is dropped, and its row waits five minutes for the alarm", "caught_by": "Overlapping pulls give each delivery one UID, and a pull asked during one runs again" },
+    { "way": "A crash part way through a pull leaves rows committed but the batch unfinished", "caught_by": "Overlapping pulls give each delivery one UID (a resumed pull rereads committed rows and adds none twice) and Mail nobody announced still arrives (the owed tell is heard)" },
+    { "way": "Only a ping announces new mail, so a row pulled by another session's open is never told", "caught_by": "Every change reaches every session on the mailbox, whoever caused it" },
+    { "way": "A flag change or expunge is not told to other sessions", "caught_by": "Every change reaches every session on the mailbox, whoever caused it" },
+    { "way": "open awaits the tell, which awaits the caller's own changed() queued behind its receive, and the mailbox hangs for good", "caught_by": "No command waits for a tell, and one dead session holds up no one" },
+    { "way": "A session whose changed() never settles holds up every later tell", "caught_by": "No command waits for a tell, and one dead session holds up no one" },
+    { "way": "A session whose tell rejects is dropped and never told again", "caught_by": "No command waits for a tell, and one dead session holds up no one" },
+    { "way": "A ping from receiving is lost, and the delivery is never pulled", "caught_by": "Mail nobody announced still arrives, even across a delivery store outage" },
+    { "way": "The object stops after a commit and before its tell, and the change is never told", "caught_by": "Mail nobody announced still arrives, even across a delivery store outage" },
+    { "way": "D1 throws in alarm() before it re-arms, Cloudflare stops retrying after six, and the alarm chain ends", "caught_by": "Mail nobody announced still arrives, even across a delivery store outage" },
+    { "way": "On deployed Cloudflare, work in waitUntil does not outlive its RPC, so no tell arrives", "caught_by": "A tell left running after its call returns reaches an idle session on deployed Cloudflare" },
+    { "way": "With no session registered the alarm stops re-arming, so an unannounced delivery waits", "caught_by": "No SHALL breaks: nobody is registered to tell, and the next open pulls the delivery" },
+    { "way": "A session's own change is told back to it", "caught_by": "No SHALL breaks: the form says it hears nothing new, since its view already holds the change" }
+  ],
+  "gaps": [
+    {
+      "failure_way": "A delivery commits more than ten minutes after the time in its UUIDv7 id, so it sorts behind the cursor and no pull reads it",
+      "question": "The SHALL says a late commit is never lost and the form keeps the cursor ten minutes behind. Is there a proven bound on how late a delivery can commit (a receiving Worker's wall-clock limit, for instance) that makes ten minutes enough, and if not, what reads a delivery that commits later than that?"
+    },
+    {
+      "failure_way": "A transient failure reading one row (R2 get throwing, a D1 hiccup) is recorded as unreadable, and the delivery is skipped for good",
+      "question": "Conflict between 'never letting one bad message stop later ones' and 'never losing a delivery': the form records any failure on a row as unreadable so later rows pull, which also loses a good message on a transient error. Does a failed row retry, how many times and how is it told apart from a bad message, or can a skipped delivery be pulled again later?"
+    }
+  ],
+  "left_out": [
+    { "candidate": "Checks from decision 01a1a48e", "why": "Read as the rules require: it decides IMAP logins (adapter strategies, PBKDF2, rate limits) and settles no outcome of this requirement, so no check traces to it." },
+    { "candidate": "UIDs rise as a scenario of its own", "why": "It would prove what the late-commit and expunge scenarios already prove; rising and never-reused UIDs are folded into their Thens." },
+    { "candidate": "A bad delivery is not read from R2 again on the next pull", "why": "Re-reading costs reads but breaks no SHALL; it is bookkeeping of the skipped table, an implementation detail." },
+    { "candidate": "An empty expunge tells nobody", "why": "Telling with nothing to report breaks no SHALL; it is an economy, not this requirement." },
+    { "candidate": "A tell answered false removes the session's name; forget removes it", "why": "Registration lifecycle breaks no SHALL here: a dead name costs alarms, and every live session is still told. It belongs to the session object's requirement." },
+    { "candidate": "open answers null for any mailbox but INBOX", "why": "No SHALL of this requirement names folders." },
+    { "candidate": "The wrong-message case and IDLE across a resume", "why": "They prove the session's snapshot and resume, a different requirement; this one owns only the rows held serves, which the expunge scenario covers." },
+    { "candidate": "Receiving pings each mailbox, and a ping that throws still accepts", "why": "Receiving's requirement owns it; the mailbox side of a lost ping is the unannounced-mail scenario." },
+    { "candidate": "Erasure order, tombstone hash, sweeping skipped rows, the null FETCH answer", "why": "FR-MAIL-053 owns erasure; this requirement only keeps bytes until then and the row after, which the expunge scenario covers." },
+    { "candidate": "Local end to end: a mailbox of 101 messages wakes after a real eviction", "why": "Reading the rows a view names past 100 proves the limit with the wrapper; the eviction part belongs to the session's requirement." },
+    { "candidate": "100% coverage, criterion ids, teaching tables", "why": "Repo rules belong to CI, not to this requirement." },
+    { "candidate": "One check per Message-ID fixture", "why": "Examples are rows: they are one unit check with a table." },
+    { "candidate": "An event for Apple Mail hearing new mail within a minute", "why": "The form's event 3 belongs to the deploy and the mail-app requirements; this requirement's deployment-only fact is the waitUntil e2e." }
+  ]
+}

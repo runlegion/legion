@@ -1,0 +1,22 @@
+I wrote the verification for FR-MAIL-049 to `target/toy-1526/out/out-FR-MAIL-049.json`, and it parses as valid JSON.
+
+**Counts by kind:** 1 behaviour, 2 unit, 1 e2e, 0 event. It also lists 15 failure ways, 3 gaps and 8 checks I left out.
+
+- **Behaviour:** one scenario. A deployer revokes a mailbox while these are connected:
+  - a client logged in with no folder selected, the case the toy saw survive 5 of 5;
+  - a client idling on INBOX;
+  - a client logged in with a second valid password;
+  - a submission client;
+  - a client on a different mailbox.
+
+  Two of the clients and the mailbox are asleep before the revoke. All the outcomes fold into one Then: each session on the revoked mailbox gets a notice and then closes, the other mailbox's client stays connected, and the second password logs in again. The scenario waits for each close to happen and checks no duration.
+- **Unit 1:** a session counts as logged in only after it has registered with its mailbox. If registering fails, the login fails. This covers a failing registration and a login that finishes while a revoke is running, and no client can cause either on demand.
+- **Unit 2:** `ImapMailbox.revoke` still reaches every other session when one of them throws or no longer exists, and counts that one as failed. The toy saw a leftover entry for a session that had gone, so that case is one of the test rows.
+- **E2e (on the deploy issue):** real clients against deployed mail, with real hibernation. The run records close times and asserts none.
+
+**Gaps for the spec author:**
+1. After a revoke, may the revoked password log in again, or does revoking also refuse new logins? The toy found that the basic login setup cannot cancel a password while mail is running: after a reload the old password still worked, 5 of 5.
+2. What must mail do when it cannot close a session: retry, or tell the deployer?
+3. How does the deployer revoke: a command, an admin route, or something a Worker calls?
+
+**The check I was least sure belongs:** the submission client's line in the behaviour Then, "told the service is closing". For SMTP that means a 421 reply. I took this as settled by the mail protocol standard, but no toy has shown it, because the toy never tested submission sessions and saw no close reason on the wire for its other closes. If that standard reply is not taken as settled, the line should come out and become a gap.

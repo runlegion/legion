@@ -1,0 +1,6 @@
+{
+ "id": "FR-MAIL-034",
+ "title": "One mailbox object assigns UIDs and never loses a delivery",
+ "statement": "Mail SHALL keep each mailbox in one Durable Object that pulls deliveries into SQLite, assigning UIDs that only rise, never losing a delivery that commits late, never letting one bad message stop later ones, and keeping an expunged message's bytes readable until they are erased (FR-MAIL-053) and its row after that. It SHALL tell every registered IMAP session of any change without ever waiting for the telling.",
+ "traces_to": "intent.01a1132e-927a-7c32-9a52-46ac2a1a573d.direction.proposals[3] (feels like the mailbox people use); rfc3501.2.3.1.1; toy.01a19d7e-fd4e-76e2-b4ed-c31f922020e7; form.01a19daa-fafd-7a43-bd03-3fcb69311297; toy.01a1a4ad-f543-7221-b4d4-0da138e97728; decision 01a1a48e-3611-7551-88cf-f863b1b359d0"
+}

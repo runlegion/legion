@@ -1,0 +1,6 @@
+{
+ "id": "FR-MAIL-050",
+ "title": "A generated password from a platform secret logs in, under a limit, by a contract any strategy can run",
+ "statement": "Mail SHALL offer a prebuilt login, @rafters/mail-auth-basic, that checks a password against a list in a platform secret with PBKDF2-SHA256 at 100,000 iterations over the client's octets, costing one hash per attempt whether or not the user exists, with passwords that are generated and never chosen. It SHALL offer a contract suite any strategy can run in workerd, whose work rule is that an unknown user and a wrong password do the same work, by a counter the strategy supplies, and a limit of 10 attempts per client address in a 5-minute window around any strategy, from which a correct password gets its slot back, so a mail app that reconnects often is not refused and wrong guesses stay at the limit. No credential SHALL reach stored state, and the package SHALL be MIT and import nothing from the service layer.",
+ "traces_to": "intent.01a1132e-927a-7c32-9a52-46ac2a1a573d.direction.proposals[3] (feels like the mailbox people use); intent.01a1132e-927a-7c32-9a52-46ac2a1a573d.direction.proposals[0]; toy.01a1a4c4-186c-7021-9c10-159f4f377b50; reflection.01a1a48e-358f-7951-9792-8d19baa3e48e"
+}
