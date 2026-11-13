@@ -1,0 +1,17 @@
+I wrote `out/out-FR-MAIL-004.json` and checked that it is valid JSON.
+
+**Counts:** 0 behaviour checks and 2 unit checks.
+
+1. **Golden table check.** One check compares the six address fields that `readMessage` returns for every fixture against `body.goldens.read` in research 01a19b44. The rows include the Appendix A examples where the toy saw postal-mime and mailparser fail: comments in A.5, the route and spaced dot in A.6.1, folding white space in A.6.3, and the garbage address in m6. It also adds three new fixture rows that no golden covers yet:
+   - a mixed-case local part and domain, which must come back as written;
+   - empty To, Cc and Bcc values, which must read as empty lists;
+   - an address field of hostile size, which must not throw.
+2. **`sameMailbox` check.** A table shows that domains compare ignoring A–Z case only, with a Kelvin-sign row, and that local parts compare exactly. `readMessage` never calls `sameMailbox`, so no golden row can show this rule.
+
+**Gaps for the spec author:**
+- **Repeated address fields.** When a message has two To fields, which one is read? The form only says Subject takes the first; the reference code reads the first, but no decision record or golden settles it.
+- **UTF-8 addresses (RFC 6532).** The form leaves 8-bit header bytes undecided. It is also unclear whether "a domain compares without regard to case" covers non-ASCII domains, which the ASCII-only `sameMailbox` does not fold.
+
+**Least sure:** leaving out a behaviour scenario. A person does notice a mangled sender, but only through IMAP's ENVELOPE, and the form gives ENVELOPE to IMAP's own requirement. Here, reading addresses is a single `readMessage` call, so I judged it unit-level. If the toy expected one scenario on the user's side, this is where my output differs.
+
+**Schema change:** the golden-table check has a `rows` key that the schema doesn't define. I added it so the examples sit as rows of one check instead of being packed into the rule sentence. If a strict scorer rejects it, the rows need to move into `rule`.

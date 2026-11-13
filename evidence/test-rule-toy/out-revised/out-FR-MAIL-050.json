@@ -1,0 +1,149 @@
+{
+  "requirement": "FR-MAIL-050",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "A deployer issues a generated password and a person's mail app logs in with it",
+      "gherkin": "Scenario: A generated password from the platform secret logs a mail app in\n  Given a deployer has generated a password for user \"ana\" with @rafters/mail-auth-basic\n  And the deployer has added its entry to the login list in the platform secret\n  When ana's mail app logs in over IMAP with that password, selects INBOX and fetches a message\n  Then the login succeeds and the message is returned\n  When the same mail app logs in as \"ana\" with a different password\n  And it logs in as \"nobody\", a user not on the list, with ana's password\n  Then both logins are refused with NO and the connection stays usable for another attempt",
+      "proves": [
+        "SHALL offer a prebuilt login, @rafters/mail-auth-basic, that checks a password against a list in a platform secret",
+        "SHALL ... with passwords that are generated and never chosen (the issuing path a deployer uses)",
+        "intent direction.proposals[3]: a work inbox feels like the mailbox people already use (read from their own mail app)",
+        "toy 01a1a4c4: imaplib logged in, selected and fetched through the real session with a list from a binding"
+      ],
+      "why_not_the_other_kind": "A deployer and a mail app meet it through IMAP over several calls (generate, configure, login, select, fetch), so it is a whole behaviour, not one rule."
+    },
+    {
+      "kind": "behaviour",
+      "title": "A mail app that reconnects often keeps logging in while wrong guesses from one address stop at 10 in 5 minutes",
+      "gherkin": "Scenario: Reconnects are not refused, guesses stay at the limit\n  Given ana's mail app connects from address A with her correct generated password\n  When it logs in 30 times within 5 minutes\n  Then every one of those logins succeeds\n  When, still inside that window, address A sends wrong passwords interleaved with further correct logins\n  Then the first 10 wrong passwords are answered NO for a wrong password\n  And every later attempt from address A in the window is refused, the correct password included, without being checked\n  And a mail app on address B logs in with its correct password\n  When 5 minutes pass with no attempts from address A\n  Then ana's mail app on address A logs in again",
+      "proves": [
+        "SHALL ... a limit of 10 attempts per client address in a 5-minute window around any strategy",
+        "SHALL ... from which a correct password gets its slot back, so a mail app that reconnects often is not refused and wrong guesses stay at the limit",
+        "toy 01a1a4c4: without refund a correct password is refused after 10 attempts in 5 minutes (seen failure); 'refund only lets extra correct passwords through' was left unverified",
+        "toy 01a1ae1d: the test controls the window's clock instead of waiting 5 minutes"
+      ],
+      "why_not_the_other_kind": "The limit and the refund are met by a mail app and a guesser over many connections through IMAP, and the refund failure only shows across a sequence of attempts."
+    },
+    {
+      "kind": "behaviour",
+      "title": "A strategy author runs the contract suite in workerd and it passes good strategies and fails broken ones",
+      "gherkin": "Scenario: The contract suite tells a sound strategy from a broken one\n  Given the contract suite running in workerd\n  When a strategy author runs it against the basic strategy, alone and wrapped in the limiter\n  Then every clause passes both times\n  When the author runs it against a strategy whose own work counter shows less work for an unknown user than for a wrong password\n  Then the suite fails, naming the clause that an unknown user and a wrong password do the same work\n  When the author runs it against a strategy that fails instead of refusing a user name of 502 bytes or more\n  Then the suite fails, naming the clause that an oversized user is refused like any unknown user",
+      "proves": [
+        "SHALL offer a contract suite any strategy can run in workerd, whose work rule is that an unknown user and a wrong password do the same work, by a counter the strategy supplies",
+        "SHALL ... costing one hash per attempt whether or not the user exists (basic passes the work clause)",
+        "SHALL ... limit ... around any strategy (the suite passes wrapped as well as plain)",
+        "toy 01a1a4c4: 15 of 15 on basic, plain and wrapped, in workerd; 516-753 percent gap with no dummy; a user of 502 bytes or more made a KV get throw and closed the session with EOF (seen failure), and the port needs 'a contract clause'"
+      ],
+      "why_not_the_other_kind": "The suite is itself the deliverable a strategy author uses, and proving it catches what it must takes several runs against several strategies through its surface."
+    },
+    {
+      "kind": "unit",
+      "title": "Basic checks a golden table of entries with one PBKDF2-SHA256 hash at 100,000 iterations over the client's octets",
+      "rule": "For every row of the golden table (correct password, wrong password, unknown user, a password with octets 0x80-0xFF as the client sends them, and an entry whose iterations are not 100,000), basic returns the expected mailbox or null and its work counter shows exactly one PBKDF2-SHA256 hash at 100,000 iterations over the client's octets; the entry not at 100,000 never logs in.",
+      "unit": "@rafters/mail-auth-basic: basicStrategy",
+      "proves": [
+        "SHALL ... PBKDF2-SHA256 at 100,000 iterations over the client's octets, costing one hash per attempt whether or not the user exists",
+        "toy 01a1a4c4 must_hold: hash the client's octets; generators hash UTF-8; octets() truncates above 0xFF"
+      ],
+      "why_not_the_other_kind": "Each row is one call to the strategy, and the contract suite asserts only equal work, so an exact count, the iteration figure and the octet encoding can fail without any scenario failing."
+    },
+    {
+      "kind": "unit",
+      "title": "Concurrent attempts from one address admit exactly 10, and refused ones do no hash",
+      "rule": "When 50 attempts from one address race the limiter's take, exactly 10 reach the strategy and the refused 40 cause no hash, because take is one synchronous transaction.",
+      "unit": "limiter: limited / LimiterPort.take",
+      "proves": [
+        "SHALL ... a limit of 10 attempts per client address in a 5-minute window",
+        "toy 01a1a4c4: take as one synchronous transaction held 15 races of 50 at exactly 10, refusals hashed 0"
+      ],
+      "why_not_the_other_kind": "The behaviour scenario sends attempts one after another and never enters a race, and a guesser cannot see through IMAP how many hashes a refusal cost."
+    },
+    {
+      "kind": "unit",
+      "title": "The limiter's count survives eviction of whatever holds it",
+      "rule": "Attempts counted for an address before the object holding the count is evicted with hibernation still count after it, so an 11th attempt in the window is refused.",
+      "unit": "limiter: LimiterPort implementation",
+      "proves": [
+        "SHALL ... a limit of 10 attempts per client address in a 5-minute window",
+        "reflection 01a1a48e: everything runs at the edge with no in-memory counters",
+        "toy 01a1ae1d: evict(stub, { webSockets: 'hibernate' }) reproduces the runtime's eviction; ctx.abort() is not eviction"
+      ],
+      "why_not_the_other_kind": "Eviction is not something a guesser or mail app can cause or see through IMAP, and the behaviour scenario never evicts."
+    },
+    {
+      "kind": "unit",
+      "title": "No credential reaches stored state",
+      "rule": "After a run of correct, wrong and unknown-user logins through the real session, a byte scan of every state file and the D1 database finds none of the passwords, their hashes or their salts.",
+      "unit": "@rafters/mail-auth-basic with the IMAP session objects",
+      "proves": [
+        "SHALL: No credential SHALL reach stored state",
+        "toy 01a1a4c4: no credential in D1 or any of 4,786 state files, by byte scan"
+      ],
+      "why_not_the_other_kind": "It is a never-property, and no user can see stored state through a public surface."
+    },
+    {
+      "kind": "unit",
+      "title": "The generator never takes a chosen password",
+      "rule": "The package's generator accepts no password as input and each call returns a fresh random password with its entry, so the only passwords the list can hold are generated ones.",
+      "unit": "@rafters/mail-auth-basic: password generator",
+      "proves": [
+        "SHALL ... with passwords that are generated and never chosen",
+        "reflection 01a1a48e: the hash cannot protect a weak password, so passwords are generated and long, never chosen"
+      ],
+      "why_not_the_other_kind": "It is a never-property of one function; the login scenario shows a generated password works but cannot show a chosen one is impossible."
+    },
+    {
+      "kind": "unit",
+      "title": "The package is MIT and imports nothing from the service layer",
+      "rule": "The package manifest declares MIT, and its resolved import graph contains no module from mail's service layer.",
+      "unit": "@rafters/mail-auth-basic: package manifest and import graph",
+      "proves": [
+        "SHALL: the package SHALL be MIT and import nothing from the service layer",
+        "reflection 01a1a48e: prebuilt strategies in separate MIT packages so core ships no credential store"
+      ],
+      "why_not_the_other_kind": "No user meets the licence or import graph through a public surface, and it is one static fact."
+    }
+  ],
+  "failure_ways": [
+    { "way": "Basic compares against the wrong list, or the list from the secret is not read, so a generated password does not log in", "caught_by": "A deployer issues a generated password and a person's mail app logs in with it" },
+    { "way": "A wrong password or an unknown user logs in", "caught_by": "A deployer issues a generated password and a person's mail app logs in with it" },
+    { "way": "Basic hashes the password as UTF-8 while the client sent other octets, so a password with octets above 0x7F fails or matches the wrong entry", "caught_by": "Basic checks a golden table of entries with one PBKDF2-SHA256 hash at 100,000 iterations over the client's octets" },
+    { "way": "An entry with fewer than 100,000 iterations is accepted", "caught_by": "Basic checks a golden table of entries with one PBKDF2-SHA256 hash at 100,000 iterations over the client's octets" },
+    { "way": "Basic skips the hash for an unknown user, or hashes more than once per attempt", "caught_by": "A strategy author runs the contract suite in workerd (unequal work); Basic checks a golden table (exactly one hash)" },
+    { "way": "The contract suite misses a strategy that does less work for an unknown user", "caught_by": "A strategy author runs the contract suite in workerd and it passes good strategies and fails broken ones" },
+    { "way": "A strategy's store throws on a long user name, so the session ends with EOF and does less work than for a wrong password", "caught_by": "A strategy author runs the contract suite in workerd (oversized-user clause); settled by the work rule, since a throw before any hash is less work than a wrong password" },
+    { "way": "The limiter wraps only some strategies, or behaves differently when wrapped", "caught_by": "A strategy author runs the contract suite in workerd (plain and wrapped)" },
+    { "way": "No refund, so a mail app that reconnects often is refused after 10 logins", "caught_by": "A mail app that reconnects often keeps logging in while wrong guesses from one address stop at 10 in 5 minutes" },
+    { "way": "Refund is given to wrong passwords, or interleaved correct logins free extra slots for wrong ones", "caught_by": "A mail app that reconnects often keeps logging in while wrong guesses from one address stop at 10 in 5 minutes" },
+    { "way": "Once 10 wrong guesses fill the window, a further attempt is checked anyway", "caught_by": "A mail app that reconnects often ... (settled: checking an 11th attempt breaks the limit of 10 attempts, so it is refused unchecked even with the correct password)" },
+    { "way": "The limit is kept per user or globally instead of per client address", "caught_by": "A mail app that reconnects often ... (address B still logs in)" },
+    { "way": "The window never ends, so an address stays locked out", "caught_by": "A mail app that reconnects often ... (logs in again after 5 quiet minutes)" },
+    { "way": "Concurrent attempts race past the limit", "caught_by": "Concurrent attempts from one address admit exactly 10, and refused ones do no hash" },
+    { "way": "The count lives in memory and resets when its holder is evicted", "caught_by": "The limiter's count survives eviction of whatever holds it" },
+    { "way": "A password, hash or salt is written to session state or D1", "caught_by": "No credential reaches stored state" },
+    { "way": "A deployer sets a chosen, weak password", "caught_by": "The generator never takes a chosen password" },
+    { "way": "The package imports the service layer or ships under another licence", "caught_by": "The package is MIT and imports nothing from the service layer" },
+    { "way": "The platform secret is missing or malformed, so reading the list throws", "caught_by": "No SHALL settles what the client sees; reported under gaps" },
+    { "way": "A strategy's store hangs, holding the login and its limiter slot", "caught_by": "No SHALL settles a timeout; reported under gaps" },
+    { "way": "Store time differs between an unknown user and a wrong password even with the dummy hash (about 0.1 ms on local KV)", "caught_by": "No SHALL breaks: the work rule is defined by the strategy's counter, not by wall time" },
+    { "way": "The login list outgrows the platform secret's size (about 27 entries in a 5 KB variable)", "caught_by": "No SHALL in this requirement sets a list size; no SHALL breaks" },
+    { "way": "A limiter refusal reads as NO and counts toward the session's 3-strike BYE", "caught_by": "No SHALL breaks: the refusal still refuses, and the reconnecting mail app is protected by the refund" }
+  ],
+  "gaps": [
+    { "failure_way": "The limit counts attempts in a fixed 5-minute window, so up to 20 attempts can land in 5 minutes across a boundary", "question": "Is the 5-minute window fixed or sliding? Both read as 'a 5-minute window', and the answer changes how the limiter stores its count." },
+    { "failure_way": "A strategy's store or the platform secret throws, or hangs", "question": "What must the contract require when a strategy's store fails: a NO with the attempt counted, a closed connection, or something else, and is there a deadline after which a hung store is treated as failed?" },
+    { "failure_way": "A generated password is too short to survive offline guessing at 100,000 iterations", "question": "What minimum length or entropy must a generated password have?" }
+  ],
+  "left_out": [
+    { "candidate": "Revocation closes every session on the mailbox, and sessions register at login", "why": "Not a SHALL of this requirement; the toy's revocation findings belong to the revocation requirement." },
+    { "candidate": "KV and Redis strategies pass the contract suite", "why": "This requirement offers only the basic strategy and the suite; the suite's oversized-user clause is kept, the KV strategy is not." },
+    { "candidate": "LOGIN takes under N ms, and hashing stays under the plan's 10 ms CPU limit", "why": "A number from a real run is a PR note, never a check." },
+    { "candidate": "One scenario per golden row (correct, wrong, unknown, high octets)", "why": "Examples are rows of one unit check, never one check each." },
+    { "candidate": "A separate scenario for a wrong password and another for an unknown user", "why": "Related refusals fold into the login behaviour they belong to." },
+    { "candidate": "A unit check that basic's dummy hash runs for an unknown user", "why": "The contract suite run against basic fails whenever it does not, and the golden table counts the hash." },
+    { "candidate": "Strategies import env from cloudflare:workers because imapObjects gives login no env", "why": "Implementation detail, not behaviour; the import rule this requirement does state is checked by the package check." },
+    { "candidate": "Unit check that refund only ever helps correct passwords", "why": "The reconnect-and-guess scenario fails whenever it breaks, through IMAP." },
+    { "candidate": "Tests take no real time waiting on the window", "why": "Timing discipline is a repo rule for CI; the scenario's clock control is how it runs, not a check." }
+  ]
+}

@@ -1,0 +1,5 @@
+I didn't reply to kelex, because another legion session had already answered their question. That answer is in today's bullpen, addressed to kelex and marked as resolving signal `01a1d351-c12f`:
+
+> Keep your mirrored test/ path. Sean: 'all of the files should stay where they are tested. rust and ts need their mirror folders.' 'Beside the code' means where your language keeps its tests, not inside src/.
+
+The stop hook probably checked the open signals before that answer was posted. Sending it again would only duplicate the post. huttspawn and gitpress asked the same question, and the same answer covers them. If the hook blocks again, the answer probably didn't close the signal, and I'll send it again with `legion signal`.

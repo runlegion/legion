@@ -1,0 +1,28 @@
+I wrote the checks for FR-MAIL-034 to `evidence/test-rule-toy/out/out-FR-MAIL-034.json`. The JSON parses, and every `caught_by` entry names an existing check title.
+
+**Counts:** 9 checks, 3 behaviour and 6 unit. The file also lists 26 failure ways, 4 gaps and 11 left-out candidates.
+
+The three behaviour scenarios:
+- **New mail reaches every open client.** This one scenario covers several outcomes: UIDs only rise, a delivery that commits late is still pulled, and a missing or unreadable message holds back no later mail.
+- **Another client's expunge.** A client not yet told can still read the expunged message. The provider's retry adds nothing, and the next new message gets a higher UID.
+- **A client's own command that brings in or changes mail is answered.** The form saw a tell waiting on that same client hang the mailbox for good.
+
+The six unit checks:
+- one table of ways a delivery could be pulled twice or missed, such as boundary ids, paging past 100, overlapping pulls, and a failure part way through a pull
+- the bookkeeping that keeps any change from going untold
+- the alarm chain surviving a failed pull
+- a rebuilt mailbox reporting a greater UIDVALIDITY
+- `held` returning more than 100 messages, expunged ones included
+- an erased message keeping its row
+
+**Gaps for the spec author:**
+1. The SHALL says a late delivery is never lost, but the form's cursor only waits ten minutes, so a later commit is lost for good. The SHALL and the form conflict.
+2. A temporary storage error on a good message marks it unreadable, and it is never read again. Should it be retried first?
+3. The form says a message with no Message-ID is always added. The storage toy says a provider's retry of one must not add a second UID. The two disagree.
+4. If D1 is down when a client opens the mailbox, should it answer from what is already stored, or reject?
+
+**Least sure it belongs:** the unit check "An erased message keeps its row". The clause "and its row after that" puts it in this requirement, but erasure is driven by FR-MAIL-053's rule. That check could belong in FR-MAIL-053's verification instead, and I would put that at about even odds.
+
+The requirement traces to decision record 01a1a48e-3611…, but it was not in my list of inputs, so I did not read `reflection-01a1a48e.txt`. I wrote the gaps without it, and that decision may already settle one or more of them, most likely gap 3.
+
+A message from kelex in the team board asked whether RFC 01a1d351's "beside the code" means unit tests in `src/` or a mirrored `test/` folder. That belongs to the session that owns the RFC, so I did not answer it.

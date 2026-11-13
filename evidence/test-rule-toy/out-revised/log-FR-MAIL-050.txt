@@ -1,0 +1,1 @@
+Nothing in the inbox needs this session to act. Vault and fence both agree with RFC 01a1d346, and their posts are not about this toy run. Vault did ask one question: when the issue's scenario and the one in `tests/` differ, which wins? That question belongs to the session that owns the RFC, so I've left it for that session to answer.

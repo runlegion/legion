@@ -1,0 +1,85 @@
+{
+  "requirement": "FR-MAIL-049",
+  "checks": [
+    {
+      "kind": "behaviour",
+      "title": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched",
+      "gherkin": "Scenario: A deployer revokes a mailbox and every session on it ends\n  Given mailbox \"team@example.test\" has two users with different valid passwords\n  And a mail client is logged in to it over IMAP as the first user and has not selected a folder\n  And a mail client is logged in to it over IMAP as the second user and has selected INBOX\n  And a mail client is logged in to it over IMAP and has gone idle long enough to hibernate\n  And a mail client is logged in to it for submission\n  And a mail client is logged in over IMAP to another mailbox \"other@example.test\"\n  When the deployer revokes mailbox \"team@example.test\"\n  Then each of the four clients on \"team@example.test\" receives a BYE and its connection closes\n  And none of them can read or send mail on the closed connection\n  And the client on \"other@example.test\" stays connected and can still fetch its mail\n  And each user of \"team@example.test\" can log in again with their valid password and read mail",
+      "proves": [
+        "FR-MAIL-049 SHALL 1: every IMAP and submission session logged in to it, awake or hibernating, is told and closed",
+        "FR-MAIL-049 SHALL 1: a session registers with its mailbox at login and not at SELECT (the unselected session)",
+        "FR-MAIL-049 SHALL 2: revocation is per mailbox, so another valid password's session also closes and reconnects",
+        "toy 01a1a4c4 refuted claim: a logged-in unselected session stayed open and read mail after revoke, 5 of 5 (seen failure, kept)",
+        "toy 01a1a4c4 must_hold: register a session at login, not at SELECT",
+        "toy 01a1ae1d: the hibernating session is made by evict with webSockets 'hibernate' after the last reply is read, never by ctx.abort(), which drops the socket and is not hibernation"
+      ],
+      "why_not_the_other_kind": "A deployer and the mail clients meet this through public surfaces over several calls (log in, select, revoke, observe close, reconnect), so it is one whole behaviour, not one rule."
+    },
+    {
+      "kind": "unit",
+      "title": "A session whose registration with its mailbox fails is not logged in",
+      "rule": "LOGIN answers OK only after the session's registration with its mailbox has succeeded; when registration throws or never completes, the session stays unauthenticated and the client gets no OK.",
+      "unit": "ImapSession login handling (and the submission session's equivalent), calling ImapMailbox.register",
+      "proves": [
+        "FR-MAIL-049 SHALL 1: every session logged in to it is told and closed; a logged-in session that never registered cannot be found by revoke, so this outcome is settled (the spec-writer's worked example)",
+        "Decision 01a1a48e: revocation wraps every strategy, so registration sits after any strategy's login answer"
+      ],
+      "why_not_the_other_kind": "The failure needs an injected fault in the mailbox's session registry, which no public surface can cause, and the rule shows in a single LOGIN call."
+    },
+    {
+      "kind": "unit",
+      "title": "One session that fails to close does not stop revoke closing the rest",
+      "rule": "When telling or closing one registered session throws, ImapMailbox.revoke still tells and closes every other registered session, and counts the one that failed under failed.",
+      "unit": "ImapMailbox.revoke",
+      "proves": [
+        "FR-MAIL-049 SHALL 1: every session logged in to it is told and closed",
+        "toy 01a1a4c4 signature: revoke(): Promise<{ told; closed; failed }>"
+      ],
+      "why_not_the_other_kind": "A session object that throws on close, or a stale registration left by a session that already ended, can only be staged inside the mailbox, and the happy-path scenario never enters that path."
+    }
+  ],
+  "failure_ways": [
+    { "way": "Sessions register at SELECT, so a logged-in session that never selected a folder survives revocation and keeps reading mail (seen in toy 01a1a4c4, 5 of 5)", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "A hibernating session's registration is lost or not woken, so it stays open after revoke", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Submission sessions do not register, so revoke closes only IMAP sessions (submission sessions were unmeasured in toy 01a1a4c4)", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Revoke closes the socket without telling the client (no BYE), as the basic strategy's reload did", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Revoke tells the client but leaves the connection usable", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Revoke is keyed by user, so a session logged in with another valid password survives", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Revoke closes sessions on other mailboxes", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Revoke locks the mailbox, so a user with a valid password cannot reconnect", "caught_by": "A deployer revokes a mailbox and every session logged in to it is told and closed, while other mailboxes are untouched" },
+    { "way": "Registration throws at login and the session is logged in anyway, so revoke can never find it", "caught_by": "A session whose registration with its mailbox fails is not logged in" },
+    { "way": "Registration hangs at login (a hung store holds the login without a timeout, toy 01a1a4c4 must_hold)", "caught_by": "A session whose registration with its mailbox fails is not logged in: a registration that never completes never yields OK, so no unregistered session is logged in; how long the client waits is not a SHALL of this requirement" },
+    { "way": "Telling or closing one session throws (the object is unreachable, or the registration is stale), and revoke stops before the remaining sessions", "caught_by": "One session that fails to close does not stop revoke closing the rest" },
+    { "way": "Telling or closing one session fails and that session stays open", "caught_by": "No check: several answers keep the SHALLs true; reported under gaps" },
+    { "way": "The mailbox cannot read its registered sessions when revoke runs (the store throws or hangs)", "caught_by": "No check: several answers keep the SHALLs true; reported under gaps" },
+    { "way": "A login is in flight while the deployer revokes, and completes after revoke has gathered its sessions (unmeasured in toy 01a1a4c4)", "caught_by": "No check: whether that session counts as logged in at revocation is not settled; reported under gaps" },
+    { "way": "Closes take seconds (2.1 s empty, 8.2 s full state, toy 01a1a4c4)", "caught_by": "No SHALL breaks: SHALL 3 promises no close time" },
+    { "way": "Ended sessions leave stale registrations behind", "caught_by": "No SHALL breaks on its own; a stale registration that throws at revoke is caught by: One session that fails to close does not stop revoke closing the rest" }
+  ],
+  "gaps": [
+    {
+      "failure_way": "Telling or closing one session fails and that session stays open",
+      "question": "When revoke cannot tell or close a session, what must happen: retry until it is closed, close it without a BYE, or report it as failed to the deployer and stop? Each answer leaves SHALL 1 true or false differently, and the choice changes what revoke returns to the deployer."
+    },
+    {
+      "failure_way": "The mailbox cannot read its registered sessions when revoke runs",
+      "question": "When revoke cannot read the mailbox's registered sessions, does the deployer get an error and try again, or does mail retry on its own? SHALL 3 promises no close time, so both keep the SHALLs true, but the deployer surface differs."
+    },
+    {
+      "failure_way": "A login is in flight while the deployer revokes",
+      "question": "Does a login that started before revoke and completes after it count as logged in at revocation, and so must be closed, or is it a new session that may stay, since revoke does not lock the mailbox (SHALL 2: sessions reconnect)? The answer decides whether register and revoke must be ordered against each other."
+    }
+  ],
+  "left_out": [
+    { "candidate": "Revoke closes every session within 1 s (or any time bound)", "why": "SHALL 3 promises no close time, and toy 01a1a4c4 refuted the 1 s claim; close timings are a note for the PR, never a check" },
+    { "candidate": "A separate scenario for the unselected session surviving revoke", "why": "Folded into the main scenario's Given; the seen failure keeps its check there, and a second scenario would prove the same thing" },
+    { "candidate": "A separate scenario each for hibernating, submission and second-user sessions", "why": "One scenario is one whole behaviour; these are outcomes of the same revoke and fold into its Then" },
+    { "candidate": "A unit check that register is called at login and not at SELECT", "why": "The main scenario fails whenever this rule breaks, so the rule needs no unit check of its own" },
+    { "candidate": "Run the revoke scenario once per login strategy (basic, KV, better-auth)", "why": "Decision 01a1a48e puts revocation outside the login port, wrapping every strategy; the strategies' own contract suite is another requirement's" },
+    { "candidate": "The basic strategy has no password revocation event; a reload left the old password working", "why": "That is revoking a password in the basic strategy, not revoking a mailbox; this requirement does not need it" },
+    { "candidate": "A unit check that a hibernating session is produced by evict with hibernate, not ctx.abort()", "why": "That is a test method, not a rule of mail's logic; it is recorded in the scenario's proves so the builder does not drop it" },
+    { "candidate": "Revoking a mailbox with no sessions returns zero told and closed", "why": "No SHALL breaks on it" },
+    { "candidate": "A failed login does not register a session", "why": "No SHALL of this requirement breaks if it does; a stray registration is covered by the stale-registration case of the revoke unit check" },
+    { "candidate": "The KV get throw at 502-byte users closes with EOF instead of NO", "why": "A login strategy defect from toy 01a1a4c4; it belongs to the login requirement, not to revocation" }
+  ]
+}

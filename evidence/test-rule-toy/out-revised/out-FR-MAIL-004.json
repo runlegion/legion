@@ -1,0 +1,112 @@
+{
+  "requirement": "FR-MAIL-004",
+  "checks": [
+    {
+      "kind": "unit",
+      "title": "The address fields of every reading fixture match their goldens",
+      "rule": "readMessage returns From, Sender, Reply-To, To, Cc and Bcc of each fixture exactly as body.goldens.read of research 01a19b44 holds them: display names unquoted, comments and folding white space removed, routes dropped, empty list elements skipped, groups kept with their members (an empty group as an empty member list), local parts and domains as written, and a field that fits no grammar (or a group or empty list in From, or other than one mailbox in Sender) null, never a guessed address.",
+      "unit": "packages/core/src/read/address.ts (readAddresses, over lexer.ts), reached through readMessage in packages/core/src/read/index.ts; table packages/core/tests/fixtures/read/read.json",
+      "rows": [
+        "a1.2-mailboxes: quoted display name with escaped quotes unquoted (\"Giant; \\\"Big\\\" Box\"), bare addr-spec, angle-only <boss@nil.test> with name null",
+        "a1.3-groups: group with three members; empty group Undisclosed recipients:;",
+        "a1.1-sender: Sender as one mailbox",
+        "a2-2-reply: Reply-To with a display name holding a colon",
+        "a5-oddities: comments inside name, local part, domain and group, nested comment, quoted-pair in a comment; Hidden recipients group with only a comment is empty",
+        "a6.1-obs-address: route @node.test: dropped, empty list element skipped, spaced dot in domain joined",
+        "a6.3-obs-ws: comment and folding white space inside the domain and between name and <",
+        "r1-literal-quoted: quoted local part kept with its quotes, domain literal kept with its brackets",
+        "r11-edges: dotted local part with a quoted word; empty Sender null; unclosed group member null; domain missing null",
+        "r4-one-each: Sender with two mailboxes null",
+        "r5-group-from: a group in From null",
+        "m6-garbage-address: garbage From and unterminated quote in To null, not '<' named '>>'",
+        "r2-unclosed: unclosed comment, quoted string and domain literal each make the field null",
+        "NEW ROW: mixed-case local part and domain (From: Joe <Joe.Q@Example.COM>) returned as written",
+        "NEW ROW: empty To, Cc and Bcc values read as empty lists with no problem",
+        "NEW ROW: an address field of 100,000 nested comments and one of 1 MB of commas returns without throwing"
+      ],
+      "proves": [
+        "FR-MAIL-004 SHALL: read the address fields into mailboxes and groups as RFC 5322 3.4 and 4.4 define them, with each named transformation",
+        "toy 01a18fb8: postal-mime and mailparser were seen to fail A.5 comments in groups, A.6.1 route and spaced dot, and A.6.3 CFWS in addresses; these rows keep those failures caught",
+        "toy 01a18fb8: postal-mime was seen to turn the m6 garbage From into address '<' named '>>'; the m6 row keeps that caught",
+        "form 01a19b46: readAddresses returns null when any element fits no grammar; From is mailboxes only, Sender exactly one; local parts and domains returned as written; reading never throws",
+        "goldens 01a19b44: body.goldens.read is the byte-level oracle the builder reproduces"
+      ],
+      "why_not_the_other_kind": "Each row is one call to readMessage on one fixture, so no user sequence through a surface is needed to show it; the RFC examples are rows of one table, not checks of their own."
+    },
+    {
+      "kind": "unit",
+      "title": "sameMailbox compares domains without ASCII case and local parts exactly",
+      "rule": "sameMailbox(a, b) is true exactly when the local parts are equal as written and the domains are equal after folding A-Z only, shown by a table: a@X.Test = a@x.test; A@x.test != a@x.test; \"a b\"@x.test != a.b@x.test; a domain holding the Kelvin sign U+212A != the same domain with k.",
+      "unit": "packages/core/src/read/address.ts (sameMailbox)",
+      "proves": [
+        "FR-MAIL-004 SHALL: a domain compares without regard to case; a local part compares exactly",
+        "form 01a19b46: domains ignore ASCII case only (A-Z), as the writer's sameAddress does; canonicalLocal is never used for reading"
+      ],
+      "why_not_the_other_kind": "It is one pure function over two values; no fixture or surface shows it, because readMessage never calls it."
+    }
+  ],
+  "failure_ways": [
+    { "way": "A display name keeps its quotes or backslashes, or loses an escaped quote", "caught_by": "The address fields of every reading fixture match their goldens (a1.2-mailboxes row)" },
+    { "way": "A comment, nested comment or comment with a quoted ')' leaks into a name, local part, domain or group name, or ends the comment early", "caught_by": "The address fields of every reading fixture match their goldens (a5-oddities row)" },
+    { "way": "Folding white space or a comment inside a domain or between name and '<' splits or truncates the address (seen in postal-mime: 'jdoe@machine', 'John Doe . example')", "caught_by": "The address fields of every reading fixture match their goldens (a6.3-obs-ws row)" },
+    { "way": "A route is kept in the address (seen in postal-mime: '@node.test:mary@example.net')", "caught_by": "The address fields of every reading fixture match their goldens (a6.1-obs-address row)" },
+    { "way": "An empty list element becomes an empty mailbox or stops the list", "caught_by": "The address fields of every reading fixture match their goldens (a6.1-obs-address row)" },
+    { "way": "A spaced dot in a domain becomes part of the display name (seen in postal-mime: name '. example', addr 'jdoe@test')", "caught_by": "The address fields of every reading fixture match their goldens (a6.1-obs-address row)" },
+    { "way": "A group is flattened into its members, loses its name, or a trailing comment becomes a member (seen in postal-mime: member named 'the end of the group', member named ')')", "caught_by": "The address fields of every reading fixture match their goldens (a1.3-groups and a5-oddities rows)" },
+    { "way": "Garbage that fits no grammar is turned into an address instead of left unread (seen in postal-mime on m6)", "caught_by": "The address fields of every reading fixture match their goldens (m6-garbage-address, r2-unclosed, r11-edges rows)" },
+    { "way": "A group or an empty list in From, or two mailboxes in Sender, is read as an author", "caught_by": "The address fields of every reading fixture match their goldens (r5-group-from, r4-one-each, r11-edges rows)" },
+    { "way": "An unclosed comment, quoted string or domain literal throws, or is read as a partial address", "caught_by": "The address fields of every reading fixture match their goldens (r2-unclosed row)" },
+    { "way": "Hostile input (deep comment nesting, an enormous field) throws or exhausts the stack, so no address field of the message is read", "caught_by": "The address fields of every reading fixture match their goldens (new row: 100,000 nested comments and 1 MB of commas)" },
+    { "way": "The reader lowercases a local part or domain, so two different local parts later compare as one", "caught_by": "The address fields of every reading fixture match their goldens (new row: mixed-case local part and domain returned as written)" },
+    { "way": "An empty To, Cc or Bcc value is read as null or records a problem instead of an empty list", "caught_by": "The address fields of every reading fixture match their goldens (new row: empty To, Cc and Bcc)" },
+    { "way": "Domain comparison is case-sensitive, or local-part comparison folds case", "caught_by": "sameMailbox compares domains without ASCII case and local parts exactly" },
+    { "way": "Domain comparison folds beyond ASCII with toLowerCase (the Kelvin sign folds to k)", "caught_by": "sameMailbox compares domains without ASCII case and local parts exactly (Kelvin row)" },
+    { "way": "Reply-To or Bcc is read with the wrong grammar or not read at all", "caught_by": "The address fields of every reading fixture match their goldens (a2-2-reply row for Reply-To; new empty-Bcc row; every other row asserts bcc null where the field is absent)" },
+    { "way": "A message carries the same address field twice (two To fields)", "caught_by": "No check: which occurrence is read is not decided; see gaps" },
+    { "way": "An address field holds 8-bit (UTF-8) bytes in a display name, local part or domain", "caught_by": "No check: what the read returns is not decided; see gaps" }
+  ],
+  "gaps": [
+    {
+      "failure_way": "A message carries the same address field more than once (two To or two Cc fields), which real mail does",
+      "question": "Which To (or Cc, Bcc, Reply-To) does Mail read when the field repeats: the first, the last, or all of them joined? The form records repeated-field and says Subject is the first one, but says nothing for address fields; the reference reads the first, and no golden shows it. The answer decides who a mail client shows as recipients."
+    },
+    {
+      "failure_way": "An address field holds UTF-8 (RFC 6532) in a display name, local part or domain",
+      "question": "Does the read return such names and addresses as their bytes' binary string (the form's current, explicitly undecided state) or decoded as UTF-8, and does 'a domain compares without regard to case' cover non-ASCII domains, which the form's ASCII-only sameMailbox does not fold? The answer decides whether international senders read correctly, which the intent's 'a mailbox that feels like the one people already use' depends on."
+    }
+  ],
+  "left_out": [
+    {
+      "candidate": "Behaviour: a person receives a message with obsolete and commented address forms and their mail client shows the sender and recipients correctly",
+      "why": "Behaviour needs a sequence through a surface: reading addresses is one call to readMessage, and the client sees them only through IMAP ENVELOPE, which the form hands on to IMAP's own requirement; this scenario would test IMAP's formatting, not this SHALL, and every way this SHALL fails is already caught by the golden table."
+    },
+    {
+      "candidate": "One check per RFC 5322 Appendix A example (A.1.2, A.1.3, A.5, A.6.1, A.6.3)",
+      "why": "Examples are rows, not checks: they are rows of the golden table."
+    },
+    {
+      "candidate": "Unit checks of the lexer (comments nest, quoted-pair, unclosed comment problem text)",
+      "why": "A check that proves what another proves: every lexer rule FR-MAIL-004 depends on fails a golden row (a5, a6.3, r1, r2) when it breaks; the lexer's problem text is not an address outcome."
+    },
+    {
+      "candidate": "Unit checks of readAddresses called directly",
+      "why": "A check that proves what another proves: the golden rows reach readAddresses through readMessage and fail whenever its grammar breaks."
+    },
+    {
+      "candidate": "The unparsed-value problem's code and detail text for an unreadable address field",
+      "why": "Not needed by this SHALL: FR-MAIL-004 asks that addresses be read, and the golden rows assert the field is null rather than guessed; the problem list belongs to the requirement for recording reading problems."
+    },
+    {
+      "candidate": "readMessage never throws on any message",
+      "why": "A never-property of reading as a whole, owned by the message-reading requirement; for address fields the hostile-input row of the golden table catches it."
+    },
+    {
+      "candidate": "Each file opens with its RFC citation; strict TS with no as, any or !; coverage 100%",
+      "why": "Repo rules belong to CI, not to this requirement."
+    },
+    {
+      "candidate": "Agreement with Python email on address fields",
+      "why": "Not traced to this SHALL: the Python oracle in 01a19b44 checks MIME leaves and subjects, not addresses; the addresses' expected values come from the RFC prose."
+    }
+  ]
+}
