@@ -2221,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn shipped_requirement_schema_accepts_unit_evidence() {
+    fn shipped_requirement_schema_accepts_unit_and_behaviour_evidence() {
         let db = test_db();
         db.ensure_shipped_schemas().expect("first use");
         let requirement = |evidence: &str| {
@@ -2251,6 +2251,8 @@ mod tests {
         let meta = sample_meta("requirement", "legion");
         db.insert_document(&meta, &requirement("unit").to_string())
             .expect("a unit criterion with a named rule and test lands");
+        db.validate_document_payload("requirement", &requirement("behaviour"))
+            .expect("a behaviour criterion validates");
         assert!(matches!(
             db.validate_document_payload("requirement", &requirement("lint")),
             Err(LegionError::SchemaViolation { .. })

@@ -49,6 +49,10 @@ never `pass` -- verify never asserts an unprovable claim.
      missing, failing or skipped test, or one that cannot fail, is `fail`. Cite it as an
      artifact of kind `test` with the test's name as `ref`; `legion verify` refuses a pass on
      a unit criterion whose artifacts name no test.
+   - For a `behaviour` criterion (one feature per thing a user does, carried in the issue as
+     its guardrail), do that thing at the head through its public surface and confirm each
+     outcome the issue's feature names; an outcome the build does not show is `fail`. Cite
+     what you did and what you observed.
    - For the predictions criterion, fetch what was emitted for this issue by its issue ref --
      `legion uncertainty predictions --issue <owner>/<repo>#<n> --json` -- not by searching
      emission text, and witness each row it returns. When it returns zero rows, state plainly

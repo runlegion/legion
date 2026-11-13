@@ -89,8 +89,10 @@ The behaviour scenarios are owned by <the module owning the entry point, found w
 ## Acceptance criteria
 
 - scenario `@criterion-<id>` passes
+- behaviour `@criterion-<id>`: the build does what its feature above says
+- unit test `<name>` passes: <the rule of logic it proves>
 - (one line per criterion, in the requirement's order; an event criterion is "<event>, recorded by <who>")
-- proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build gives <the toy's verdict>, asserted by unit test <name>; a number with no verdict is recorded by the builder in the PR beside <the toy's number>
+- proven design: <method> is used, shown by <what in the diff>; <the toy's case> re-run against the build gives <the toy's verdict>, asserted by unit test <name>
 - proven design: <what must not be done> is not done, shown by <what in the diff>
 - (one line per Proven design line that no requirement criterion above already carries)
 - CI passes
@@ -158,9 +160,9 @@ against it.
   the method is used, and, where the research measured it, the measurement re-run against
   the build (a throughput floor, a mismatch count). A toy-proven criterion is never
   research or event: the toy's case re-run against the built software, with the toy's
-  verdict, is unit evidence: a named unit test asserted in CI. A number with no verdict is
-  event evidence: the builder records it beside the toy's number and never asserts it.
-  Research evidence stays for
+  verdict, is unit evidence: a named unit test asserted in CI. There is no measurement
+  kind: a number from a real run is a note in the PR, not a criterion. Research evidence
+  stays for
   what no toy has run yet. What the research proved must not be done becomes a criterion
   too.
 - Never label proven toy evidence as background, context, trace ids only, or "design
@@ -171,7 +173,7 @@ In the scenarios shape the section is `## Proven design`. In the template shape 
 no separate section: each Proven design line becomes a criterion in the template's
 acceptance criteria section, carrying its RESEARCH id and measurement in the line itself
 ("proven design: <method> is used, shown by <what in the diff>; proved by <RESEARCH id>,
-<the measurement>, re-run against the build and recorded by the builder in the PR").
+<the toy's verdict>, asserted by unit test <name>").
 
 ## Which work needs a spec
 

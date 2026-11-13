@@ -128,7 +128,7 @@
         },
         "criteria": {
           "type": "array",
-          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: a human's judgment, or a number with no verdict the builder records (an NFR measurement), named with who records it, never simulated; a toy re-run with a verdict is unit, not event; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head. unit: a named rule proven by a named unit test, with no Gherkin.",
+          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: a human's judgment, named with who records it, never simulated; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head. unit: logic, a named rule proven by a named unit test, with no Gherkin. behaviour: one feature per thing a user does, carried in the issue as its guardrail. There is no kind for measurements: a number from a real run is a note in the PR.",
           "items": {
             "type": "object",
             "required": [
@@ -149,7 +149,8 @@
                   "event",
                   "research",
                   "artifact",
-                  "unit"
+                  "unit",
+                  "behaviour"
                 ]
               },
               "event": {
