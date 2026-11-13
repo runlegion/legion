@@ -157,8 +157,8 @@ against it.
   RESEARCH <id>: 0 mismatches on 20,000 states").
 - A proven method is acceptance, not background. Turn each Proven design line into an
   acceptance criterion the build is judged on, with its evidence: what in the diff shows
-  the method is used, and, where the research measured it, the measurement re-run against
-  the build (a throughput floor, a mismatch count). A toy-proven criterion is never
+  the method is used, and, where the research gave a verdict, the toy's case re-run against
+  the build with that verdict (a throughput floor met, zero mismatches). A toy-proven criterion is never
   research or event: the toy's case re-run against the built software, with the toy's
   verdict, is unit evidence: a named unit test asserted in CI. There is no measurement
   kind: a number from a real run is a note in the PR, not a criterion. Research evidence
