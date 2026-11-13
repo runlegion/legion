@@ -1,5 +1,65 @@
 # Legion Changelog
 
+## 0.44.13
+
+The behaviours-only release. 0.44.12 taught the spec-writer to fold related outcomes into
+one behaviour per public surface, but the spec still asked its writer for checks that can
+only be written once the code exists, and said nothing about its scenarios being open to
+challenge. This release writes down the team's rule (RFC `01a1d346`): logic gets a unit
+test, written by the builder beside the code; each thing a user does gets one complete
+scenario; nothing else. The spec-writer now names behaviours only, a scenario in a spec is a
+first draft the repo agent and the builder challenge before agreeing, the issue-writer
+carries the scenarios as the build's guardrail and lists no unit tests, and review checks
+that the builder's unit tests cover the logic it wrote. Separately, the settled-outcome
+rule from 0.44.12 gets the worked example it needed to fire.
+
+Patch release: fixes to three agent definitions within the existing plugin. No code change,
+no wire-format change and no schema migration.
+
+### Fixed
+
+- **The spec names behaviours only, and a scenario is a first draft** (PR #1534, #1527).
+  `plugin/agents/spec-writer.md` now says each thing a user does is one scenario, the
+  complete behaviour start to finish, and a small check of one rule is never its own
+  scenario. Unit tests are the builder's, written beside the code, and the spec names none,
+  because a unit test depends on how the code is built, which no one knows before the code
+  exists. A scenario in the spec is a first draft: the repo agent and the builder challenge
+  it before agreeing (is it one whole behaviour; does it say what should happen rather than
+  copy what the code does today; can it run against the real thing; does it trace to the
+  intent), and a wrong one goes back to the spec writer as a defect, fixed in the spec,
+  never quietly edited to pass. The `event` evidence kind is now a human's judgment only,
+  such as the operator accepting prose on reading. A toy's case re-run against the built
+  software, an NFR measurement, and a live check with no fixture are all scenarios now, run
+  against the real thing. A number from such a run is a note in the PR, not a criterion. An
+  earlier cut of this PR added a `unit` evidence kind with `legion verify`, `legion pr
+  write-check` and requirement-schema changes; it was reverted before merge and none of it
+  ships.
+- **The issue carries the scenarios as the guardrail and names no unit tests** (PR #1534,
+  #1527). In the scenarios shape, `plugin/agents/issue-writer.md` now copies the Gherkin of
+  each scenario criterion under Placement, a second named exception to "never copy the
+  requirement's text" beside the Proven design lines. The feature files are still
+  generated into the `tests/` folder the toolchain defaults to and are never hand-edited.
+  The issue lists no unit tests. A proven-design line now reads as a scenario that re-runs
+  the toy's case against the build and passes, with its number as a PR note, where it used
+  to be a measurement recorded by the builder. Rule 2 ("Tests are part of the spec") now
+  says acceptance criteria name observables rather than assertions, and name no unit tests.
+- **Review checks the builder's unit tests cover the logic it wrote** (PR #1534, #1527).
+  `plugin/agents/legion-review.md` adds a fifth scenarios rule: each piece of logic the diff
+  adds has a unit test beside the code. Logic with no unit test, or a unit test that cannot
+  fail or misses a rule the logic holds, is MED, and asking for one is not invented work.
+  "Three questions, one round" is now "Four questions, one round", with unit-test coverage
+  as the new question. The general list of findings gains "logic the diff adds with no unit
+  test beside it". The proven-design check now passes when the scenario that re-runs the
+  toy's case passes at the PR head, and treats the number as a note rather than a gate.
+- **The settled-outcome rule gets its worked example** (PR #1533, #1532). Platform re-ran
+  0.44.12's spec-writer cold on the toy's inputs, and the rule "an outcome that only one
+  answer keeps every SHALL true is settled, and a scenario checks it" did not fire:
+  FR-MAIL-049 c2 (registration at login fails) came back as a gap. The research had seen
+  the same miss in its round 5, and round 6 fixed it only with the rule and its example. The
+  sentence in `plugin/agents/spec-writer.md` now carries that example: a session that fails
+  to register must not be logged in, because a logged-in session that cannot be revoked
+  breaks "every session is told and closed".
+
 ## 0.44.12
 
 The behaviour-scenarios release. On 0.44.11 the spec-writer told writers to give each
