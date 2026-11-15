@@ -1005,6 +1005,38 @@ impl Database {
             .map_err(LegionError::Database)
     }
 
+    /// The head of each live chain in `domain`, in its root's place (#1544):
+    /// [`get_domain_roots`](Self::get_domain_roots), with each root swapped
+    /// for the newest live same-domain entry that `--follows` it, directly
+    /// or through other entries. A root nothing follows is its own head.
+    /// Backs `whatami`, so revising a rule with `--follows` replaces it.
+    pub fn get_domain_heads(
+        &self,
+        repo: &str,
+        domain: &str,
+        limit: usize,
+    ) -> Result<Vec<Reflection>> {
+        let mut heads = Vec::new();
+        for root in self.get_domain_roots(repo, domain, limit)? {
+            let head_id: String = self.conn.query_row(
+                "WITH RECURSIVE chain(id, created_at) AS ( \
+                   SELECT id, created_at FROM reflections WHERE id = ?1 \
+                   UNION \
+                   SELECT r.id, r.created_at FROM reflections r JOIN chain c ON r.parent_id = c.id \
+                   WHERE r.domain = ?2 AND r.deleted_at IS NULL AND r.archived_at IS NULL) \
+                 SELECT id FROM chain ORDER BY created_at DESC, id DESC LIMIT 1",
+                rusqlite::params![root.id, domain],
+                |row| row.get(0),
+            )?;
+            if head_id == root.id {
+                heads.push(root);
+            } else {
+                heads.push(self.get_reflection_by_id(&head_id)?.unwrap_or(root));
+            }
+        }
+        Ok(heads)
+    }
+
     /// Identity roots (domain=identity). Thin wrapper over [`get_domain_roots`].
     pub fn get_identity_roots(&self, repo: &str, limit: usize) -> Result<Vec<Reflection>> {
         self.get_domain_roots(repo, "identity", limit)
@@ -1976,6 +2008,85 @@ mod tests {
         let roots = db.get_domain_roots("legion", "workflow", 10).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].id, live_root.id);
+    }
+
+    fn workflow_meta(parent_id: Option<&str>) -> ReflectionMeta {
+        ReflectionMeta {
+            domain: Some("workflow".into()),
+            tags: None,
+            parent_id: parent_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn get_domain_heads_returns_newest_chain_entry_in_place_of_root() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta("legion", "rule v1", "self", &workflow_meta(None))
+            .unwrap();
+        let v2 = db
+            .insert_reflection_with_meta(
+                "legion",
+                "rule v2",
+                "self",
+                &workflow_meta(Some(&root.id)),
+            )
+            .unwrap();
+        let v3 = db
+            .insert_reflection_with_meta("legion", "rule v3", "self", &workflow_meta(Some(&v2.id)))
+            .unwrap();
+        let lone = db
+            .insert_reflection_with_meta("legion", "lone rule", "self", &workflow_meta(None))
+            .unwrap();
+
+        let ids: Vec<String> = db
+            .get_domain_heads("legion", "workflow", 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec![lone.id, v3.id]);
+    }
+
+    #[test]
+    fn get_domain_heads_skips_deleted_archived_and_other_domain_followers() {
+        let db = test_db();
+        let root = db
+            .insert_reflection_with_meta("legion", "rule v1", "self", &workflow_meta(None))
+            .unwrap();
+        let deleted = db
+            .insert_reflection_with_meta(
+                "legion",
+                "deleted",
+                "self",
+                &workflow_meta(Some(&root.id)),
+            )
+            .unwrap();
+        db.delete_reflection(&deleted.id).unwrap();
+        let archived = db
+            .insert_reflection_with_meta(
+                "legion",
+                "archived",
+                "self",
+                &workflow_meta(Some(&root.id)),
+            )
+            .unwrap();
+        db.archive_reflection(&archived.id).unwrap();
+        db.insert_reflection_with_meta(
+            "legion",
+            "not workflow",
+            "self",
+            &ReflectionMeta {
+                domain: Some("checkpoint".into()),
+                tags: None,
+                parent_id: Some(root.id.clone()),
+            },
+        )
+        .unwrap();
+
+        let heads = db.get_domain_heads("legion", "workflow", 10).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].id, root.id);
     }
 
     #[test]

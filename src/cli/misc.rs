@@ -125,7 +125,7 @@ pub(crate) fn handle_whoami_apply(
 
 pub(crate) fn handle_whatami(repo: String, limit: usize) -> error::Result<()> {
     let database = open_db()?;
-    let roots = database.get_domain_roots(&repo, "workflow", limit)?;
+    let roots = database.get_domain_heads(&repo, "workflow", limit)?;
     if roots.is_empty() {
         return Ok(());
     }
