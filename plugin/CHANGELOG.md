@@ -1,5 +1,52 @@
 # Legion Changelog
 
+## 0.44.14
+
+The revised-rules release. A repo that revised a workflow rule with `--follows` lost it
+from its operating contract: `legion whatami`, and the boot banner built from it, showed
+only the first entry of each chain, so the revision was stored but never read. `whatami`
+now shows the newest entry of each chain in place of the one it revises, so a repo can
+keep the history of a rule and have its current wording in the banner. Separately,
+platform's cold re-run of 0.44.13's spec-writer found two rules still producing too many
+scenarios, and both are tightened.
+
+Patch release: a fix to what one command reads and to one agent definition, within existing
+surfaces. No new command or flag, no wire-format change and no schema migration.
+
+### Fixed
+
+- **`whatami` shows the newest entry of each `--follows` chain** (PR #1545, #1544).
+  `legion reflect --domain workflow --follows <old>` stores the new reflection as a chain
+  child of `<old>`, and `whatami` read chain roots only (`get_domain_roots`), so the
+  revision never reached the contract or the session-start banner, which calls `legion
+  whatami`. A repo could keep provenance or have the rule in its banner, not both; rafters
+  hit this while rewriting its contract. The new `Database::get_domain_heads` in
+  `src/db/reflections.rs` takes each live root and walks every entry that follows it,
+  directly or through other entries, and returns the newest one in the root's place; a
+  root nothing follows is its own head. An entry in another domain, or one deleted or
+  archived, stops the walk: neither it nor anything that follows it can become the head. A
+  checkpoint that follows a rule, or a revision that was later forgotten, therefore leaves
+  the rule as it was. `whatami` now uses it; `whoami`
+  still reads identity roots through `get_identity_roots`, and `--limit` still counts
+  chains, so each chain shows once. An integration test stores a rule, revises it with
+  `--follows`, and checks that `whatami` shows the revision and its id, and neither the old
+  text nor the old id.
+- **A proven method is a case inside its behaviour, and one function call is not a user
+  behaviour** (PR #1539, #1538). Platform re-ran 0.44.13's spec-writer cold on the toy's
+  inputs and found two rules still producing too many scenarios. First,
+  `plugin/agents/spec-writer.md` said a method a toy proved "is carried by its own
+  criterion", which pulled against "a small check of one rule is never its own scenario":
+  FR-MAIL-049 gave register-at-login its own scenario beside the revoke scenario that
+  already covered it, four scenarios where one revoke run against the unselected,
+  hibernating and other-password sessions does. A proven method is now still a criterion
+  in `verification.criteria`, but it is a case inside the scenario of the behaviour it
+  serves, never a scenario of its own. Second, nothing said that one call to a function is
+  not a thing a user does: FR-MAIL-004 got four scenarios, each one `readMessage` call. The
+  behaviours paragraph now says one call to a function or library is logic, and the user
+  meets it through the surface that consumes it, whose scenario carries it. With both
+  changes the toy writer landed FR-MAIL-049 at one or two scenarios and FR-MAIL-004 at
+  none.
+
 ## 0.44.13
 
 The behaviours-only release. 0.44.12 taught the spec-writer to fold related outcomes into
