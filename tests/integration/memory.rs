@@ -796,6 +796,48 @@ fn forget_persist_archives_out_of_hot_recall_but_reachable_via_archives() {
 }
 
 #[test]
+fn whatami_shows_follows_revision_in_place_of_old() {
+    // #1544: a workflow reflection stored with --follows <old> appears in
+    // whatami in place of <old>.
+    let dir = tempfile::tempdir().unwrap();
+    let old_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--domain",
+        "workflow",
+        "--text",
+        "old operating rule",
+    ]))
+    .trim()
+    .to_string();
+    let new_id = run_ok(legion_cmd(dir.path()).args([
+        "reflect",
+        "--repo",
+        "kelex",
+        "--domain",
+        "workflow",
+        "--follows",
+        &old_id,
+        "--text",
+        "revised operating rule",
+    ]))
+    .trim()
+    .to_string();
+    assert_uuid_format(&new_id);
+
+    let whatami = run_ok(legion_cmd(dir.path()).args(["whatami", "--repo", "kelex"]));
+    assert!(
+        whatami.contains("revised operating rule") && whatami.contains(&new_id),
+        "the --follows revision should feed whatami: {whatami}"
+    );
+    assert!(
+        !whatami.contains("old operating rule") && !whatami.contains(&format!("(id: {old_id})")),
+        "the followed entry should be replaced, not shown: {whatami}"
+    );
+}
+
+#[test]
 fn reflect_retag_moves_workflow_lesson_off_whatami_but_keeps_it_hot() {
     // #783: `reflect retag --id X --set-domain none` takes a long-tail
     // domain=workflow lesson out of the whatami banner WITHOUT archiving
