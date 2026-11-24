@@ -1,8 +1,0 @@
-# Test threads get the 8 MiB stack main.rs gives the binary. Tests that
-# build legion's clap tree (Cli::command(), reached by every cmd-check
-# rewrite) run it on the test harness's own thread, whose default is 2 MiB;
-# the unoptimized frame of that tree grows with every subcommand and
-# overflowed on Linux and Windows CI (#1334). Matching production's stack
-# means a test needs more only when the binary would too.
-[env]
-RUST_MIN_STACK = "8388608"
