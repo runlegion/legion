@@ -1,0 +1,230 @@
+#!/bin/bash
+# Legion Stop hook.
+#
+# Two gates on every Stop event. A Stop that trips neither produces no
+# output and does not continue the turn (#1491).
+#
+# 1. DELEGATED WORK LIVENESS GATE (#778, card-free since #931). A work item
+#    delegated to a watch-spawned wake attempt is sound only while an
+#    unfakeable liveness signal (watch daemon heartbeat + a linked,
+#    in-flight wake_attempts row) backs it. This checks that signal
+#    directly against the DB via `legion watch delegated-needs-attention`
+#    and blocks when it no longer holds, covering the case
+#    `tick_health`'s own auto-revert sweep cannot reach on its own: the
+#    watch daemon itself being down.
+#
+#    In practice this gate is currently VACUOUS: #931 removed the kanban
+#    card surface, including `legion kanban delegate` -- the only thing
+#    that ever linked a wake_attempts row to a work item. Nothing links one
+#    today, so `delegated-needs-attention` always returns empty and this
+#    gate never fires. It is kept wired (not deleted) because the
+#    underlying liveness predicate (`Database::work_item_is_live`) is
+#    legion-only, card-free infrastructure #934 already generalized, and
+#    the gate costs nothing to keep sound for whatever eventually
+#    re-populates the link. See docs/decisions -- #931's card-surface
+#    removal issue -- for why this is a deliberate "vacuous but sound"
+#    state, not an oversight.
+#
+# REMOVED (#931): the in-progress ("Accepted kanban card") gate that used
+# to run as gate 1 here (#461 -> #523) had no card-free replacement --
+# "an agent has picked-up work in progress" was local card state with no
+# work-source equivalent, and inventing a local claim ledger to preserve it
+# was explicitly out of scope for the card removal (see `src/queue.rs`'s
+# module doc comment: no local "accepted" claim survives). Removing the
+# stale `legion kanban list` call rather than leaving it in place matters:
+# a dead subcommand call fails open silently and LOOKS like a working
+# gate, which is worse than an admittedly-absent one. This is reported as
+# a blocker in #931's work summary, not silently dropped.
+#
+# 2. PENDING-REPLIES GATE (#1020, HOOK OUTPUT DOCTRINE -- Sean, 2026-08-27,
+#    reflection 01a0421f-3bb1-7a91-a2d4-1587442dbd36). A directed
+#    wake-worthy signal sat unanswered for forty minutes because nothing
+#    stopped the turn from ending while it was open -- inbox.sh's
+#    additionalContext note was easy to read past. This gate re-checks
+#    `legion pending-replies --repo $REPO --directed` at Stop time and
+#    hard-blocks (decision:block) when it is non-empty, naming the open
+#    ask(s) in the reason. `--directed` excludes @all/@everyone broadcasts:
+#    a broadcast is not addressed to THIS agent in particular, and
+#    hard-blocking every agent's Stop over one broadcast post is the wrong
+#    weight -- every repo that saw it would independently stop on it, not
+#    just whichever one it was actually meant for. (A broadcast ask IS
+#    retirable by an ordinary directed reply -- `legion signal --to
+#    <author> --verb answer` clears it same as any directed ask; only a
+#    reply `--to all` retires nothing, and the block reason says so
+#    explicitly.) Guarded by `legion_hook_covered` -- $REPO is
+#    basename($CWD), which in a worktree is the worktree directory name,
+#    not the parent repo's watch.toml identity -- so a name with NO
+#    legion footprint at all (absent from watch.toml and with zero
+#    reflections) exits this gate cleanly. This is a heuristic, not a
+#    guarantee: a worktree basename becomes "covered" the moment anything
+#    reflects under it, at which point this guard no longer excludes it --
+#    what actually keeps a worktree session from inheriting the parent
+#    repo's broadcast asks is `--directed` itself, not coverage.
+#    Resolving a worktree's identity through the git common dir to its
+#    parent repo is the real follow-up; this guard only skips names
+#    legion has never heard of at all. Ignores stop_hook_active for the
+#    same reason gate 1 does: the obligation must keep blocking across a
+#    continuation, not just once -- the harness's 8-block cap is its own
+#    backstop. Clears itself: replying to the signal (never `--to
+#    all`, which retires nothing) is what empties `pending-replies` next
+#    time (`cli::signal::handle_signal`'s `retire_answered_signals`
+#    retires the ask on reply), not a marker file.
+#
+# The turn-kind prompt (#1477) used to run here as gate 3, emitted as Stop
+# additionalContext on every Stop. That continued every turn, so #1491 moved
+# it to turn-kind.sh on UserPromptSubmit, where it arrives before the answer.
+#
+# Bypass: LEGION_SKIP_STOP_BLOCK=1 env skips both gates. Writes a
+# telemetry row via `legion telemetry record-bypass` so the escape is
+# visible to #440's summary.
+
+# shellcheck source=lib/prelude.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+# shellcheck source=lib/emit.sh
+source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/emit.sh" 2>/dev/null || exit 0
+
+legion_hook_parse || exit 0
+if [ -z "$CWD" ]; then
+  exit 0
+fi
+
+# Session-end handoff (#493): optimistic expediter for the watch
+# reaper. Lets the reaper skip a poll cycle when the agent has cleanly
+# exited and CC fires this hook. PTY EOF + PID-poll remain the
+# authoritative completion signal; this is a speed-up only, so the
+# `|| true` swallows any failure -- the reaper still converges via EOF
+# even if the CLI errors or does not exist yet (forward-compatible).
+#
+# The CLI subcommand `legion watch session-end --attempt-id <id>` lands
+# in the watch.rs bundle PR alongside #489/#490/#491. Until then this
+# call is a no-op that proves out the wire-up. Function must be defined
+# before any caller; placed up here so all subsequent bypass paths can
+# invoke it cleanly.
+session_end_handoff() {
+  if [ -n "${LEGION_WAKE_ATTEMPT_ID:-}" ] && [ -x "$LEGION" ]; then
+    "$LEGION" watch session-end \
+      --attempt-id "$LEGION_WAKE_ATTEMPT_ID" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+# Bypass: skip both gates, log the escape if telemetry is available.
+if [ "${LEGION_SKIP_STOP_BLOCK:-}" = "1" ]; then
+  if [ -x "$LEGION" ] && [ -n "$SESSION_ID" ]; then
+    "$LEGION" telemetry record-bypass \
+      --repo "$REPO" \
+      --session-id "$SESSION_ID" \
+      --tool Stop \
+      --pattern "session-end" \
+      --bypass-reason "env:LEGION_SKIP_STOP_BLOCK=1" \
+      2>/dev/null || true
+  fi
+  # Explicit operator session-end: still fire the #493 handoff so a
+  # watch-spawned session that exits via this bypass records its
+  # exit_observed_at timestamp for the reaper.
+  session_end_handoff
+  exit 0
+fi
+
+# Watch-pty wakes (#492): the two gates below are calibrated for
+# operator-attended sessions. Watch-spawned PTY wakes are atomic units
+# that exit through this hook on every wake; running the gates risks
+# the 8-block stop-hook cap in CC 2.1.143 and adds noise without
+# proportionate signal. Reaper observes EOF and continues regardless.
+# Rationale + per-gate decisions in docs/decisions/2026-05-watch-pty-env-audit.md.
+#
+# LEGION_SPAWN_SOURCE=watch-pty is stamped on every PTY spawn by
+# src/watch/spawn.rs's SpawnMode::Pty branch (#489, live at HEAD) -- this
+# is not a forward-compat stub, it fires on every real watch-spawned wake.
+if [ "${LEGION_SPAWN_SOURCE:-}" = "watch-pty" ]; then
+  if [ -x "$LEGION" ] && [ -n "$SESSION_ID" ]; then
+    "$LEGION" telemetry record-bypass \
+      --repo "$REPO" \
+      --session-id "$SESSION_ID" \
+      --tool Stop \
+      --pattern "watch-pty-skip" \
+      --bypass-reason "env:LEGION_SPAWN_SOURCE=watch-pty" \
+      2>/dev/null || true
+  fi
+  session_end_handoff
+  exit 0
+fi
+
+# ---------- (1) Delegated work liveness gate (#778, card-free since #931) ----------
+#
+# Fail-open at the shell-call layer only (a broken legion binary or missing
+# jq must never trap the agent). The liveness ANSWER itself is fail-closed
+# inside the subcommand: a missing link, a terminal attempt, or a
+# stale/absent daemon heartbeat all read as needs-attention, never as "safe
+# to stop" -- an ambiguous state must never be interpreted as safe.
+if command -v jq >/dev/null 2>&1 && [ -x "$LEGION" ]; then
+  DEAD_DELEGATED=$("$LEGION" watch delegated-needs-attention --repo "$REPO" --json 2>/dev/null \
+    | jq -r '"- " + .work_item_id' 2>/dev/null)
+
+  if [ -n "$DEAD_DELEGATED" ]; then
+    REASON="Work delegated to a watch-spawned attempt is no longer verifiably live (the attempt finished or died, or the watch daemon itself is not running) and cannot stop yet:
+
+${DEAD_DELEGATED}
+
+This should self-heal within one watch health tick once the daemon is running again; if it persists, check \`legion watch status\`.
+
+To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
+
+    emit_block "$REASON"
+    exit 0
+  fi
+fi
+
+# ---------- (2) Pending-replies gate (#1020) ----------
+#
+# Coverage-gated (#353), like inbox.sh: $REPO here is
+# basename($CWD) (legion_hook_parse), which in a git worktree is the
+# WORKTREE directory name, not the parent repo's name in watch.toml --
+# e.g. "1020-inbox-last", never "legion". `legion_hook_covered` (the same
+# gate inbox.sh already applies) skips a name with NO legion
+# footprint at all -- absent from watch.toml AND with zero reflections.
+# This is a heuristic, not a guarantee: the moment anything reflects
+# under a worktree's basename, that name reads as "covered" and this
+# guard no longer excludes it. What actually keeps a worktree session
+# from inheriting the parent repo's broadcast asks is `--directed` below,
+# not coverage -- resolving a worktree's identity through the git common
+# dir to its parent repo is the real follow-up.
+#
+# --directed drops @all/@everyone broadcasts: a broadcast is not
+# addressed to THIS agent in particular, and hard-blocking every agent's
+# Stop over one broadcast post is the wrong weight -- every repo that saw
+# it would independently stop, not just whichever one it was meant for.
+# (A broadcast ask IS retirable by an ordinary directed reply -- `legion
+# signal --to <author> --verb answer` clears it same as any directed ask;
+# only a reply `--to all` retires nothing, which the block reason below
+# says explicitly.) Boot and post-compact keep the full set via plain
+# `legion pending-replies` (no --directed): broadcasts are still worth
+# surfacing there, just not hard-enforcing.
+#
+# Fail-open at the shell-call layer, same as gate (1): a missing legion
+# binary must never trap the agent, and a DB/config failure is logged to
+# $LEGION_HOOK_LOG rather than silently disarming the gate (a bare
+# 2>/dev/null here would hide exactly the failure this gate exists to
+# catch). `legion pending-replies` itself already renders nothing when
+# the reply-required set is empty (see board::format_pending_replies), so
+# a non-empty result here IS the obligation.
+if legion_hook_covered && [ -x "$LEGION" ]; then
+  PENDING=$("$LEGION" pending-replies --repo "$REPO" --directed 2>>"$LEGION_HOOK_LOG")
+
+  if [ -n "$PENDING" ]; then
+    REASON="Open directed asks for ${REPO}; the turn cannot end until each is answered:
+
+${PENDING}
+
+Reply with \`legion signal --repo ${REPO} --to <author> --verb answer ...\` (a reply --to all retires nothing).
+
+To bypass (rare, diagnostics or explicit operator session-end), set LEGION_SKIP_STOP_BLOCK=1. The bypass writes one row to bypass.jsonl."
+
+    emit_block "$REASON"
+    exit 0
+  fi
+fi
+
+# Neither gate fired: the turn ends cleanly, with no output (#1491).
+session_end_handoff
+exit 0

@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "board",
+  "title": "Board",
+  "description": "A surface's kickoff board for Discover: the stickies every concerned party put up while the intent formed, in the order they went up, with no record of who wrote them. not-hotdog composes the intent from the board alone, and each revision of the board keeps the earlier stickies as history. One board per intent.",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "surface": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string", "minLength": 1, "description": "The agent that owns the surface (the repo agent)" },
+        "date": { "type": "string", "minLength": 1, "description": "The date the board was opened, YYYY-MM-DD" },
+        "intent": { "type": "string", "minLength": 1, "description": "Id of the intent this board forms or revises, once one exists" }
+      },
+      "required": ["title", "surface", "owner", "date"],
+      "additionalProperties": false
+    },
+    "stickies": {
+      "type": "array",
+      "description": "The stickies, in the order they went up. Who wrote each is never recorded, so not-hotdog judges each on what it says.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "description": "One short thought, as it was said" },
+          "box": {
+            "type": "string",
+            "enum": ["problem", "outcomes", "users", "what-they-get", "solutions", "hypothesis", "risks", "least-work"],
+            "description": "The Lean UX canvas box it sits in, when placed"
+          },
+          "research": {
+            "type": "string",
+            "enum": ["code", "design"],
+            "description": "For an unknown: whether a toy proves it (code) or design research learns it (design)"
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["meta", "stickies"],
+  "additionalProperties": false
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "prototype",
+  "title": "Prototype",
+  "description": "Pointer to one interface prototype made in Design on the Design canvas. A prototype is a pointer to a canvas plus the part of the interface it explores; the canvas holds the prototype itself. Each pointer names the intent it was made for, so the brief-writer and the team can find every prototype made for that intent with `legion document list --doc-type prototype --json`.",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "intent": { "type": "string", "minLength": 1, "description": "Id of the intent document the prototype was made for" },
+        "date": { "type": "string", "minLength": 1 },
+        "author": { "type": "string", "minLength": 1 }
+      },
+      "required": ["intent", "date", "author"]
+    },
+    "canvas": { "type": "string", "minLength": 1, "description": "Link to the prototype's Design canvas" },
+    "explores": { "type": "string", "minLength": 1, "description": "The part of the interface the prototype explores" }
+  },
+  "required": ["meta", "canvas", "explores"]
+}

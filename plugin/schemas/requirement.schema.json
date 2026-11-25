@@ -1,0 +1,218 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "requirement",
+  "title": "Requirement",
+  "description": "AI-first requirement: the WHAT derived from service-design artifacts (the WHY). JSON shape per the 2026-05 format reset (no user-story layer; provenance via traces_to; NFRs/constraints are separate doc types referenced by id, per the IEEE 830 load-bearing-separation finding). Part of the definition layer (legion #526).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Typed id, e.g. FR-EMAIL-003"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "requirement"
+          ]
+        },
+        "surface": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "specified",
+            "accepted",
+            "implemented",
+            "verified",
+            "cancelled"
+          ]
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "SHALL",
+            "SHOULD",
+            "MAY"
+          ],
+          "description": "RFC 2119 / IEEE 830 conformance level"
+        },
+        "phase": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "owner": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "surface",
+        "status",
+        "priority",
+        "owner",
+        "date",
+        "author"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "traces_to": {
+      "type": "string",
+      "description": "Provenance on the requirement itself: moment_of_truth.<id>, journey phase, or pain theme"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Requirement ids this depends on; cycle detection enforces consistency"
+    },
+    "nfr_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Ids of *.nfr.json documents constraining this requirement"
+    },
+    "constraint_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Ids of *.constraint.json documents binding this requirement"
+    },
+    "api": {
+      "type": "object",
+      "description": "API surface this requirement specifies"
+    },
+    "errors": {
+      "type": "object",
+      "description": "Error behavior this requirement specifies"
+    },
+    "ui": {
+      "type": "object",
+      "description": "UI behavior; references veneer renderings where applicable"
+    },
+    "verification": {
+      "type": "object",
+      "description": "How this requirement is verified. The acceptance array is the AC source the verify gate (#520) reads when this requirement is bound to a card (#528); each entry is one checkable criterion. tests lists pinning test names or file:line references once implementation exists.",
+      "properties": {
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "criteria": {
+          "type": "array",
+          "description": "Each acceptance criterion with a stable id and its evidence kind. scenario: proven by one tagged Gherkin scenario; event: proven by something that really happens, named with who records it, never simulated; research: unknown until a toy runs, held until it does. artifact: a change to a file's text (README, CHANGELOG, a spec document), checked mechanically at the PR head.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "text"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "string",
+                "enum": [
+                  "scenario",
+                  "event",
+                  "research",
+                  "artifact"
+                ]
+              },
+              "event": {
+                "type": "object",
+                "properties": {
+                  "event": {
+                    "type": "string"
+                  },
+                  "recorded_by": {
+                    "type": "string"
+                  }
+                }
+              },
+              "research": {
+                "type": "string",
+                "description": "The RESEARCH document id that holds this criterion."
+              },
+              "artifact": {
+                "type": "object",
+                "description": "For an artifact criterion: the file, and the text it must contain or must no longer contain; verify checks it at the PR head.",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  },
+                  "contains": {
+                    "type": "string"
+                  },
+                  "absent": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "scenarios": {
+          "type": "array",
+          "description": "One Gherkin scenario per scenario-kind criterion, at the observable level, tagged @criterion-<id>. The .feature files are generated from these and never hand-edited.",
+          "items": {
+            "type": "object",
+            "required": [
+              "criterion_id",
+              "gherkin"
+            ],
+            "properties": {
+              "criterion_id": {
+                "type": "string"
+              },
+              "gherkin": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "required": [
+        "acceptance"
+      ]
+    }
+  },
+  "required": [
+    "meta",
+    "title",
+    "description",
+    "traces_to"
+  ]
+}

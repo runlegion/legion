@@ -1,0 +1,54 @@
+---
+name: discover
+description: |
+  Conduct Discover, the first diamond, for a major or minor version: hold the intent to the why with
+  every concerned party (/legion:intent), run the service-design workshop when cornerstone is
+  installed (/workshop), state the UI/UX goals, and close by writing the first design brief, which
+  starts prototyping and is what Design is judged against. Load it yourself when a team starts a new major or minor version, or says what a
+  service is, who it is for, or what happens to them today; the operator can also invoke
+  /legion:discover <surface>. A patch needs no Discover.
+version: 0.1.0
+user-invocable: true
+allowed-tools: Bash, Read, Write, Agent, Skill
+---
+
+# /legion:discover
+
+Discover is where the team understands the problem before anyone designs an answer. Your goal is an intent every concerned party accepts; when people will meet the service, UI/UX goals that say what the experience has to achieve; and, to close, the first design brief, drawn from all of it. Then the work moves to Design, which starts from that brief. You conduct; the skills and agents do the work, each from its own rules.
+
+## It is a discovery workshop, streamlined
+
+Teams run discovery the same way everywhere. The right people are in the room, not everyone. Each person writes their own sticky notes, silently and separately, so the first voice does not anchor the rest: what the problem is, who has it, what happens today, what they know and what they are guessing. The notes go on a wall, often a Miro or FigJam board. The facilitator clusters them, the room argues them down to the problem worth solving, and someone writes it up.
+
+Legion runs the same workshop with fewer moving parts, and its room holds agents and people alike: the operator, the repo agent, and any other person or agent the service concerns are all parties, each writing their own notes and each accepting the intent.
+
+- **The board is a legion document.** Each concerned party's notes go on it verbatim and unlabeled, one thought per line, gathered separately so no party anchors another.
+- **not-hotdog is the facilitator.** It sorts every note into why and not-why, clusters what belongs together, parks the hows for later, and asks about what the wall is missing.
+- **The intent is what the wall produces**: the problem worth solving, for whom, what happens to them today, and how they meet it.
+- **Every party accepting it is the room agreeing**, agent or person. Nobody leaves until it reads true to each of them.
+
+Keep the workshop's discipline: the right parties, agents and people, not a committee; raw notes, not a polished summary written early; and the problem before any answer.
+
+## Before you start
+
+- Read the process reference (`references/process.md` in the installed plugin).
+- Find the version this work belongs to. A major or minor version gets its own intent; a patch needs none, so say so and stop. A version that is already built has a closed intent: new capability opens the next version's intent.
+
+## The steps
+
+1. **The intent.** Run `/legion:intent <surface>`. It gathers every concerned party's words, has not-hotdog hold them to the why, reads the intent back, and lands it when every party accepts it. Discover does not move on until the intent is accepted and its open questions are empty.
+2. **The workshop, when cornerstone is installed.** Run `/workshop` on the accepted intent. It discovers who the service is for and what happens to them today, from stories in their own words, and closes with what needs interface design and the UI/UX goals for each surface. Without cornerstone, free legion has no separate research step: the intent itself carries what exists today, what is broken, and what the team has seen.
+3. **The UI/UX goals.** When people will see or touch the service (the intent's `interface.users` includes humans), make sure the goals are stated before Design: the workshop's close carries them; without the workshop, ask the team for them in their words, through `/legion:intent`, as part of how the service is used. Goals say what the experience must achieve (the feeling at its moment of truth, what must be understood without being told, what must never surprise), never screens or components. When only agents use the service, there are no UI/UX goals; the agent's experience is its help text, output and errors, and Design shapes those.
+
+4. **Close: the first design brief.** Closing Discover writes the first design brief: the direction prototyping starts from and the benchmark the form, the prototypes and the spec are judged against. (The second design brief comes later, drawn from the prototypes by brief-writer.) Write it yourself from what Discover produced and nothing else: the accepted intent, the workshop's close when cornerstone ran, and the UI/UX goals. Land it as a `design-brief` document (the schema ships in the plugin) with its `meta.intent` set to the intent id and `meta.status` `draft`: write it to a file in a fresh directory (`mktemp -d`) and run `legion document create --doc-type design-brief --owner <owner> --surface <surface> --from <file>`, or `legion document revise <id> --from <file>` to change it. Both validate it against the schema before anything is written. Its parts are the overview and scope, the problem, the objectives in priority order with how each is measured, the audiences in priority order, the context and constraints, the UI/UX goals, and the deliverables. Every statement names the intent field, workshop document or goal it comes from.
+   - What those documents do not answer -- scope for this version, a priority, how an objective is measured -- is an open question for the operator, never a guess. Bring the open questions to the operator before you land the brief, and record the answers verbatim, so no required part is ever written as a placeholder. Only a question that changes no required part may stay in `open` when the brief lands.
+   - Read it back to the operator and the repo agent. When both accept it, set `meta.status` to `accepted` and list them in `meta.accepted_by`.
+   - An intent whose Discover closed before this step existed gets its brief by running this step alone.
+
+## Optional reviews
+
+Any party can ask to review between steps: after the intent lands, after the workshop's close, after the UI/UX goals, or on the first design brief. When asked, stop there, show that step's output, and go on only when the reviewer says so. When legion's window exists, reviews happen there.
+
+## Hand off
+
+Tell the team the intent id, the accepted design brief's id, the UI/UX goals (or that the service is agent-only), and that the next step is `/legion:design <intent id>`. Discover does not hand off without an accepted design brief.
