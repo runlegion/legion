@@ -1,0 +1,271 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "x-doc-type": "research",
+  "title": "Research",
+  "description": "Research synthesis document (doc_type=research). Captures a single verified finding, its provenance, the claims behind it with verification status (including the doc's own self-corrections), and what to do next. Spine is invariant and board-queryable; body is free for the instance-specific argument. Sibling of the service-design definition-layer schemas (legion #526); shape validated against real instances in vault-2026 (first: legion doc 019ec353).",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "review",
+            "done"
+          ]
+        },
+        "date": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "track": {
+          "type": "string",
+          "description": "Research track this belongs to (e.g. understanding track / discover-v3)"
+        }
+      },
+      "required": [
+        "title",
+        "status",
+        "date",
+        "author"
+      ]
+    },
+    "finding": {
+      "type": "string",
+      "description": "The one-sentence conclusion. Every research doc has exactly one. Spine, not body -- BOARD answers 'what did each doc conclude' from this field alone. eavesdrop's was 'the_bet'."
+    },
+    "premise": {
+      "type": "string",
+      "description": "The question or problem state the research addresses."
+    },
+    "provenance": {
+      "type": "object",
+      "description": "How this document was made. Leads the doc; honesty about method is load-bearing.",
+      "properties": {
+        "source_workflow": {
+          "type": "string",
+          "description": "Run id + scale (agents, tokens, dimensions scanned, verify ratio)"
+        },
+        "method": {
+          "type": "string"
+        },
+        "verification": {
+          "type": "object",
+          "properties": {
+            "claims_held": {
+              "type": "integer"
+            },
+            "refuted": {
+              "type": "integer"
+            },
+            "unverifiable": {
+              "type": "integer"
+            }
+          }
+        },
+        "tool_limits": {
+          "type": "string",
+          "description": "What the run could not do (e.g. Bash/grep denied; reconstructed from structured result)"
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "description": "The claims behind the finding -- INCLUDING the doc's own refuted/self-corrected claims, not only survivors. A research doc that lists only what held launders its honesty into prose.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "unverified",
+              "refuted"
+            ]
+          },
+          "is_self_correction": {
+            "type": "boolean",
+            "description": "True when this claim refutes or corrects an earlier claim in the same research line (e.g. a completeness critic)"
+          },
+          "evidence": {
+            "type": "object",
+            "description": "Structured evidence link, house-style. Corpus chunk, file:line, or workflow ref.",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "locator": {
+                "type": "string",
+                "description": "file:line or doc#path for non-URL evidence"
+              },
+              "score": {
+                "type": "number"
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "claim",
+          "status"
+        ]
+      }
+    },
+    "novelty": {
+      "type": "object",
+      "description": "Honest novelty -- what was invented vs assembled.",
+      "properties": {
+        "genuinely_invented": {
+          "type": "string"
+        },
+        "recombination_base": {
+          "type": "string"
+        }
+      }
+    },
+    "caveats": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Known failure modes, kill-conditions, mandatory ablations."
+    },
+    "next_step": {
+      "type": "object",
+      "description": "Decision-tree handoff: what the next agent should DO.",
+      "properties": {
+        "build_gate": {
+          "type": "string",
+          "description": "What must be true before production code (e.g. do-not-build-yet + the pretest that gates it)"
+        },
+        "empirical_pretest": {
+          "type": "string"
+        },
+        "if_no": {
+          "type": "string"
+        },
+        "if_yes": {
+          "type": "string"
+        }
+      }
+    },
+    "cross_repo": {
+      "type": "array",
+      "description": "Board-actionable dependencies on other repos. Distinct from semantic links[]: these are time-sensitive grafts the BOARD tracks.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "fact": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "time_sensitive": {
+            "type": "boolean"
+          },
+          "deadline": {
+            "type": "string",
+            "description": "Calendar date when applicable"
+          },
+          "blocking_issues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Issue-state conditions, e.g. 'before #63/#64 land' -- the real deadline is often an issue state, not a calendar date"
+          }
+        },
+        "required": [
+          "repo",
+          "action"
+        ]
+      }
+    },
+    "links": {
+      "type": "array",
+      "description": "Cross-artifact graph edges, shared house-style link layer. Use to trace research FORWARD into the personas/blueprints/requirements it informs.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "relationship": {
+            "type": "string",
+            "enum": [
+              "validates",
+              "evidences",
+              "validated_by",
+              "contradicts",
+              "implements",
+              "derived_from",
+              "informs",
+              "related_to"
+            ]
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "relationship"
+        ]
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "long_form_md": {
+          "type": "string"
+        },
+        "superseded_reflections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "related_docs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "body": {
+      "type": "object",
+      "description": "Instance-specific argument: theses, architecture, proposals. Free shape.",
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "meta",
+    "finding",
+    "premise",
+    "provenance",
+    "claims"
+  ]
+}

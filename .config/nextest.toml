@@ -1,0 +1,7 @@
+# The fresh-store concurrency tests race SQLite's first open on Windows often
+# enough to eject merges from the queue ("database is locked"). Retry them on
+# Windows only until #1426 fixes the race, then remove this override.
+[[profile.default.overrides]]
+filter = 'test(/concurrent_.*fresh_store/)'
+platform = 'cfg(windows)'
+retries = 3

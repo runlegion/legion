@@ -1,0 +1,185 @@
+{
+  "meta": {
+    "title": "Developer Discovers Rafters",
+    "status": "done",
+    "date": "2026-03-20",
+    "author": "vault",
+    "persona": "maya",
+    "trigger": "Maya's AI generates garbage UI for the third time this week",
+    "scope": "Frustration to conviction",
+    "channels": ["google", "social", "rafters.studio", "terminal", "IDE"]
+  },
+  "steps": [
+    {
+      "number": 1,
+      "title": "The Frustration",
+      "emotional_score": -2,
+      "emotional_label": "Frustrated",
+      "layers": {
+        "evidence": "The generated code in her IDE. A screen that feels cluttered but she can't articulate why.",
+        "customer_actions": "Stares at the screen. Tries rearranging components. Asks the AI 'make this look better.' The AI reshuffles the same components. Nothing improves.",
+        "frontstage": "Nothing from Rafters. Maya does not know we exist.",
+        "backstage": "",
+        "support": ""
+      },
+      "pain_points": [
+        "The AI has no design judgment. It rearranges without reasoning.",
+        "Maya's company has a design system wiki but pasting it into context is unreliable.",
+        "The design team is backlogged. She won't get a review for 3 days."
+      ],
+      "metrics": [],
+      "evidence_links": []
+    },
+    {
+      "number": 2,
+      "title": "The Search",
+      "emotional_score": -1,
+      "emotional_label": "Searching",
+      "layers": {
+        "evidence": "Google results, Twitter/Bluesky post, Brad Frost article, Slack message, Hacker News thread, conference talk recording",
+        "customer_actions": "Searches 'AI design system,' 'MCP design tools,' 'cognitive load components,' or 'make AI UI better.' Or clicks a link someone shared.",
+        "frontstage": "rafters.studio appears in results. The page title and meta description must answer 'what is this' in 5 seconds.",
+        "backstage": "SEO. Social presence. Brad Frost amplification. Community word-of-mouth. Conference presence.",
+        "support": "Search engine indexing. Social media algorithms. Community channels."
+      },
+      "pain_points": [
+        "The search space is noisy. 'AI design system' returns Figma AI, Galileo, v0, Uizard.",
+        "If the meta description says 'design intelligence protocol' without context, she won't click.",
+        "If she arrives from Brad Frost's blog, she's primed. Cold search, she's skeptical."
+      ],
+      "metrics": [
+        "Search ranking for target queries",
+        "Click-through rate from search results",
+        "Referral sources (social, blog, conference, direct)"
+      ],
+      "evidence_links": []
+    },
+    {
+      "number": 3,
+      "title": "The Landing Page",
+      "emotional_score": 0,
+      "emotional_label": "Interested",
+      "layers": {
+        "evidence": "rafters.studio landing page. The headline, the comparison table, the live tools.",
+        "customer_actions": "Reads the headline. Scans the page. Either clicks a tool or bounces.",
+        "frontstage": "'Your AI doesn't have taste.' Problem statement she recognizes. Comparison table. Get started with two commands. Open source callout.",
+        "backstage": "Astro SSR on Cloudflare. Rafters components styling the page. Color intelligence API powering live tools.",
+        "support": "Cloudflare CDN. Edge caching. Analytics Engine."
+      },
+      "pain_points": [
+        "If the page looks like every other dev tool marketing site, she bounces.",
+        "If there's no proof on the page (just claims), she bounces.",
+        "If the comparison table oversells, she'll check and lose trust."
+      ],
+      "metrics": [
+        "Bounce rate",
+        "Time on page",
+        "Scroll depth",
+        "Click-through to live tools"
+      ],
+      "evidence_links": []
+    },
+    {
+      "number": 4,
+      "title": "The Live Tool",
+      "emotional_score": 1,
+      "emotional_label": "Surprised",
+      "layers": {
+        "evidence": "Interactive tool on rafters.studio. Real data, real intelligence, real response.",
+        "customer_actions": "Color viewer: picks a color, sees name, emotional impact, cultural context, harmonies, accessibility. Budget calculator: selects components, sees cognitive load tally, gets told 'over budget' with suggestions.",
+        "frontstage": "The tool responds in under 500ms. Intelligence data is specific, not generic.",
+        "backstage": "buildColorValue() for local math. Color API with sync=true for intelligence. Client-side scoring for budget.",
+        "support": "Cloudflare Workers (color API). Vectorize (embedding cache). Workers AI (intelligence generation)."
+      },
+      "pain_points": [
+        "Color API is slow or returns generic intelligence.",
+        "Budget calculator scores feel arbitrary.",
+        "The tool looks like every other color picker."
+      ],
+      "metrics": [
+        "Tool interaction count",
+        "Colors explored per session",
+        "Budget calculations performed",
+        "Click-through to Get Started after using a tool"
+      ],
+      "evidence_links": []
+    },
+    {
+      "number": 5,
+      "title": "The Install",
+      "emotional_score": 1,
+      "emotional_label": "Cautiously optimistic",
+      "layers": {
+        "evidence": "Terminal output. pnpx rafters init progress messages. .rafters/ directory created. 240+ tokens generated.",
+        "customer_actions": "Runs pnpx rafters init. Watches output. Opens .rafters/ directory.",
+        "frontstage": "CLI detects framework. Generates tokens. Creates .rafters/ with token files. Prints summary with next step.",
+        "backstage": "Framework detection from package.json. Token generation from math-utils. Color API call. DTCG export.",
+        "support": "npm registry. Node.js runtime. Filesystem writes. Color API."
+      },
+      "pain_points": [
+        "pnpx rafters init fails. Node version, network, pnpm vs npm confusion.",
+        "Output is too verbose or too quiet.",
+        "Generated tokens are grayscale defaults. Must set expectations."
+      ],
+      "metrics": [
+        "Install success rate",
+        "Install time (p50, p95)",
+        "Immediate next action (mcp, studio, or abandon)",
+        "Error rate by type"
+      ],
+      "evidence_links": []
+    },
+    {
+      "number": 6,
+      "title": "The First MCP Query",
+      "emotional_score": 2,
+      "emotional_label": "Conviction",
+      "layers": {
+        "evidence": "MCP server running. AI agent queries rafters_component or rafters_cognitive_budget. Response contains intelligence no other tool provides.",
+        "customer_actions": "Runs pnpx rafters mcp. Returns to IDE. Asks AI to build a component. AI queries MCP automatically. Maya sees intelligence in the AI's output.",
+        "frontstage": "The AI's output changes. Instead of generic Button, it generates with correct variant, references cognitive load score, notes attention economics rules, flags trust concerns.",
+        "backstage": "MCP server reads component intelligence from JSDoc metadata. Resolves token dependencies. Computes cognitive budget.",
+        "support": "MCP protocol (stdio transport). Node.js MCP server. Component registry. Token dependency graph."
+      },
+      "pain_points": [
+        "MCP server doesn't start. Most critical failure point.",
+        "The AI doesn't query MCP automatically. Manual config needed.",
+        "MCP response is shallow. Must contain scores, rules, patterns.",
+        "The AI ignores the MCP response."
+      ],
+      "metrics": [
+        "MCP server start success rate",
+        "Time from install to first MCP query",
+        "Query types",
+        "Queries per session",
+        "Return visits"
+      ],
+      "evidence_links": []
+    },
+    {
+      "number": 7,
+      "title": "The Share",
+      "emotional_score": 2,
+      "emotional_label": "Evangelism",
+      "layers": {
+        "evidence": "Slack message in #frontend. Screenshot of AI output with cognitive load scores. PR where design review finds zero issues.",
+        "customer_actions": "Posts in team Slack. Shares screenshot. Submits PR where the AI already checked composition budget.",
+        "frontstage": "Nothing from Rafters directly. Maya's experience IS the marketing.",
+        "backstage": "",
+        "support": "Slack, GitHub PR, team communication channels."
+      },
+      "pain_points": [
+        "Maya can't explain it quickly. 'Design intelligence protocol' means nothing to her manager.",
+        "The evidence isn't visual. JSON MCP response doesn't screenshot well.",
+        "The team doesn't care if Maya's PRs aren't noticeably better."
+      ],
+      "metrics": [
+        "Slack/social mentions",
+        "Second install from same team/company",
+        "GitHub star growth rate",
+        "Referral traffic patterns"
+      ],
+      "evidence_links": []
+    }
+  ]
+}

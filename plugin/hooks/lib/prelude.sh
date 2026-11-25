@@ -1,0 +1,307 @@
+#!/bin/bash
+# Shared hook preamble (#614). Every hook used to longhand-copy the
+# stdin-read / jq-extract / repo-resolve / coverage-gate block, and the
+# copies had diverged (9 hooks honored LEGION_REPO, 7 did not). This file
+# decides those questions ONCE.
+#
+# Usage from a hook script:
+#
+#   # shellcheck source=lib/prelude.sh
+#   source "${CLAUDE_PLUGIN_ROOT:-}/hooks/lib/prelude.sh" 2>/dev/null || exit 0
+#
+#   legion_hook_parse || exit 0     # sets INPUT, CWD, TOOL, SESSION_ID, REPO
+#   [ -n "$REPO" ] || exit 0
+#   legion_hook_covered || exit 0   # universal enforcement gate (#353)
+#
+# The `|| exit 0` on the source line keeps hooks fail-open when the plugin
+# root is missing or half-installed: a broken prelude must never block a
+# tool call.
+#
+# Repo identity (the single decision point): the LEGION_REPO env var takes
+# precedence over `legion repo resolve` (#1479), in EVERY hook. An operator setting
+# LEGION_REPO must get the same repo identity from enforcement, lifecycle,
+# and memory hooks alike -- per-hook divergence here meant enforcement
+# could apply to one repo set and memory to another (#614 audit).
+#
+# Binary resolution: ${CLAUDE_PLUGIN_ROOT}/bin/legion first, PATH lookup
+# second. Hook subshells do not inherit the plugin bin dir on PATH -- only
+# the Bash tool does (#204) -- so the plugin-root path must lead; the PATH
+# fallback covers system-wide installs where the plugin copy is absent
+# (the setup-binary.sh pattern). The LEGION_BIN env var overrides both
+# (operator escape + test seam). $LEGION is empty when nothing resolves;
+# callers check [ -x "$LEGION" ] and fail open.
+#
+# Skip/bypass env-var tiers (the closed set, documented once):
+#   LEGION_SKIP_<HOOK>=1 -- disable one hook entirely, silently
+#   LEGION_BYPASS_<X>=1  -- telemetried escape from a block tier
+#   LEGION_NO_<FEATURE>=1 -- disable a feature (sync, daemon), not a hook
+#
+# ---------------------------------------------------------------------------
+# THE BOUNDARY (#860). Read this before you write a hook that denies anything.
+#
+# Claude-layer hooks fire on the AGENT'S TOOL CALL ONLY. They never see child
+# processes. A script, a Makefile, a test suite, a `bash -c` wrapper, or any
+# tool that shells out executes unimpeded. The harness's own permissions.deny
+# has the same reach: it is matched against the command the agent submits, not
+# against what that command goes on to spawn.
+#
+# Verified 2026-08-04, twice. A shell script containing `gh --version` ran with
+# no interception although a direct `gh` call is denied by no-gh.sh; and a test
+# fixture's `git push -u origin main` reached GitHub and rewrote main with no
+# Claude-layer interception at all (incident writeup: reflection 019fce1a).
+#
+# This is REQUIRED by design, not a bug awaiting a patch -- see no-git-push.sh's
+# header. The alternative, a PATH shim over `git`, would recurse, because legion
+# is itself a git consumer. Interception has to happen at the agent's tool call,
+# and the agent's tool call is exactly one process deep.
+#
+# CONSEQUENCE: hooks SHAPE AGENT BEHAVIOUR. They are not an enforcement
+# boundary. Anything that must be TOTAL lives at the git layer (.githooks/*),
+# in the binary (e.g. REFUSED_BRANCHES in src/cli/push.rs), or in remote branch
+# protection. A hook may front such a rule with a better error message; it can
+# never be the rule.
+#
+# COROLLARY: bypass.jsonl cannot record what the hooks never saw, so a
+# script-shaped escape writes no row. Absence of bypass rows is not absence of
+# bypass.
+#
+# Every guard in this directory carries an ADVISORY / MUST-BE-TOTAL verdict, and
+# each MUST-BE-TOTAL row names the layer that actually enforces it (or says that
+# nothing does). New hook that denies something: add its row.
+#   -> plugin/hooks/README.md
+# ---------------------------------------------------------------------------
+
+# Double-source guard.
+if [ -n "${LEGION_PRELUDE_SOURCED:-}" ]; then
+  return 0
+fi
+LEGION_PRELUDE_SOURCED=1
+
+LEGION_HOOK_LOG=/tmp/legion-hook-errors.log
+export LEGION_HOOK_LOG
+
+# legion_resolve_bin -- echo the resolved legion binary path, empty when
+# nothing resolves. LEGION_BIN (resolved through command -v so both bare
+# names and absolute paths work) > plugin-root copy > PATH lookup.
+legion_resolve_bin() {
+  if [ -n "${LEGION_BIN:-}" ]; then
+    command -v "$LEGION_BIN" 2>/dev/null || true
+    return 0
+  fi
+  if [ -x "${CLAUDE_PLUGIN_ROOT:-}/bin/legion" ]; then
+    printf '%s\n' "${CLAUDE_PLUGIN_ROOT:-}/bin/legion"
+    return 0
+  fi
+  command -v legion 2>/dev/null || true
+}
+
+LEGION=$(legion_resolve_bin)
+
+# legion_session_pid -- print the session's pid (the one its session lock
+# names): the long-lived session process, never this short-lived hook. The hook's parent is not
+# always that process. Claude Code runs hooks as `/bin/sh -c "bash .../hooks/
+# <hook>.sh"`; where that shell execs its last command (macOS) $PPID is
+# the session, but where it does not (observed on Linux, #1400) $PPID is a
+# shell wrapper that exits with the hook, leaving a lock watch reads as stale.
+# So when $PPID is an sh/dash/bash whose command line names a hook, step
+# up exactly one level to its parent; otherwise keep $PPID. One level only,
+# so it can never overshoot to a terminal shell or a long-lived host. The
+# match is on the suffix because the wrapper's argv may still carry an
+# unexpanded ${CLAUDE_PLUGIN_ROOT}. Every failed or empty `ps` lookup falls
+# back to $PPID silently: this never fails and prints nothing but the pid.
+legion_session_pid() {
+  local name args parent
+  name=$(ps -o comm= -p "$PPID" 2>/dev/null) || name=""
+  name="${name##*/}"
+  case "${name#-}" in
+    sh | dash | bash) ;;
+    *)
+      printf '%s\n' "$PPID"
+      return 0
+      ;;
+  esac
+  args=$(ps -o args= -p "$PPID" 2>/dev/null) || args=""
+  case "$args" in
+    *hooks/*.sh*) ;;
+    *)
+      printf '%s\n' "$PPID"
+      return 0
+      ;;
+  esac
+  parent=$(ps -o ppid= -p "$PPID" 2>/dev/null) || parent=""
+  parent="${parent//[[:space:]]/}"
+  case "$parent" in
+    '' | *[!0-9]*) printf '%s\n' "$PPID" ;;
+    *) printf '%s\n' "$parent" ;;
+  esac
+  return 0
+}
+
+# legion_legacy_repo CWD -- the pre-#1479 derivation, kept ONLY as the
+# fallback for a binary without `legion repo resolve`: the main checkout's
+# directory name (the parent of `git rev-parse --git-common-dir` when it
+# holds a `.git`, so a worktree names its main checkout and a submodule or
+# bare repo falls back), else CWD's basename.
+legion_legacy_repo() {
+  local cwd="$1" common root
+  common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
+  if [ -n "$common" ]; then
+    case "$common" in
+      /*) ;;
+      *) common="$cwd/$common" ;;
+    esac
+    root=$(dirname "$common")
+    if [ -e "$root/.git" ]; then
+      basename "$root"
+      return 0
+    fi
+  fi
+  basename "$cwd"
+}
+
+# legion_hook_parse -- read the hook event JSON from stdin and extract the
+# common fields into INPUT, CWD, TOOL, SESSION_ID, REPO. Returns 1 on
+# empty stdin so callers can `legion_hook_parse || exit 0`. jq failures
+# leave the fields empty (fail-open).
+legion_hook_parse() {
+  INPUT=$(cat)
+  CWD=""
+  TOOL=""
+  SESSION_ID=""
+  REPO=""
+  if [ -z "$INPUT" ]; then
+    return 1
+  fi
+  CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+  # TOOL is part of the hook-facing API (consumed by sourcing hooks).
+  # shellcheck disable=SC2034
+  TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
+  SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+  if [ -n "${LEGION_REPO:-}" ]; then
+    REPO="$LEGION_REPO"
+  elif [ -n "$CWD" ]; then
+    # Repo identity is registered, never taken from the directory (#1479):
+    # the binary answers from watch.toml -- the registered repo CWD (or its
+    # main checkout, for a worktree) lies in, else the repo this session's
+    # lock names, else the fixed `unregistered`. The shell never reads
+    # watch.toml. Only a binary without the subcommand falls back to the
+    # legacy derivation, so a plugin that updates before its binary does
+    # not silence every hook: an older binary rejects `repo` the way clap
+    # rejects any unknown subcommand, with exit 2, and so does no binary at
+    # all. Any other failure (a malformed watch.toml, say) is not a reason
+    # to guess a name, so it files under `unregistered`.
+    local resolve_rc=2
+    REPO=""
+    if [ -x "$LEGION" ]; then
+      REPO=$("$LEGION" repo resolve --cwd "$CWD" --pid "$(legion_session_pid)" 2>/dev/null)
+      resolve_rc=$?
+    fi
+    if [ "$resolve_rc" -eq 2 ]; then
+      REPO=$(legion_legacy_repo "$CWD")
+    elif [ "$resolve_rc" -ne 0 ] || [ -z "$REPO" ]; then
+      REPO="unregistered"
+    fi
+  fi
+  return 0
+}
+
+# legion_hook_field JQ_PATH -- extract one field from the parsed event,
+# e.g. legion_hook_field '.tool_input.command'. Empty on miss/jq failure.
+legion_hook_field() {
+  echo "$INPUT" | jq -r "${1} // empty" 2>/dev/null
+}
+
+# legion_hash_str STR -- portable md5 of a string (+ trailing newline, to
+# stay byte-compatible with the historical `echo | md5` marker paths).
+# Used for the /tmp marker-file protocol (work/reflected markers, debounce
+# locks, dedup keys); writers and readers MUST hash identically.
+legion_hash_str() {
+  printf '%s\n' "$1" | md5 -q 2>/dev/null \
+    || printf '%s\n' "$1" | md5sum 2>/dev/null | cut -d' ' -f1
+}
+
+# legion_hook_compound COMMAND -- true (0) when COMMAND is composed with
+# something else: a pipe, `&`/`&&`, `;`, a redirect, `$(...)`, a backtick,
+# or an embedded newline. Shared by every hook that can emit a REWRITE
+# (no-gh.sh, no-git-push.sh) so the check cannot drift between them.
+#
+# updatedInput.command replaces the tool's ENTIRE command string, and the
+# tokenizer each of those hooks uses to find its subcommand has no notion
+# of shell composition. Measured against no-git-push.sh before this
+# existed: `git push && echo done` rewrote to `legion push --branch echo`
+# and `git push | tee /tmp/log` rewrote to `... --branch tee` -- the
+# classify loop read the NEXT command's name as a branch argument (#883).
+# A composed command must always refuse the rewrite path, never attempt
+# to translate part of it.
+legion_hook_compound() {
+  # shellcheck disable=SC2016 # case glob patterns, not expansions -- the
+  # literal chars are what we're matching, single/ANSI-C quoting is correct.
+  case "$1" in
+    *'|'* | *'&'* | *';'* | *'>'* | *'<'* | *'$('* | *'`'* | *$'\n'*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# legion_hook_token_present COMMAND WORD -- true (0) when WORD appears
+# anywhere in COMMAND as a whitespace-delimited token, after stripping
+# (a) any leading/trailing run of shell metacharacters glued onto that
+# token with no space (";git", "push;", "&&push" all still match "git"/
+# "push") and (b) the token's directory prefix, so an absolute-path
+# invocation matches the same way a bare command does.
+#
+# Used for compound commands, where the single-command "walk to the next
+# subcommand and classify it" approach these hooks use for a plain
+# invocation cannot safely apply: `updatedInput` replaces the WHOLE
+# command string, so a hook that can rewrite or deny must be able to
+# notice the guarded binary/verb ANYWHERE in a chain, not only as the
+# very first word. Before this existed, `git status && git push` and
+# `echo hi && gh pr merge 123` both silently passed through their guard
+# hooks -- each hook's detection walk looked only at the first token, so
+# a leading unrelated command (or the guarded verb glued to an operator)
+# made the whole command invisible to it (#886).
+#
+# Deliberately coarse: it does not verify the matched token's ROLE in
+# the command (e.g. that "commit" immediately follows a "git" token,
+# rather than sitting inside some unrelated quoted string). A
+# false-positive costs the agent one extra manual step; a false-negative
+# silently skips the audit trail these hooks exist to guarantee, which is
+# the worse failure -- the same reasoning documented on
+# legion_hook_compound above and on every DENY branch in no-git-push.sh.
+legion_hook_token_present() {
+  local command="$1" word="$2" tok stripped
+  local -a toks
+  read -r -a toks <<<"$command"
+  for tok in "${toks[@]}"; do
+    stripped="$tok"
+    # Strip a leading run of glued metacharacters (";git" -> "git").
+    while :; do
+      case "$stripped" in
+        [\;\&\|\<\>\$\`]*) stripped="${stripped:1}" ;;
+        *) break ;;
+      esac
+    done
+    # Strip a trailing run of glued metacharacters ("push;" -> "push").
+    stripped="${stripped%%[\;\&\|\<\>\$\`]*}"
+    if [ "${stripped##*/}" = "$word" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Coverage gate (#353). Sourced here so every hook shares one probe; the
+# declare -F guard tolerates hooks that sourced it themselves.
+if ! declare -F legion_covered >/dev/null 2>&1; then
+  # shellcheck source=../_legion-covered.sh
+  source "${CLAUDE_PLUGIN_ROOT:-}/hooks/_legion-covered.sh"
+fi
+
+# legion_hook_covered -- the universal enforcement gate over the parsed
+# event: exit-0 passthrough territory when the repo is not legion-covered.
+# Hooks opt IN by calling this; repo-resolution-only hooks (markers,
+# task-state mirrors) simply don't call it.
+legion_hook_covered() {
+  legion_covered "$SESSION_ID" "$REPO"
+}
