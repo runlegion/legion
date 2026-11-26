@@ -186,16 +186,37 @@
         },
         "scenarios": {
           "type": "array",
-          "description": "One Gherkin scenario per scenario-kind criterion, at the observable level, tagged @criterion-<id>. The .feature files are generated from these and never hand-edited.",
+          "description": "One Gherkin scenario per behaviour, at the observable level, carrying the ids of every scenario-kind criterion it proves and tagged @criterion-<id> once for each. Every scenario criterion appears in exactly one scenario. The .feature files are generated from these and never hand-edited.",
           "items": {
             "type": "object",
             "required": [
-              "criterion_id",
               "gherkin"
             ],
+            "anyOf": [
+              {
+                "required": [
+                  "criterion_ids"
+                ]
+              },
+              {
+                "required": [
+                  "criterion_id"
+                ]
+              }
+            ],
             "properties": {
+              "criterion_ids": {
+                "type": "array",
+                "description": "The criteria this scenario proves.",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              },
               "criterion_id": {
-                "type": "string"
+                "type": "string",
+                "description": "The older one-criterion form, still read; new scenarios use criterion_ids."
               },
               "gherkin": {
                 "type": "string"

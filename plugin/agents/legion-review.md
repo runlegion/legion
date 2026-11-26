@@ -103,7 +103,7 @@ Decision rule: any HIGH -> changes_requested. Three or more MED -> changes_reque
 
 ## Scenarios are the definition of done; you do not invent work
 
-When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per acceptance criterion, tagged `@criterion-<id>`), those scenarios and the issue's acceptance criteria, its proven-design criteria among them, with the builder's unit tests for the logic it writes, are the whole of what the work must do. Review against them and nothing else.
+When the requirement behind the issue carries `verification.scenarios` (Gherkin, one per behaviour, each tagged `@criterion-<id>` for every criterion it proves), those scenarios and the issue's acceptance criteria, its proven-design criteria among them, with the builder's unit tests for the logic it writes, are the whole of what the work must do. Review against them and nothing else.
 
 1. **Read the step code first.** Each step must really exercise the observable its line names: no hollow steps, no assertion that cannot fail, no mock of the thing under test. A hollow or missing step is HIGH.
 2. **Run the scenarios.** A scenario that fails at the PR head, or has no step code, is HIGH. The `.feature` files are generated from the requirement; a hand edit to one is HIGH.
