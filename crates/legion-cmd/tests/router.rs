@@ -1,8 +1,8 @@
 //! The Bash router over the shipped policy (#1337), one group per
 //! acceptance criterion: proxy insertion at each position, what insertion
 //! leaves alone, the misplacement refusal, the never-run list at every
-//! position, the ask flow for curl and the power switches, and the untouched
-//! default. The policy is compiled in with `include_str!`, so no test here
+//! position, the ask flow for the power switches, curl running as typed, and
+//! the untouched default. The policy is compiled in with `include_str!`, so no test here
 //! opens a file at run time (NFR-CMD-001).
 
 use legion_cmd::{
@@ -221,7 +221,7 @@ fn the_builtin_entries_hold_with_no_policy_file() {
     }
 }
 
-// -- 5 and 6. the ask flow: curl and the power switches ---------------------------
+// -- 5 and 6. the ask flow: the power switches, with curl outside it --------------
 
 fn assert_ask_flow(typed: &str, id: &str) {
     let policy = policy();
@@ -259,9 +259,16 @@ fn assert_ask_flow(typed: &str, id: &str) {
 }
 
 #[test]
-fn curl_gets_the_ask_flow() {
-    assert_ask_flow("curl -s https://example.com", "curl-network");
-    assert_ask_flow("sudo curl x", "curl-network");
+fn curl_runs_as_typed() {
+    for typed in [
+        "curl http://localhost:8080",
+        "curl https://example.com",
+        "sudo curl x",
+    ] {
+        let routed = decide(typed);
+        assert_eq!(routed.decision, Decision::Allow { note: None }, "{typed}");
+        assert_eq!(routed.facts.rewritten, None, "{typed}");
+    }
 }
 
 #[test]
@@ -346,7 +353,7 @@ fn a_prefix_word_runs_one_command_and_its_arguments_are_only_text() {
     ] {
         assert_eq!(denied_by(typed, &policy).as_deref(), Some(id), "{typed}");
     }
-    let asked = decide("sudo -u deploy curl x");
+    let asked = decide("sudo -u deploy gh issue close 5 --force");
     assert!(matches!(asked.decision, Decision::Ask(_)));
 }
 

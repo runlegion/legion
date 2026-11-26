@@ -74,8 +74,7 @@ fn todays_never_run_and_ask_coverage_is_kept() {
         assert!(never_run.contains(&id.to_string()), "never-run lost {id}");
     }
     assert_eq!(builtin_no_go().len(), 7);
-    let ask: Vec<&str> = policy.ask.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(ask, vec!["curl-network"]);
+    assert!(policy.ask.is_empty(), "the shipped ask list is empty");
     let switches: Vec<&str> = policy
         .power_switches
         .iter()

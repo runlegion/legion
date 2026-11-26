@@ -217,13 +217,13 @@ fn a_malformed_payload_denies_with_exit_0() {
 
 #[test]
 fn an_ask_without_a_confirmation_is_refused_with_the_question() {
-    // The shipped policy asks about curl; without a confirmation (#1237)
-    // the adapter refuses and tells the agent how to confirm.
+    // The shipped policy asks about a force close; without a confirmation
+    // (#1237) the adapter refuses and tells the agent how to confirm.
     let dir = tempfile::tempdir().expect("tempdir");
     let out = hook_output(
         dir.path(),
         &shipped_policy_path(),
-        &payload("curl https://example.com"),
+        &payload("legion issue close --repo legion --number 5 --force"),
     );
     assert_eq!(out["permissionDecision"], "deny");
     let reason = out["permissionDecisionReason"].as_str().expect("reason");
@@ -232,9 +232,28 @@ fn an_ask_without_a_confirmation_is_refused_with_the_question() {
         "got: {reason}"
     );
     assert!(
-        reason.contains("legion cmd confirm --reason <why> -- 'curl https://example.com'"),
+        reason.contains(
+            "legion cmd confirm --reason <why> -- 'legion issue close --repo legion --number 5 --force'"
+        ),
         "got: {reason}"
     );
+}
+
+#[test]
+fn curl_is_allowed_by_the_shipped_policy_through_the_real_binary() {
+    // #1473: both commands the issue names answer `allow` in operator mode.
+    let dir = tempfile::tempdir().expect("tempdir");
+    for command in ["curl http://localhost:8080", "curl https://example.com"] {
+        let out = run_with_stdin(
+            legion_cmd(dir.path())
+                .args(["cmd-check", "--", command])
+                .env("LEGION_CMD_POLICY", shipped_policy_path()),
+            b"",
+        );
+        assert!(out.status.success(), "{command}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("decision: allow"), "{command}: {stdout}");
+    }
 }
 
 #[test]
@@ -853,16 +872,16 @@ fn confirm(data_dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 fn a_confirmed_ask_runs_once_through_the_real_binary() {
     // #1237: the agent confirms the asked command with a reason; the next
     // attempt in the same session proceeds, and the one after is asked again.
-    // The shipped curl rule needs the operator, so the confirmed attempt is
+    // The shipped power switch needs the operator, so the confirmed attempt is
     // the harness permission prompt carrying the agent's reason.
     let dir = tempfile::tempdir().expect("tempdir");
     let out = confirm(
         dir.path(),
         &[
             "--reason",
-            "fetching the release notes",
+            "the operator closed it by hand",
             "--",
-            "curl https://example.com",
+            "legion issue close --repo legion --number 5 --force",
         ],
     );
     assert!(
@@ -874,17 +893,17 @@ fn a_confirmed_ask_runs_once_through_the_real_binary() {
     let first = hook_output(
         dir.path(),
         &shipped_policy_path(),
-        &payload("curl  'https://example.com'"),
+        &payload("legion issue close  --repo 'legion' --number 5 --force"),
     );
     assert_eq!(first["permissionDecision"], "ask");
     assert_eq!(
         first["permissionDecisionReason"],
-        "fetching the release notes"
+        "the operator closed it by hand"
     );
     let second = hook_output(
         dir.path(),
         &shipped_policy_path(),
-        &payload("curl https://example.com"),
+        &payload("legion issue close --repo legion --number 5 --force"),
     );
     assert_eq!(second["permissionDecision"], "deny");
 }
@@ -892,13 +911,21 @@ fn a_confirmed_ask_runs_once_through_the_real_binary() {
 #[test]
 fn confirm_refuses_a_missing_reason_and_a_no_go_command() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let missing = confirm(dir.path(), &["--", "curl https://example.com"]);
+    let missing = confirm(
+        dir.path(),
+        &["--", "legion issue close --repo legion --number 5 --force"],
+    );
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("--reason is required"));
 
     let empty = confirm(
         dir.path(),
-        &["--reason", "", "--", "curl https://example.com"],
+        &[
+            "--reason",
+            "",
+            "--",
+            "legion issue close --repo legion --number 5 --force",
+        ],
     );
     assert!(!empty.status.success());
 
@@ -910,7 +937,7 @@ fn confirm_refuses_a_missing_reason_and_a_no_go_command() {
     let out = hook_output(
         dir.path(),
         &shipped_policy_path(),
-        &payload("curl https://example.com"),
+        &payload("legion issue close --repo legion --number 5 --force"),
     );
     assert_eq!(out["permissionDecision"], "deny");
 }
